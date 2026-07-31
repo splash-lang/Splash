@@ -1,0 +1,160 @@
+# L0 constructor catalog — the normative argument contract for
+# docs/ui-profile-l0.md. Derived from the three reference cards in
+# octos-one/docs/l0/, not invented: every constructor and argument here is one
+# they use.
+#
+# TOKENS ARE LEXICALLY MARKED with a leading dot: `.fill`, `.money`, `.center`.
+#
+# This supersedes amendment #9's resolution. That rule said a bare identifier
+# resolved by the argument's declared shape — which fails the moment one
+# argument admits both, and `unit` does: `unit: units` is a path to card state,
+# `unit: .pct` is a token. Marking tokens removes the ambiguity at the lexical
+# level rather than the semantic one, so a prop named `fill` can never collide
+# with `.fill`, and the catalog only has to say which tokens are LEGAL rather
+# than disambiguate what a name means.
+#
+# kinds:
+#   token       one of `tokens`, written with a leading dot
+#   path        a bound path — source, state, prop, copy or loop binder
+#   event       a declared event name (local or received as a prop)
+#   number/text/bool   a literal of that type, or a path of that shape
+#   any         path or literal
+#   record/collection  component props only
+
+# ─── containers ───────────────────────────────────────────────────────────────
+
+[Surface]
+pad = { kind = "token", tokens = ["page", "tight", "none"] }
+
+[Photo]
+src = { kind = "path" }
+pad = { kind = "token", tokens = ["page", "tight", "none"] }
+
+[Panel]
+
+[Card]
+on_tap = { kind = "event" }
+value  = { kind = "any" }
+
+[Col]
+align = { kind = "token", tokens = ["start", "center", "end"] }
+gap   = { kind = "number" }
+
+[Row]
+align  = { kind = "token", tokens = ["start", "center", "end", "baseline"] }
+gap    = { kind = "number" }
+on_tap = { kind = "event" }
+value  = { kind = "any" }
+
+[Grid]
+cols = { kind = "number" }
+
+[Rule]
+
+# ─── text roles ───────────────────────────────────────────────────────────────
+# Seven roles, each carrying weight, size and the complete glyph fallback chain.
+# The chain is why a role is a constructor rather than a `font` argument: a
+# model-authored font_family once dropped CJK coverage and rendered 上海 as tofu.
+
+[TextHero]
+text   = { kind = "text" }
+value  = { kind = "number" }
+unit   = { kind = "unit" }
+format = { kind = "format" }
+on_tap = { kind = "event" }
+
+[TextTitle]
+text  = { kind = "text" }
+width = { kind = "width" }
+
+[TextBody]
+text  = { kind = "text" }
+width = { kind = "width" }
+
+[TextStat]
+value  = { kind = "number" }
+format = { kind = "format" }
+tint   = { kind = "path" }
+
+[TextRow]
+text  = { kind = "text" }
+width = { kind = "width" }
+
+[TextCaption]
+text   = { kind = "text" }
+value  = { kind = "number" }
+glyph  = { kind = "text" }
+suffix = { kind = "text" }
+unit   = { kind = "unit" }
+width  = { kind = "width" }
+
+[TextValue]
+value  = { kind = "number" }
+unit   = { kind = "unit" }
+format = { kind = "format" }
+tint   = { kind = "path" }
+
+[Tile]
+label  = { kind = "text" }
+value  = { kind = "number" }
+unit   = { kind = "unit" }
+format = { kind = "format" }
+
+[Chip]
+text   = { kind = "text" }
+on_tap = { kind = "event" }
+value  = { kind = "any" }
+active = { kind = "bool" }        # a predicate is a bool operand
+
+# ─── drawing widgets ──────────────────────────────────────────────────────────
+# Every argument is a path. These render live data and hold no authored values —
+# the class of bug that put an invented `condition` and invented `wmin`/`wmax`
+# into shipped cards.
+
+[WeatherIcon]
+cond = { kind = "path" }
+size = { kind = "token", tokens = ["hero", "row", "tile"] }
+
+[TempBar]
+lo  = { kind = "path" }
+hi  = { kind = "path" }
+min = { kind = "path" }
+max = { kind = "path" }
+
+[SunArc]
+rise = { kind = "path" }
+set  = { kind = "path" }
+now  = { kind = "path" }
+
+[MoonPhase]
+phase = { kind = "path" }
+illum = { kind = "path" }
+
+[AqiContour]
+field = { kind = "path" }
+index = { kind = "path" }
+band  = { kind = "path" }
+
+[StockPlot]
+points = { kind = "path" }
+min    = { kind = "path" }
+max    = { kind = "path" }
+tint   = { kind = "path" }
+
+# ─── shared token sets ────────────────────────────────────────────────────────
+# Named kinds referenced above, so a token set is defined once rather than
+# repeated at every argument that admits it.
+
+[kinds.unit]
+# Admits a token OR a path: `unit: .pct` is fixed, `unit: units` follows card
+# state. This is the argument that forced tokens to be lexically marked.
+accepts = ["token", "path"]
+tokens  = ["c", "f", "pct", "speed", "pressure", "index", "distance", "money"]
+
+[kinds.format]
+accepts = ["token"]
+tokens  = ["money", "signed_money", "signed_pct", "compact", "ratio", "time", "date"]
+
+[kinds.width]
+accepts = ["token", "number"]
+tokens  = ["fill", "fit", "day", "rank", "temp"]

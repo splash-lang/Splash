@@ -67,9 +67,9 @@ root          = ident ;
 
 transition-block = "{" , transition , { "," , transition } , "}" ;
 transition    = path , ":" , total-form ;
-total-form    = "set" , "(" , ( literal | path | "$value" ) , ")"
+total-form    = "set" , "(" , ( literal | token | path | "$value" ) , ")"
               | "toggle"                              (* boolean state only *)
-              | "cycle" , "(" , literal , { "," , literal } , ")"
+              | "cycle" , "(" , token , { "," , token } , ")"
               | "clear" ;                             (* restore declared initial *)
 
 shape-spec    = "shape" , ":" , shape , [ "," , "initial" , ":" , ( literal | path ) ] ;
@@ -100,21 +100,42 @@ defect in this document, not in the cards.**
 operand is the form `when` already admits, and a loop index is supplied by the iterator. The
 authority property and the absence of arithmetic both survive.
 
-### 2.2 Bare identifiers resolve by argument shape
+### 2.2 Tokens are lexically marked
 
 `width: rank` and `text: position` are both `ident : ident`, but the first names a layout token
 and the second a bound path. Resolving this by scope — *a path if it names a binding, else a
 token* — would be a trap: declaring a prop named `fill` would silently change what
 `width: fill` meant everywhere in that component.
 
-**The argument's declared shape decides.** Each constructor argument accepts either a token
-from a closed set or a value; a bare identifier is read as whichever that argument admits, and
-a mismatch is a validation error rather than a silent reinterpretation. `width:` takes a
-layout token, `text:` takes a path or string literal.
+**Tokens carry a leading dot.** `width: .fill`, `format: .money`, `align: .center`. A bare
+identifier is always a path.
 
-This surfaced only once components existed, because a component's props are the first bindings
-whose names the card author chooses freely. Both reference cards had to rename a prop —
-`day` → `item`, `rank` → `position` — before the ambiguity was even visible.
+```ebnf
+operand       = path | literal | token | predicate ;
+token         = "." , ident ;
+```
+
+An earlier draft resolved this by argument shape instead — *each argument accepts either a
+token set or a value, so the argument decides what a bare name means.* **That rule is
+withdrawn**, because it fails on any argument admitting both, and one does: `unit: units`
+follows card state while `unit: .pct` is fixed. Marking tokens removes the ambiguity
+lexically, so the catalog only has to say which tokens are **legal** rather than disambiguate
+what a name **means**.
+
+The ambiguity surfaced only once components existed, because a component's props are the first
+bindings whose names the card author chooses freely — both reference cards had to rename a
+prop, `day` → `item` and `rank` → `position`, before it was visible at all. The `unit` case
+surfaced one step later still, while cataloguing arguments. Each pass found what the previous
+one could not have.
+
+**Enum members are tokens too.** A `shape: enum[c, f]` declaration *defines* the set with bare
+names; every use is dotted — `cycle(.c, .f)`, `initial: .m1`, `range == .d1`. Same rule as any
+other token: a bare identifier is always a path, so an enum member can never be shadowed by a
+binding of the same name.
+
+The normative argument contract is [`ui-l0-constructors.toml`](ui-l0-constructors.toml):
+which constructors exist, which arguments each admits, and which tokens are legal per
+argument.
 
 **#8 was refused.** The news card wanted `stories.rest` to skip the lead story. Granting a
 derived sub-collection would be the thin end of computation — `rest` invites `filter`, which
