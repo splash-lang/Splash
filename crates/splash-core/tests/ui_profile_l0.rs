@@ -934,3 +934,61 @@ fn a_time_format_renders_as_a_clock() {
         "sunrise 5.1 should render 5:06:\n{dsl}"
     );
 }
+
+// ──────────────────────────────────────────────────────────── catalog agreement ──
+
+/// The module doc claims a test asserts the Rust catalog and the TOML spec
+/// agree. It said so for two commits before this test existed — a documented
+/// check that was never written is worse than no check, because a reader stops
+/// looking.
+#[test]
+fn the_rust_catalog_matches_the_toml_spec() {
+    const TOML: &str = include_str!("../../../docs/ui-l0-constructors.toml");
+
+    // Constructor headers are `[Name]`; `[kinds.x]` are shared token sets.
+    let documented: Vec<&str> = TOML
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix('['))
+        .filter_map(|l| l.strip_suffix(']'))
+        .filter(|n| !n.contains('.'))
+        .collect();
+
+    let implemented: Vec<&str> = catalog::CONSTRUCTORS.iter().map(|(n, _)| *n).collect();
+
+    for name in &documented {
+        assert!(
+            implemented.contains(name),
+            "{name:?} is in the TOML spec but not in the Rust catalog"
+        );
+    }
+    for name in &implemented {
+        assert!(
+            documented.contains(name),
+            "{name:?} is in the Rust catalog but not in the TOML spec"
+        );
+    }
+
+    // Token sets must agree too, or a card legal by the spec is rejected by the
+    // implementation.
+    for (set_name, tokens) in [
+        ("unit", catalog::UNIT),
+        ("format", catalog::FORMAT),
+        ("width", catalog::WIDTH),
+    ] {
+        let header = format!("[kinds.{set_name}]");
+        let block = TOML
+            .split(&header)
+            .nth(1)
+            .unwrap_or_else(|| panic!("{header} missing from the TOML"));
+        let line = block
+            .lines()
+            .find(|l| l.trim_start().starts_with("tokens"))
+            .unwrap_or_else(|| panic!("{set_name} has no tokens line"));
+        for token in tokens {
+            assert!(
+                line.contains(&format!("\"{token}\"")),
+                "{set_name}: {token:?} is in the Rust catalog but not the TOML"
+            );
+        }
+    }
+}
