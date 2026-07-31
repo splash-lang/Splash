@@ -992,3 +992,49 @@ fn the_rust_catalog_matches_the_toml_spec() {
         }
     }
 }
+
+// ───────────────────────────────────────────────────────────────── copy locale ──
+
+/// `copy` is authored in the ledger, so it resolves from the CARD rather than
+/// the injected data. Carrying it in both duplicated what the card already said,
+/// and the two drifted — a card gained a `copy` the data blob lacked, and the
+/// eyebrow rendered as an em dash on device.
+#[test]
+fn copy_resolves_from_the_card_not_the_data() {
+    let data = serde_json::json!({
+        "lead": [{"id":"1","title":"T","author":"A","points":1.0,"comments":2.0,"url":"u"}],
+        "feed": [], "article": {}, "selected": "",
+        "env": {"locale": {"lang": "en"}}
+        // note: no "copy" key at all
+    });
+    let report = realize(NEWS, &data, RealizeLimits::default());
+    let dsl = makepad::lower(&report.root.expect("root"));
+    assert!(
+        dsl.contains("Top Stories"),
+        "card-declared copy should resolve:\n{dsl}"
+    );
+    assert!(
+        dsl.contains("HACKER NEWS"),
+        "the eyebrow should resolve too"
+    );
+}
+
+/// The declared language is chosen when the runtime reports one.
+#[test]
+fn copy_selects_the_reported_locale() {
+    let mut data = serde_json::json!({
+        "lead": [{"id":"1","title":"T","author":"A","points":1.0,"comments":2.0,"url":"u"}],
+        "feed": [], "article": {}, "selected": "",
+        "env": {"locale": {"lang": "zh"}}
+    });
+    let dsl = makepad::lower(&realize(NEWS, &data, RealizeLimits::default()).root.unwrap());
+    assert!(dsl.contains("头条"), "zh text should be selected:\n{dsl}");
+
+    // A card shipping zh text must not render an em dash on an en device.
+    data["env"]["locale"]["lang"] = serde_json::Value::String("fr".into());
+    let dsl = makepad::lower(&realize(NEWS, &data, RealizeLimits::default()).root.unwrap());
+    assert!(
+        dsl.contains("Top Stories"),
+        "an unknown locale falls back to en"
+    );
+}

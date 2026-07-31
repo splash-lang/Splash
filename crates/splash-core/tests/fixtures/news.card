@@ -25,7 +25,8 @@ state selected { shape: text, initial: "" }        # "" ⇒ feed, else a story i
 event open_story  { selected: set($value) }
 event back        { selected: clear }
 
-copy masthead { class: vocabulary, en: "Top Stories", zh: "头条" }
+copy masthead { class: vocabulary, en: "Top Stories",  zh: "头条" }
+copy source   { class: vocabulary, en: "HACKER NEWS", zh: "科技新闻" }
 copy latest   { class: vocabulary, en: "LATEST",      zh: "最新" }
 copy lead     { class: vocabulary, en: "LEAD",        zh: "焦点" }
 copy pts      { class: vocabulary, en: "pts",         zh: "分" }
@@ -44,7 +45,7 @@ view stream  Col {
              }
 
 view masthead  Col {
-                 TextCaption(text: copy.masthead)
+                 TextCaption(text: copy.source)
                  TextTitle(text: copy.masthead)
                }
 

@@ -461,7 +461,11 @@ struct Card {
     sources: Vec<String>,
     states: Vec<StateDecl>,
     events: Vec<EventDecl>,
-    copies: Vec<String>,
+    /// `copy` declarations: name -> locale -> text. Authored in the ledger, so
+    /// they resolve from the CARD rather than the injected data. Carrying them
+    /// in the data blob duplicated what the card already said, and the two
+    /// silently drifted.
+    copies: Vec<(String, Vec<(String, String)>)>,
     components: Vec<Component>,
     views: Vec<View>,
 }
@@ -687,9 +691,8 @@ impl<'a> Parser<'a> {
                 "copy" => {
                     self.at += 1;
                     if let Some(n) = self.ident() {
-                        card.copies.push(n);
+                        card.copies.push((n, self.parse_locale_map()));
                     }
-                    self.skip_braced();
                 }
                 "component" => {
                     self.at += 1;
@@ -855,6 +858,36 @@ impl<'a> Parser<'a> {
             shape,
             initial,
         })
+    }
+
+    /// `{ class: vocabulary, en: "…", zh: "…" }` — the text per locale.
+    fn parse_locale_map(&mut self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        if !self.eat_punct("{") {
+            return out;
+        }
+        let mut guard = 0usize;
+        while let Some(t) = self.peek().cloned() {
+            guard += 1;
+            if guard > 64 || t.is_punct("}") {
+                break;
+            }
+            if t.kind == Kind::Ident
+                && self
+                    .tokens
+                    .get(self.at + 1)
+                    .is_some_and(|n| n.is_punct(":"))
+            {
+                if let Some(v) = self.tokens.get(self.at + 2) {
+                    if v.kind == Kind::Str {
+                        out.push((t.text.clone(), v.text.clone()));
+                    }
+                }
+            }
+            self.at += 1;
+        }
+        self.expect_punct("}");
+        out
     }
 
     /// `event name { path: total-form, … }`
@@ -1996,7 +2029,11 @@ fn realize_inner(
             .unwrap_or_else(|| initial_for(&state.shape));
         frames.push((state.path.clone(), value));
     }
-    let mut scope = ValueScope { frames, data };
+    let mut scope = ValueScope {
+        frames,
+        data,
+        copies: &card.copies,
+    };
     let mut out = Vec::new();
     ctx.element(&root.body, &mut scope, "root", &mut out);
 
@@ -2016,12 +2053,36 @@ fn realize_inner(
 struct ValueScope<'a> {
     frames: Vec<(String, crate::JsonValue)>,
     data: &'a crate::JsonValue,
+    copies: &'a [(String, Vec<(String, String)>)],
 }
 
 impl ValueScope<'_> {
     fn lookup(&self, path: &str) -> Option<crate::JsonValue> {
         let mut segments = path.split('.');
         let root = segments.next()?;
+
+        // `copy.<name>` is authored in the ledger, not fetched. Resolve it from
+        // the card's declarations, choosing the language the runtime reported
+        // and falling back to English — a card that ships zh text should not
+        // render an em dash because the device is in en.
+        if root == "copy" {
+            let name = segments.next()?;
+            let entry = self.copies.iter().find(|(n, _)| n == name)?;
+            let lang = self
+                .data
+                .get("env")
+                .and_then(|e| e.get("locale"))
+                .and_then(|l| l.get("lang"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("en");
+            let text = entry
+                .1
+                .iter()
+                .find(|(k, _)| k == lang)
+                .or_else(|| entry.1.iter().find(|(k, _)| k == "en"))
+                .or_else(|| entry.1.iter().find(|(k, _)| k != "class"))?;
+            return Some(crate::JsonValue::String(text.1.clone()));
+        }
 
         let mut current = match self.frames.iter().rev().find(|(n, _)| n == root) {
             Some((_, v)) => v.clone(),
@@ -2482,6 +2543,13 @@ pub mod makepad {
             Some(NodeValue::Text(g)) => g.clone(),
             _ => String::new(),
         };
+        // `suffix` is a declared unit word — "412 pts", not "412". It was in the
+        // catalog and ignored here, so every score and comment count on the news
+        // card rendered as a bare number.
+        let suffix = match arg(node, "suffix") {
+            Some(NodeValue::Text(t)) => format!(" {t}"),
+            _ => String::new(),
+        };
         let format_kind = match arg(node, "format") {
             Some(NodeValue::Token(t)) => Some(t.clone()),
             _ => None,
@@ -2495,7 +2563,7 @@ pub mod makepad {
                     (NodeValue::Text(s), _) => s.clone(),
                     _ => String::new(),
                 };
-                format!("{:?}", format!("{glyph}{body}{unit}"))
+                format!("{:?}", format!("{glyph}{body}{unit}{suffix}"))
             }
             None => text_of(arg(node, "text")),
         }
