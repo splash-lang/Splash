@@ -787,3 +787,150 @@ fn a_schema_change_resets_instance_state() {
         "a schema change resets, it does not migrate"
     );
 }
+
+// ─────────────────────────────────────────────────────── declared-but-missing ──
+
+const SETTER: &str = r#"
+source items sys.list()
+state picked { shape: text, initial: "" }
+event choose { picked: set($value) }
+event home   { picked: clear }
+view root Panel {
+  when picked == "" { for it in items key it.id { Row(on_tap: choose, value: it.id) { TextRow(text: it.name) } } }
+  when picked != "" { Col { TextTitle(text: picked) Row(on_tap: home) { TextCaption(glyph: "‹") } } }
+}
+"#;
+
+/// `set($value)` carries the payload from the element that raised the event.
+/// Without it a list cannot select anything — the interaction stock and news
+/// both depend on.
+#[test]
+fn set_applies_the_event_payload() {
+    let mut store = splash_core::ui_l0::InstanceStore::default();
+    let data = serde_json::json!({ "items": [{"id":"a","name":"A"},{"id":"b","name":"B"}] });
+
+    let before =
+        splash_core::ui_l0::realize_with_state(SETTER, &data, &store, RealizeLimits::default());
+    let root = before.root.unwrap();
+    let mut rows = Vec::new();
+    find(&root, "Row", &mut rows);
+    assert_eq!(rows.len(), 2, "the list should show both items");
+
+    let payload = serde_json::json!("b");
+    let applied =
+        splash_core::ui_l0::dispatch_with(SETTER, &mut store, "root", "choose", Some(&payload));
+    assert!(applied, "choose should apply");
+
+    let after =
+        splash_core::ui_l0::realize_with_state(SETTER, &data, &store, RealizeLimits::default());
+    let root = after.root.unwrap();
+    let mut titles = Vec::new();
+    find(&root, "TextTitle", &mut titles);
+    assert_eq!(
+        titles.len(),
+        1,
+        "selecting should switch to the detail view"
+    );
+    let (_, shown) = titles[0].args.iter().find(|(n, _)| n == "text").unwrap();
+    assert_eq!(
+        *shown,
+        NodeValue::Text("b".into()),
+        "the item that was tapped"
+    );
+}
+
+const SLOTTED: &str = r#"
+component Framed(title: text) {
+  view Col { TextCaption(text: title) slot }
+}
+view root Panel { Framed(title: "Details") { TextRow(text: "inner") Rule() } }
+"#;
+
+/// A component's children are realized where `slot` appears. Dropping them
+/// silently is how a card renders a frame with nothing in it and still looks
+/// deliberate.
+#[test]
+fn slot_realizes_the_children_passed_at_the_call_site() {
+    let report = realize(SLOTTED, &serde_json::json!({}), RealizeLimits::default());
+    assert!(report.diagnostics.is_empty(), "{:#?}", report.diagnostics);
+    let root = report.root.unwrap();
+    let mut rows = Vec::new();
+    find(&root, "TextRow", &mut rows);
+    assert_eq!(
+        rows.len(),
+        1,
+        "the child passed at the call site must appear"
+    );
+    let mut rules = Vec::new();
+    find(&root, "Rule", &mut rules);
+    assert_eq!(rules.len(), 1);
+}
+
+/// Profile §5.7: an instance that disappears loses its state. Without pruning
+/// the store grows for the life of the app and a key that reappears inherits a
+/// stale value.
+#[test]
+fn unmounted_instances_are_pruned() {
+    let mut store = splash_core::ui_l0::InstanceStore::default();
+    let two = serde_json::json!({ "items": [{"id":"a","name":"A"},{"id":"b","name":"B"}] });
+
+    let report =
+        splash_core::ui_l0::realize_with_state(TWO_ROWS, &two, &store, RealizeLimits::default());
+    let root = report.root.unwrap();
+    let mut rows = Vec::new();
+    find(&root, "Row", &mut rows);
+    for row in &rows {
+        splash_core::ui_l0::dispatch(TWO_ROWS, &mut store, &row.key, "flip");
+    }
+    assert_eq!(store.len(), 2, "both rows hold state");
+
+    // `b` goes away.
+    let one = serde_json::json!({ "items": [{"id":"a","name":"A"}] });
+    let report =
+        splash_core::ui_l0::realize_with_state(TWO_ROWS, &one, &store, RealizeLimits::default());
+    store.prune(&report.live_keys);
+    assert_eq!(store.len(), 1, "the departed instance's cell is dropped");
+}
+
+/// Formatting is the runtime's job, not the card's. A card that wrote "$" or
+/// "41.2M" itself would be authoring a fact — and currency, grouping and
+/// compaction are locale-dependent besides.
+#[test]
+fn declared_formats_are_applied_by_the_runtime() {
+    let data = serde_json::json!({
+        "movers": [], "selected": "NVDA", "range": "m1", "env": {"locale":{}},
+        "quote": {"name":"NVIDIA","last":184.2,"change":3.1,"pct":1.7,"open":181.0,
+                  "high":185.6,"low":180.2,"volume":41200000.0,
+                  "mktcap":4520000000000.0,"pe":58.3},
+        "series": {"points":[1,2],"min":180.2,"max":185.6},
+        "copy": {"movers":"Top Movers","open":"Open","high":"High","low":"Low",
+                 "volume":"Volume","mktcap":"Mkt Cap","pe":"P/E"}
+    });
+    let report = realize(STOCK, &data, RealizeLimits::default());
+    let dsl = makepad::lower(&report.root.expect("root"));
+
+    for (expect, why) in [
+        ("$184.20", "money gains a currency symbol and two places"),
+        ("+1.7%", "a signed percentage keeps its sign"),
+        ("41.2M", "compact scales volume"),
+        ("4.5T", "compact scales market cap"),
+        ("58.3", "a ratio is plain"),
+    ] {
+        assert!(dsl.contains(expect), "{why}: {expect} missing from\n{dsl}");
+    }
+    assert!(
+        !dsl.contains("41200000"),
+        "the raw number should not survive"
+    );
+}
+
+/// A float hour is a time, not a decimal: 18.9 is 18:54.
+#[test]
+fn a_time_format_renders_as_a_clock() {
+    let report = realize(WEATHER, &weather_data(), RealizeLimits::default());
+    let dsl = makepad::lower(&report.root.unwrap());
+    assert!(
+        dsl.contains("5:06"),
+        "sunrise 5.1 should render 5:06:\n{dsl}"
+    );
+}

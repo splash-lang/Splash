@@ -477,6 +477,10 @@ enum Shape {
 struct StateDecl {
     path: String,
     shape: Shape,
+    /// The declared `initial`. Parsed rather than discarded: without it a guard
+    /// on a freshly-mounted state compares against null and takes the wrong
+    /// branch on first render.
+    initial: Option<crate::JsonValue>,
 }
 
 /// An event and the transition batch it applies. Profile §3: an event names
@@ -499,12 +503,26 @@ struct Transition {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Form {
-    Set,
+    Set(SetSource),
     Toggle,
     Cycle,
     Clear,
     /// Anything else — an expression, which L0 has no form for.
     NotTotal(String),
+}
+
+/// What `set(…)` assigns. Each is a value the runtime already holds; none is
+/// computed, so the transition stays total.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SetSource {
+    /// `$value` — the payload from the element that raised the event.
+    Payload,
+    /// A `.token`, e.g. an enum member.
+    Token(String),
+    /// A string literal.
+    Text(String),
+    /// A bound path, resolved against the data the runtime injected.
+    Path(String),
 }
 
 #[derive(Debug)]
@@ -525,7 +543,7 @@ struct View {
     body: Element,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct Element {
     /// Constructor name, a referenced view/component name, or empty for a group.
     name: String,
@@ -543,7 +561,7 @@ struct Element {
     key_path: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Arg {
     name: String,
     value: Operand,
@@ -551,7 +569,7 @@ struct Arg {
     column: usize,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Operand {
     Path(String),
     Token(String),
@@ -781,6 +799,7 @@ impl<'a> Parser<'a> {
     fn parse_state(&mut self) -> Option<StateDecl> {
         let path = self.dotted_name()?;
         let mut shape = Shape::Other;
+        let mut initial = None;
         // `{ shape: enum[a, b], initial: .a }` — capture the shape, skip the rest.
         let start = self.at;
         if self.peek().is_some_and(|t| t.is_punct("{")) {
@@ -791,6 +810,23 @@ impl<'a> Parser<'a> {
                 }
                 if t.is_kw("bool") {
                     shape = Shape::Bool;
+                }
+                // `initial: <literal>` — a token, string or number.
+                if t.is_kw("initial") && self.tokens.get(scan + 1).is_some_and(|n| n.is_punct(":"))
+                {
+                    if let Some(v) = self.tokens.get(scan + 2) {
+                        initial = match v.kind {
+                            Kind::Str => Some(crate::JsonValue::String(v.text.clone())),
+                            Kind::Token => Some(crate::JsonValue::String(
+                                v.text.trim_start_matches('.').to_string(),
+                            )),
+                            Kind::Num => v.text.parse::<f64>().ok().map(crate::JsonValue::from),
+                            Kind::Ident if v.text == "true" || v.text == "false" => {
+                                Some(crate::JsonValue::Bool(v.text == "true"))
+                            }
+                            _ => None,
+                        };
+                    }
                 }
                 if t.is_kw("enum") {
                     let mut members = Vec::new();
@@ -814,7 +850,11 @@ impl<'a> Parser<'a> {
             self.at = start;
             self.skip_braced();
         }
-        Some(StateDecl { path, shape })
+        Some(StateDecl {
+            path,
+            shape,
+            initial,
+        })
     }
 
     /// `event name { path: total-form, … }`
@@ -879,8 +919,40 @@ impl<'a> Parser<'a> {
             }
             "set" => {
                 self.at += 1;
-                self.skip_balanced("(", ")");
-                (Form::Set, Vec::new())
+                let mut source = SetSource::Payload;
+                if self.peek().is_some_and(|t| t.is_punct("(")) {
+                    self.at += 1;
+                    if let Some(inner) = self.peek().cloned() {
+                        match inner.kind {
+                            Kind::Token => {
+                                source = SetSource::Token(
+                                    inner.text.trim_start_matches('.').to_string(),
+                                );
+                                self.at += 1;
+                            }
+                            Kind::Str => {
+                                source = SetSource::Text(inner.text.clone());
+                                self.at += 1;
+                            }
+                            Kind::Punct if inner.text == "$" => {
+                                // `$value` — the payload.
+                                self.at += 1;
+                                let _ = self.ident();
+                            }
+                            Kind::Ident => {
+                                source = self
+                                    .dotted_name()
+                                    .map(SetSource::Path)
+                                    .unwrap_or(SetSource::Payload);
+                            }
+                            _ => {
+                                self.at += 1;
+                            }
+                        }
+                    }
+                    self.expect_punct(")");
+                }
+                (Form::Set(source), Vec::new())
             }
             "cycle" => {
                 self.at += 1;
@@ -1482,6 +1554,7 @@ fn check_event_batch(events: &[EventDecl], states: &[StateDecl], sink: &mut Diag
                         transition.target
                     ),
                 ),
+                Form::Set(_) => {}
                 Form::Cycle => match &state.shape {
                     Shape::Enum(members) => {
                         for member in &transition.tokens {
@@ -1838,6 +1911,11 @@ pub struct RealizeReport {
     pub nodes: usize,
     /// A bound was reached; the tree is partial.
     pub truncated: bool,
+    /// Every component instance this realization produced, plus the card cell.
+    /// Pass to [`InstanceStore::prune`] to forget instances that went away —
+    /// without it the store grows for the life of the app, and a key that
+    /// reappears inherits a stale value (§5.7, unmount).
+    pub live_keys: Vec<String>,
 }
 
 /// Realize a card against resolved data.
@@ -1865,6 +1943,7 @@ fn realize_inner(
             diagnostics: check.diagnostics,
             nodes: 0,
             truncated: false,
+            live_keys: Vec::new(),
         };
     }
 
@@ -1876,6 +1955,7 @@ fn realize_inner(
                 diagnostics: sink.items,
                 nodes: 0,
                 truncated: false,
+                live_keys: Vec::new(),
             }
         }
     };
@@ -1888,6 +1968,7 @@ fn realize_inner(
             diagnostics: sink.items,
             nodes: 0,
             truncated: false,
+            live_keys: Vec::new(),
         };
     };
 
@@ -1898,21 +1979,36 @@ fn realize_inner(
         truncated: false,
         sink: &mut sink,
         store,
+        live: vec![CARD_STATE_KEY.to_string()],
+        slots: Vec::new(),
     };
-    let mut scope = ValueScope {
-        frames: vec![],
-        data,
-    };
+    // Card-scope state resolves from the store first, then the injected data,
+    // then its declared initial. Without this, an event that wrote card state
+    // would apply and be invisible at the next realization — and a guard on a
+    // state with no value at all would take the wrong branch on first render.
+    let mut frames: Vec<(String, crate::JsonValue)> = Vec::new();
+    for state in &card.states {
+        let value = store
+            .and_then(|s| s.get(CARD_STATE_KEY, &state.path))
+            .cloned()
+            .or_else(|| data.get(&state.path).cloned())
+            .or_else(|| state.initial.clone())
+            .unwrap_or_else(|| initial_for(&state.shape));
+        frames.push((state.path.clone(), value));
+    }
+    let mut scope = ValueScope { frames, data };
     let mut out = Vec::new();
     ctx.element(&root.body, &mut scope, "root", &mut out);
 
     let nodes = ctx.nodes;
     let truncated = ctx.truncated;
+    let live_keys = std::mem::take(&mut ctx.live);
     RealizeReport {
         root: out.into_iter().next(),
         diagnostics: sink.items,
         nodes,
         truncated,
+        live_keys,
     }
 }
 
@@ -1950,6 +2046,12 @@ struct Realizer<'a> {
     /// Where component-local values live. Absent means every instance sees its
     /// declared initial.
     store: Option<&'a InstanceStore>,
+    /// Instance keys produced, for pruning.
+    live: Vec<String>,
+    /// Children passed at a component call site, realized where `slot` appears.
+    /// A stack, so a component instantiated inside another's slot still sees its
+    /// own children.
+    slots: Vec<Vec<Element>>,
 }
 
 impl Realizer<'_> {
@@ -1967,7 +2069,18 @@ impl Realizer<'_> {
 
         match element.name.as_str() {
             "" => {}
-            "slot" => {}
+            "slot" => {
+                // Children are realized in the CALLER's scope, not the
+                // component's — a child expression sees the call site's
+                // bindings (§5.5). Taking the frame off the stack while
+                // realizing prevents a component's own slot from re-entering.
+                if let Some(children) = self.slots.pop() {
+                    for (i, child) in children.iter().enumerate() {
+                        self.element(child, scope, &format!("{key}/s{i}"), out);
+                    }
+                    self.slots.push(children);
+                }
+            }
             "for" => self.iteration(element, scope, key, out),
             "when" => {
                 if self.guard_holds(element, scope) {
@@ -2052,6 +2165,8 @@ impl Realizer<'_> {
             }
         }
         let instance_key = format!("{key}/{}", component.name);
+        self.live.push(instance_key.clone());
+        self.slots.push(call.children.clone());
 
         // Local state resolves PER INSTANCE: from the store when it holds a
         // value for this key, otherwise from the declared initial. Two instances
@@ -2066,12 +2181,14 @@ impl Realizer<'_> {
                 .cloned();
             scope.frames.push((
                 state.path.clone(),
-                live.unwrap_or_else(|| initial_for(&state.shape)),
+                live.or_else(|| state.initial.clone())
+                    .unwrap_or_else(|| initial_for(&state.shape)),
             ));
             bound += 1;
         }
 
         self.element(&component.body, scope, &instance_key, out);
+        self.slots.pop();
         for _ in 0..bound {
             scope.frames.pop();
         }
@@ -2266,6 +2383,8 @@ pub mod makepad {
     const TEXT: &str = "#ffffff";
     const SOFT: &str = "#ffffffe6";
     const DIM: &str = "#ffffff99";
+    const UP: &str = "#32d74b";
+    const DOWN: &str = "#ff453a";
     const PAGE_PAD: &str = "Inset{left: 20 top: 54 right: 20 bottom: 24}";
 
     pub fn lower(root: &UiNode) -> String {
@@ -2310,6 +2429,45 @@ pub mod makepad {
         }
     }
 
+    /// Apply a declared `format`. This is the runtime's job, not the card's: a
+    /// card that wrote "$" or "41.2M" itself would be authoring a fact, and
+    /// currency, grouping and compaction are all locale-dependent besides.
+    fn formatted(kind: &str, n: f64) -> String {
+        let sign = if n > 0.0 { "+" } else { "" };
+        match kind {
+            "money" => format!("${:.2}", n),
+            "signed_money" => format!("{sign}${:.2}", n),
+            "signed_pct" => format!("{sign}{:.1}%", n),
+            "ratio" => format!("{:.1}", n),
+            "compact" => {
+                let a = n.abs();
+                let (v, suffix) = if a >= 1e12 {
+                    (n / 1e12, "T")
+                } else if a >= 1e9 {
+                    (n / 1e9, "B")
+                } else if a >= 1e6 {
+                    (n / 1e6, "M")
+                } else if a >= 1e3 {
+                    (n / 1e3, "K")
+                } else {
+                    (n, "")
+                };
+                if suffix.is_empty() {
+                    trim_num(v)
+                } else {
+                    format!("{:.1}{suffix}", v)
+                }
+            }
+            // A float hour — 18.9 is 18:54, not "18.9".
+            "time" => {
+                let h = n.floor().max(0.0) as i64;
+                let m = ((n - n.floor()) * 60.0).round() as i64;
+                format!("{h}:{m:02}")
+            }
+            _ => trim_num(n),
+        }
+    }
+
     /// A value plus its unit suffix, which is a presentation concern the runtime
     /// owns — the card never wrote "°" next to a number.
     fn valued(node: &UiNode) -> String {
@@ -2324,12 +2482,17 @@ pub mod makepad {
             Some(NodeValue::Text(g)) => g.clone(),
             _ => String::new(),
         };
+        let format_kind = match arg(node, "format") {
+            Some(NodeValue::Token(t)) => Some(t.clone()),
+            _ => None,
+        };
         match value {
             Some(NodeValue::Missing) => "\"—\"".into(),
             Some(v) => {
-                let body = match v {
-                    NodeValue::Number(n) => trim_num(*n),
-                    NodeValue::Text(s) => s.clone(),
+                let body = match (v, format_kind.as_deref()) {
+                    (NodeValue::Number(n), Some(kind)) => formatted(kind, *n),
+                    (NodeValue::Number(n), None) => trim_num(*n),
+                    (NodeValue::Text(s), _) => s.clone(),
                     _ => String::new(),
                 };
                 format!("{:?}", format!("{glyph}{body}{unit}"))
@@ -2522,19 +2685,51 @@ pub mod makepad {
                 let _ = writeln!(out, "{p}}}");
             }
             role if role.starts_with("Text") => {
-                let colour = match role {
-                    "TextCaption" => DIM,
-                    "TextRow" => SOFT,
-                    _ => TEXT,
+                // `tint` colours by SIGN — the card says "tint by this number",
+                // and which colours mean up and down is the runtime's to decide.
+                let colour = match arg(node, "tint") {
+                    Some(NodeValue::Number(n)) if *n > 0.0 => UP,
+                    Some(NodeValue::Number(n)) if *n < 0.0 => DOWN,
+                    _ => match role {
+                        "TextCaption" => DIM,
+                        "TextRow" => SOFT,
+                        _ => TEXT,
+                    },
+                };
+                // Only constrain the width when the card asked. Forcing
+                // `width: Fill` made a long hero title wrap one character per
+                // line — "Top Movers" became "Top / Mover / s" on device.
+                let width = match arg(node, "width") {
+                    Some(NodeValue::Token(t)) if t == "fill" => " width: Fill",
+                    Some(NodeValue::Token(t)) if t == "fit" => " width: Fit",
+                    Some(NodeValue::Token(_)) => " width: Fit",
+                    _ => "",
                 };
                 let body = if arg(node, "value").is_some() || arg(node, "glyph").is_some() {
                     valued(node)
                 } else {
                     text_of(arg(node, "text"))
                 };
+                // A hero is sized for the ONE dominant value. "18°" fits at 62;
+                // "$184.20" clipped off the right edge on device. Scaling to fit
+                // is the runtime's call — the card says "this is the hero", not
+                // "this is 62 points".
+                let size = if role == "TextHero" {
+                    let glyphs = body.trim_matches('"').chars().count();
+                    let pt = match glyphs {
+                        0..=4 => 62,
+                        5..=6 => 50,
+                        7..=8 => 40,
+                        9..=12 => 32,
+                        _ => 24,
+                    };
+                    format!(" draw_text.text_style.font_size: {pt}")
+                } else {
+                    String::new()
+                };
                 let _ = writeln!(
                     out,
-                    "{p}{role}{{ width: Fill text: {body} draw_text.color: {colour} }}"
+                    "{p}{role}{{{width} text: {body} draw_text.color: {colour}{size} }}"
                 );
             }
             other => {
@@ -2553,6 +2748,10 @@ pub mod makepad {
 // ────────────────────────────────────────────────────────────── instance state ──
 
 use std::collections::BTreeMap;
+
+/// The key card-scope state lives under. Card state has no instance, so it needs
+/// a fixed cell rather than one derived from a position in the tree.
+pub const CARD_STATE_KEY: &str = "@card";
 
 /// Per-instance local state — the runtime's half of the immutable/mutable split.
 ///
@@ -2667,6 +2866,21 @@ pub fn realize_with_state(
 /// component's *declarations* — a card cannot construct one, because it has no
 /// expression form to build a name with.
 pub fn dispatch(source: &str, store: &mut InstanceStore, instance_key: &str, event: &str) -> bool {
+    dispatch_with(source, store, instance_key, event, None)
+}
+
+/// Apply an event's transitions, supplying the payload the raising element
+/// carried in its `value:` argument.
+///
+/// The payload is data the runtime already holds — a bound path or a literal
+/// resolved at realization — never anything the card computed.
+pub fn dispatch_with(
+    source: &str,
+    store: &mut InstanceStore,
+    instance_key: &str,
+    event: &str,
+    payload: Option<&crate::JsonValue>,
+) -> bool {
     let mut sink = Diagnostics::default();
     let Some(tokens) = lex(source, &mut sink) else {
         return false;
@@ -2695,36 +2909,45 @@ pub fn dispatch(source: &str, store: &mut InstanceStore, instance_key: &str, eve
             }
         }
     }
-    let Some((component, boundary)) = owner else {
-        return false;
-    };
-    let instance_key = &instance_key[..boundary];
-    let Some(declared) = component.events.iter().find(|e| e.name == event) else {
-        return false;
+    // An event declared on the CARD rather than a component targets card state,
+    // which lives under a fixed key. A component event wins when both declare the
+    // name, since the innermost scope owns the cell.
+    let (declared, states, instance_key, schema_owner) = match owner {
+        Some((component, boundary)) => match component.events.iter().find(|e| e.name == event) {
+            Some(d) => (
+                d,
+                &component.states,
+                &instance_key[..boundary],
+                Some((component.name.clone(), schema_id(component))),
+            ),
+            None => return false,
+        },
+        None => match card.events.iter().find(|e| e.name == event) {
+            Some(d) => (d, &card.states, CARD_STATE_KEY, None),
+            None => return false,
+        },
     };
 
-    let schema = schema_id(component);
-    store.reconcile_schema(&component.name, schema);
+    if let Some((name, schema)) = schema_owner {
+        store.reconcile_schema(&name, schema);
+    }
 
     let mut applied = false;
     for transition in &declared.transitions {
-        let Some(state) = component
-            .states
-            .iter()
-            .find(|s| s.path == transition.target)
-        else {
+        let Some(state) = states.iter().find(|s| s.path == transition.target) else {
             continue;
         };
         let current = store
             .get(instance_key, &transition.target)
             .cloned()
+            .or_else(|| state.initial.clone())
             .unwrap_or_else(|| initial_for(&state.shape));
 
         let next = match (&transition.form, &state.shape) {
             (Form::Toggle, Shape::Bool) => {
                 crate::JsonValue::Bool(!current.as_bool().unwrap_or(false))
             }
-            (Form::Clear, shape) => initial_for(shape),
+            (Form::Clear, shape) => state.initial.clone().unwrap_or_else(|| initial_for(shape)),
             (Form::Cycle, Shape::Enum(members)) if !members.is_empty() => {
                 let at = current
                     .as_str()
@@ -2732,8 +2955,15 @@ pub fn dispatch(source: &str, store: &mut InstanceStore, instance_key: &str, eve
                     .unwrap_or(0);
                 crate::JsonValue::String(members[(at + 1) % members.len()].clone())
             }
-            // `set` carries its operand in the source; realization supplies it
-            // through the event payload, which this entry point does not take.
+            (Form::Set(source), _) => match source {
+                SetSource::Payload | SetSource::Path(_) => match payload {
+                    Some(v) => v.clone(),
+                    // No payload is a no-op rather than a silent clear: falling
+                    // back to the initial would look like a deliberate reset.
+                    None => continue,
+                },
+                SetSource::Token(t) | SetSource::Text(t) => crate::JsonValue::String(t.clone()),
+            },
             _ => continue,
         };
         store.set(instance_key, &transition.target, next);

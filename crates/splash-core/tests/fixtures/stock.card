@@ -38,7 +38,7 @@ view root  Surface(pad: .page) {
            }
 
 view list  Col {
-             TextHero(text: copy.movers)
+             TextTitle(text: copy.movers)
              Panel {
                for m in movers key m.ticker {
                  Row(align: .center, on_tap: open_quote, value: m.ticker) {

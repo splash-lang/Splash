@@ -45,7 +45,7 @@ view stream  Col {
 
 view masthead  Col {
                  TextCaption(text: copy.masthead)
-                 TextHero(text: copy.masthead)
+                 TextTitle(text: copy.masthead)
                }
 
 # The lead story, given room. Every field is live.
