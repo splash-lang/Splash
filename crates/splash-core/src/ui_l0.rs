@@ -43,6 +43,16 @@ pub struct UiL0Report {
     pub level: Level,
     pub diagnostics: Vec<SyntaxDiagnostic>,
     pub diagnostics_truncated: bool,
+    /// Profile §7: every component the card depends on, with a digest of its
+    /// definition, sorted by name.
+    ///
+    /// This is what a host pins. `level` is a judgment over the transitive
+    /// component closure, so it is only as durable as the definitions it was
+    /// computed from — replace one and an approved L0 card can silently become
+    /// L2. Storing this alongside the approved level makes that detectable:
+    /// a digest that moved means the level must be re-derived before the card
+    /// is accepted, rather than inherited from the record it no longer matches.
+    pub closure: Vec<(String, u64)>,
 }
 
 /// Diagnostics retained before truncation, so a pathological source cannot grow
@@ -92,7 +102,80 @@ pub fn check_ui_l0_named(_name: &str, source: &str) -> UiL0Report {
     }
 
     validate(&card, &mut sink);
-    sink.into_report(Level::L0)
+    let mut report = sink.into_report(Level::L0);
+    report.closure = component_closure(&card);
+    report
+}
+
+/// A digest per component definition, sorted by name — profile §7.
+///
+/// The digest covers everything that can move a card's level or change what it
+/// renders: params, state, events and the whole view body. It deliberately does
+/// NOT cover the component's position in the file, so reordering declarations is
+/// not a version change.
+fn component_closure(card: &Card) -> Vec<(String, u64)> {
+    let mut out: Vec<(String, u64)> = card
+        .components
+        .iter()
+        .map(|c| (c.name.clone(), definition_digest(c)))
+        .collect();
+    out.sort();
+    out
+}
+
+fn definition_digest(component: &Component) -> u64 {
+    fn element(e: &Element, into: &mut String) {
+        into.push_str(&e.name);
+        into.push('(');
+        for b in &e.binders {
+            into.push_str(b);
+            into.push(',');
+        }
+        for a in &e.args {
+            into.push_str(&a.name);
+            into.push(':');
+            into.push_str(&format!("{:?}", a.value));
+            into.push(',');
+        }
+        if let Some(cmp) = &e.cmp {
+            into.push_str(cmp);
+        }
+        if let Some(rhs) = &e.rhs {
+            into.push_str(&format!("{rhs:?}"));
+        }
+        into.push('|');
+        for child in &e.children {
+            element(child, into);
+        }
+        into.push(')');
+    }
+
+    let mut acc = String::new();
+    acc.push_str(&component.name);
+    for p in &component.params {
+        acc.push_str(p);
+        acc.push(',');
+    }
+    for st in &component.states {
+        acc.push_str(&format!(
+            "{}:{:?}:{:?}:{}",
+            st.path, st.shape, st.initial, st.keep
+        ));
+    }
+    for ev in &component.events {
+        acc.push_str(&ev.name);
+        for t in &ev.transitions {
+            acc.push_str(&format!("{}={:?}{:?}", t.target, t.form, t.tokens));
+        }
+    }
+    element(&component.body, &mut acc);
+
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in acc.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    hash
 }
 
 // ─────────────────────────────────────────────────────────────────── diagnostics ──
@@ -126,6 +209,7 @@ impl Diagnostics {
 
     fn into_report(self, level: Level) -> UiL0Report {
         UiL0Report {
+            closure: Vec::new(),
             valid: self.items.is_empty() && level == Level::L0,
             level,
             diagnostics: self.items,
@@ -507,6 +591,11 @@ struct StateDecl {
     /// on a freshly-mounted state compares against null and takes the wrong
     /// branch on first render.
     initial: Option<crate::JsonValue>,
+    /// `keep: true` — profile §5.8. A schema change resets local state by
+    /// default; this opts one cell out, and even then only while its own shape
+    /// is unchanged. Preservation is never inferred from a shape that merely
+    /// looks compatible.
+    keep: bool,
 }
 
 /// An event and the transition batch it applies. Profile §3: an event names
@@ -764,6 +853,24 @@ impl<'a> Parser<'a> {
             if guard > 32 {
                 break;
             }
+            // `.$state` — the source lifecycle suffix (§5.9). It is the one
+            // segment that starts with a sigil, which is what keeps it from
+            // colliding with a field a source might actually return.
+            let next_is_status = self.peek().is_some_and(|t| t.is_punct("."))
+                && self
+                    .tokens
+                    .get(self.at + 1)
+                    .is_some_and(|t| t.is_punct("$"))
+                && self
+                    .tokens
+                    .get(self.at + 2)
+                    .is_some_and(|t| t.kind == Kind::Ident && t.text == "state");
+            if next_is_status {
+                self.at += 3;
+                name.push_str(".$state");
+                continue;
+            }
+
             let next_is_segment = self.peek().is_some_and(|t| t.is_punct("."))
                 && self
                     .tokens
@@ -897,6 +1004,7 @@ impl<'a> Parser<'a> {
         let path = self.dotted_name()?;
         let mut shape = Shape::Other;
         let mut initial = None;
+        let mut keep = false;
         // `{ shape: enum[a, b], initial: .a }` — capture the shape, skip the rest.
         let start = self.at;
         if self.peek().is_some_and(|t| t.is_punct("{")) {
@@ -925,6 +1033,12 @@ impl<'a> Parser<'a> {
                         };
                     }
                 }
+                if t.is_kw("keep") && self.tokens.get(scan + 1).is_some_and(|n| n.is_punct(":")) {
+                    keep = self
+                        .tokens
+                        .get(scan + 2)
+                        .is_some_and(|v| v.kind == Kind::Ident && v.text == "true");
+                }
                 if t.is_kw("enum") {
                     let mut members = Vec::new();
                     let mut j = scan + 1;
@@ -951,6 +1065,7 @@ impl<'a> Parser<'a> {
             path,
             shape,
             initial,
+            keep,
         })
     }
 
@@ -1298,15 +1413,38 @@ impl<'a> Parser<'a> {
             return element;
         }
 
-        // `slot`
+        // `into name { … }` — a call site directing children at a named slot.
+        if t.is_kw("into") {
+            self.at += 1;
+            let mut element = Element {
+                name: "into".into(),
+                line: t.line,
+                column: t.column,
+                ..Default::default()
+            };
+            if let Some(slot_name) = self.ident() {
+                element.binders.push(slot_name);
+            }
+            element.children = self.parse_block();
+            return element;
+        }
+
+        // `slot` or `slot name` — §5.5. The anonymous form is the common case;
+        // a name lets a component place two groups of children.
         if t.is_kw("slot") {
             self.at += 1;
-            return Element {
+            let mut element = Element {
                 name: "slot".into(),
                 line: t.line,
                 column: t.column,
                 ..Default::default()
             };
+            if self.peek().is_some_and(|n| n.kind == Kind::Ident) {
+                if let Some(slot_name) = self.ident() {
+                    element.binders.push(slot_name);
+                }
+            }
+            return element;
         }
 
         let Some(name_tok) = self.next() else {
@@ -1439,6 +1577,39 @@ impl<'a> Parser<'a> {
             }
         }
     }
+}
+
+/// Split a call site's children by the slot each targets.
+///
+/// `into header { … }` groups the elements that follow into the named slot;
+/// anything outside a group goes to the anonymous one. Keeping the default
+/// unnamed means a component with one slot needs no ceremony.
+/// The slot names a component declares. An anonymous `slot` is `""`.
+fn slot_names(component: &Component) -> Vec<String> {
+    fn walk(elements: &[Element], out: &mut Vec<String>) {
+        for e in elements {
+            if e.name == "slot" {
+                out.push(e.binders.first().cloned().unwrap_or_default());
+            }
+            walk(&e.children, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(std::slice::from_ref(&component.body), &mut out);
+    out
+}
+
+fn split_slots(children: &[Element]) -> Vec<(String, Vec<Element>)> {
+    let mut groups: Vec<(String, Vec<Element>)> = vec![(String::new(), Vec::new())];
+    for child in children {
+        if child.name == "into" {
+            let name = child.binders.first().cloned().unwrap_or_default();
+            groups.push((name, child.children.clone()));
+        } else {
+            groups[0].1.push(child.clone());
+        }
+    }
+    groups
 }
 
 fn collect_constructors(e: &Element, out: &mut Vec<String>) {
@@ -1644,13 +1815,44 @@ fn validate(card: &Card, sink: &mut Diagnostics) {
 /// events, which a component reaches only by receiving one as a prop (§5.4) — so
 /// the transition still runs in the scope that declared it.
 fn validate_transitions(card: &Card, sink: &mut Diagnostics) {
-    check_event_batch(&card.events, &card.states, sink);
+    // `set(path)` READS. Its operand must therefore be a readable name, which
+    // an event is not: `set(some_event)` parses, resolves to nothing and writes
+    // garbage into the cell.
+    let mut card_readable: Vec<String> = card.sources.iter().map(|s| root_of(&s.name)).collect();
+    card_readable.extend(card.states.iter().map(|s| root_of(&s.path)));
+    card_readable.push("copy".into());
+    let card_events: Vec<String> = card.events.iter().map(|e| e.name.clone()).collect();
+
+    check_event_batch(
+        &card.events,
+        &card.states,
+        &card_readable,
+        &card_events,
+        sink,
+    );
     for component in &card.components {
-        check_event_batch(&component.events, &component.states, sink);
+        let mut readable: Vec<String> = card.sources.iter().map(|s| root_of(&s.name)).collect();
+        readable.push("copy".into());
+        readable.extend(component.params.iter().cloned());
+        readable.extend(component.states.iter().map(|s| root_of(&s.path)));
+        let events: Vec<String> = component.events.iter().map(|e| e.name.clone()).collect();
+        check_event_batch(
+            &component.events,
+            &component.states,
+            &readable,
+            &events,
+            sink,
+        );
     }
 }
 
-fn check_event_batch(events: &[EventDecl], states: &[StateDecl], sink: &mut Diagnostics) {
+fn check_event_batch(
+    events: &[EventDecl],
+    states: &[StateDecl],
+    readable: &[String],
+    event_names: &[String],
+    sink: &mut Diagnostics,
+) {
     for event in events {
         for transition in &event.transitions {
             let Some(state) = states.iter().find(|s| s.path == transition.target) else {
@@ -1681,6 +1883,25 @@ fn check_event_batch(events: &[EventDecl], states: &[StateDecl], sink: &mut Diag
                         transition.target
                     ),
                 ),
+                Form::Set(SetSource::Path(path)) => {
+                    let root = root_of(path);
+                    if event_names.contains(&root) {
+                        sink.push(
+                            transition.line,
+                            transition.column,
+                            format!(
+                                "{root:?} is an event, not a value; `set` reads a name and \
+                                 cannot trigger one (profile §6.4)"
+                            ),
+                        );
+                    } else if !readable.contains(&root) {
+                        sink.push(
+                            transition.line,
+                            transition.column,
+                            format!("{root:?} is not a readable name"),
+                        );
+                    }
+                }
                 Form::Set(_) => {}
                 Form::Cycle => match &state.shape {
                     Shape::Enum(members) => {
@@ -1703,6 +1924,25 @@ fn check_event_batch(events: &[EventDecl], states: &[StateDecl], sink: &mut Diag
                                     ),
                                 );
                             }
+                        }
+                        // Advancing uses the ENUM's declaration order (§3), so a
+                        // `cycle` listing a different one would run an order the
+                        // card does not say. Rejected rather than reordered:
+                        // what is written must be what happens.
+                        if !transition.tokens.is_empty()
+                            && transition.tokens.iter().all(|t| members.contains(t))
+                            && transition.tokens != *members
+                        {
+                            sink.push(
+                                transition.line,
+                                transition.column,
+                                format!(
+                                    "`cycle` advances in declaration order ({}), but lists {} — \
+                                     reorder the enum or the cycle so they agree (profile §3)",
+                                    members.join(", "),
+                                    transition.tokens.join(", ")
+                                ),
+                            );
                         }
                     }
                     _ => sink.push(
@@ -1753,6 +1993,8 @@ fn check_component_acyclicity(card: &Card, sink: &mut Diagnostics) {
 /// state and events, and card-scope `source` and `copy` — but never card `state`.
 struct Scope {
     roots: Vec<String>,
+    /// Roots that name a source. Only these carry a `$state` lifecycle.
+    source_roots: Vec<String>,
     events: Vec<String>,
     /// Card state, tracked separately so reading it from a component is a
     /// specific diagnostic rather than "unknown name".
@@ -1768,6 +2010,7 @@ impl Scope {
         let events = card.events.iter().map(|e| e.name.clone()).collect();
         Self {
             roots,
+            source_roots: card.sources.iter().map(|s| root_of(&s.name)).collect(),
             events,
             forbidden_state: Vec::new(),
         }
@@ -1784,6 +2027,7 @@ impl Scope {
         events.extend(component.params.iter().cloned());
         Self {
             roots,
+            source_roots: card.sources.iter().map(|s| root_of(&s.name)).collect(),
             events,
             forbidden_state: card.states.iter().map(|s| root_of(&s.path)).collect(),
         }
@@ -1812,7 +2056,7 @@ fn walk(
     sink: &mut Diagnostics,
 ) {
     match element.name.as_str() {
-        "" | "slot" => {}
+        "" | "slot" | "into" => {}
         "for" => {
             for binder in &element.binders {
                 scope.roots.push(binder.clone());
@@ -1850,6 +2094,40 @@ fn walk(
         name => {
             let known = catalog::lookup(name);
             let is_component = components.contains(&name);
+            if is_component {
+                if let Some(component) = card.components.iter().find(|c| c.name == name) {
+                    let offered = slot_names(component);
+                    for child in &element.children {
+                        if child.name != "into" {
+                            continue;
+                        }
+                        let wanted = child.binders.first().cloned().unwrap_or_default();
+                        if !offered.contains(&wanted) {
+                            let list = if offered.iter().all(|s| s.is_empty()) {
+                                "it has only an anonymous slot".to_string()
+                            } else {
+                                format!(
+                                    "it offers: {}",
+                                    offered
+                                        .iter()
+                                        .filter(|s| !s.is_empty())
+                                        .cloned()
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                )
+                            };
+                            sink.push(
+                                child.line,
+                                child.column,
+                                format!(
+                                    "{name:?} has no slot named {wanted:?}, so these children \
+                                     would not render — {list} (profile §5.5)"
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
             if known.is_none() && !is_component {
                 sink.push(
                     element.line,
@@ -1966,6 +2244,29 @@ fn check_path(path: &str, scope: &Scope, line: usize, column: usize, sink: &mut 
         return;
     }
     let root = root_of(path);
+
+    // `<source>.$state` is the fetch lifecycle (§5.9). It is meaningful only for
+    // something that is fetched — a local state has no pending or failed.
+    if let Some(owner) = path.strip_suffix(".$state") {
+        if scope.source_roots.iter().any(|r| r == owner) {
+            return;
+        }
+        sink.push(
+            line,
+            column,
+            format!("`$state` is only available on a source; {owner:?} is not one (profile §5.9)"),
+        );
+        return;
+    }
+    if path.contains("$state") {
+        sink.push(
+            line,
+            column,
+            "`$state` must be the last segment of a path (profile §5.9)".to_string(),
+        );
+        return;
+    }
+
     if scope.knows(&root) {
         return;
     }
@@ -2010,6 +2311,35 @@ pub enum NodeValue {
     /// A binding that resolved to nothing. Surfaced rather than defaulted: a
     /// silently empty field is how a card renders an em dash and looks fine.
     Missing,
+    /// A source's lifecycle, readable as `now.$state` — §5.9. A card can show a
+    /// spinner or an error rather than an em dash, and the distinction between
+    /// "not yet" and "failed" is the runtime's to report, not the card's to
+    /// guess from an absent value.
+    Status(SourceStatus),
+}
+
+/// Where a source is in its lifecycle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceStatus {
+    /// Never resolved.
+    Pending,
+    /// Resolved, and current.
+    Ready,
+    /// Resolved, but the value is past its freshness budget.
+    Stale,
+    /// The fetch failed. The card may say so; it may not say why.
+    Failed,
+}
+
+impl SourceStatus {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            SourceStatus::Pending => "pending",
+            SourceStatus::Ready => "ready",
+            SourceStatus::Stale => "stale",
+            SourceStatus::Failed => "failed",
+        }
+    }
 }
 
 /// Traversal bounds. L0 has no expressions, so there is nothing to evaluate and
@@ -2155,6 +2485,26 @@ impl ValueScope<'_> {
         let mut segments = path.split('.');
         let root = segments.next()?;
 
+        // `<source>.$state` is the lifecycle the runtime reported. It is data
+        // like any other, so a guard can branch on it without an expression.
+        if let Some(source) = path.strip_suffix(".$state") {
+            let status = self
+                .data
+                .get("$status")
+                .and_then(|m| m.get(source))
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| {
+                    // No report means: resolved if there is a value, pending if
+                    // not. A host that tracks status explicitly overrides this.
+                    if self.data.get(source).is_some() {
+                        "ready"
+                    } else {
+                        "pending"
+                    }
+                });
+            return Some(crate::JsonValue::String(status.to_string()));
+        }
+
         // `copy.<name>` is authored in the ledger, not fetched. Resolve it from
         // the card's declarations, choosing the language the runtime reported
         // and falling back to English — a card that ships zh text should not
@@ -2206,7 +2556,7 @@ struct Realizer<'a> {
     /// Children passed at a component call site, realized where `slot` appears.
     /// A stack, so a component instantiated inside another's slot still sees its
     /// own children.
-    slots: Vec<Vec<Element>>,
+    slots: Vec<Vec<(String, Vec<Element>)>>,
 }
 
 impl Realizer<'_> {
@@ -2229,11 +2579,16 @@ impl Realizer<'_> {
                 // component's — a child expression sees the call site's
                 // bindings (§5.5). Taking the frame off the stack while
                 // realizing prevents a component's own slot from re-entering.
-                if let Some(children) = self.slots.pop() {
-                    for (i, child) in children.iter().enumerate() {
-                        self.element(child, scope, &format!("{key}/s{i}"), out);
+                if let Some(groups) = self.slots.pop() {
+                    // An unnamed `slot` takes the default group; `slot header`
+                    // takes the group a call site directed with `into header`.
+                    let wanted = element.binders.first().cloned().unwrap_or_default();
+                    if let Some((_, children)) = groups.iter().find(|(n, _)| *n == wanted) {
+                        for (i, child) in children.iter().enumerate() {
+                            self.element(child, scope, &format!("{key}/s{i}"), out);
+                        }
                     }
-                    self.slots.push(children);
+                    self.slots.push(groups);
                 }
             }
             "for" => self.iteration(element, scope, key, out),
@@ -2313,7 +2668,15 @@ impl Realizer<'_> {
                         // An event prop has no value in data; pass the name.
                         .unwrap_or_else(|| crate::JsonValue::String(p.clone())),
                     Operand::Token(t) => crate::JsonValue::String(t.clone()),
-                    _ => crate::JsonValue::Null,
+                    // A literal prop is a value like any other. Letting these
+                    // fall to Null is how `Framed(title: "Details")` rendered an
+                    // em dash: the parser kept the string and the realizer threw
+                    // it away.
+                    Operand::Str(t) => crate::JsonValue::String(t.clone()),
+                    Operand::Num(n) => crate::JsonValue::from(*n),
+                    Operand::Predicate(p) => scope
+                        .lookup(p)
+                        .unwrap_or_else(|| crate::JsonValue::String(p.clone())),
                 };
                 scope.frames.push((arg.name.clone(), value));
                 bound += 1;
@@ -2321,7 +2684,7 @@ impl Realizer<'_> {
         }
         let instance_key = format!("{key}/{}", component.name);
         self.live.push(instance_key.clone());
-        self.slots.push(call.children.clone());
+        self.slots.push(split_slots(&call.children));
 
         // Local state resolves PER INSTANCE: from the store when it holds a
         // value for this key, otherwise from the declared initial. Two instances
@@ -2329,9 +2692,17 @@ impl Realizer<'_> {
         // component model exists to provide.
         let schema = schema_id(component);
         for state in &component.states {
+            // A live cell is readable when the schema still matches, or — under
+            // §5.8's opt-in — when this field asked to survive and its own shape
+            // is what it was written under. The shape check is what keeps
+            // `keep` from becoming the guess the reset exists to prevent.
             let live = self
                 .store
-                .filter(|s| s.schemas.get(&component.name).is_none_or(|k| *k == schema))
+                .filter(|s| {
+                    s.schemas.get(&component.name).is_none_or(|k| {
+                        *k == schema || state.keep && s.shape_unchanged(component, state)
+                    })
+                })
                 .and_then(|s| s.get(&instance_key, &state.path))
                 .cloned();
             scope.frames.push((
@@ -2565,6 +2936,7 @@ pub mod makepad {
             Some(NodeValue::Token(t)) => format!("{t:?}"),
             Some(NodeValue::Event(_)) | None => "\"\"".into(),
             Some(NodeValue::Missing) => "\"—\"".into(),
+            Some(NodeValue::Status(st)) => format!("{:?}", st.as_token()),
         }
     }
 
@@ -2930,6 +3302,10 @@ pub struct InstanceStore {
     cells: BTreeMap<String, BTreeMap<String, crate::JsonValue>>,
     /// Component name → the schema id its live cells were written under.
     schemas: BTreeMap<String, u64>,
+    /// Component name → state path → the shape that cell was written under.
+    /// A `keep` cell is preserved across a schema change only when this still
+    /// matches, so opting in never means "trust whatever was there".
+    shapes: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl InstanceStore {
@@ -2944,25 +3320,64 @@ impl InstanceStore {
             .insert(field.to_string(), value);
     }
 
-    /// Drop every cell belonging to instances of `component`.
-    fn reset_component(&mut self, component: &str) {
+    /// Whether `state` has the shape the store's live cells were written under.
+    fn shape_unchanged(&self, component: &Component, state: &StateDecl) -> bool {
+        self.shapes
+            .get(&component.name)
+            .and_then(|m| m.get(&state.path))
+            .is_some_and(|old| *old == format!("{:?}", state.shape))
+    }
+
+    /// Drop every cell belonging to instances of `component`, except the fields
+    /// listed in `keep` — §5.8's opt-in migration.
+    fn reset_component(&mut self, component: &str, keep: &[String]) {
         let marker = format!("/{component}");
-        self.cells.retain(|key, _| !key.contains(&marker));
+        self.cells.retain(|key, fields| {
+            if !key.contains(&marker) {
+                return true;
+            }
+            fields.retain(|field, _| keep.iter().any(|k| k == field));
+            !fields.is_empty()
+        });
     }
 
     /// Profile §5.8: a component whose state declarations changed gets a new
     /// schema id, and its live cells are dropped rather than migrated. Guessing
     /// that an old value still fits is how a rolled-back ledger feeds version-A
     /// state to version-B code.
-    fn reconcile_schema(&mut self, component: &str, schema: u64) {
-        match self.schemas.get(component) {
+    fn reconcile_schema(&mut self, component: &Component, schema: u64) {
+        let name = component.name.as_str();
+        let shapes: BTreeMap<String, String> = component
+            .states
+            .iter()
+            .map(|s| (s.path.clone(), format!("{:?}", s.shape)))
+            .collect();
+
+        match self.schemas.get(name) {
             Some(&known) if known == schema => {}
             Some(_) => {
-                self.reset_component(component);
-                self.schemas.insert(component.to_string(), schema);
+                // A cell survives only if it asked to AND its own shape is
+                // unchanged. Opting in is a claim about one field, not a
+                // blanket assertion that the old values still fit.
+                let previous = self.shapes.get(name);
+                let keep: Vec<String> = component
+                    .states
+                    .iter()
+                    .filter(|s| s.keep)
+                    .filter(|s| {
+                        previous
+                            .and_then(|p| p.get(&s.path))
+                            .is_some_and(|old| *old == format!("{:?}", s.shape))
+                    })
+                    .map(|s| s.path.clone())
+                    .collect();
+                self.reset_component(name, &keep);
+                self.schemas.insert(name.to_string(), schema);
+                self.shapes.insert(name.to_string(), shapes);
             }
             None => {
-                self.schemas.insert(component.to_string(), schema);
+                self.schemas.insert(name.to_string(), schema);
+                self.shapes.insert(name.to_string(), shapes);
             }
         }
     }
@@ -3080,7 +3495,7 @@ pub fn dispatch_with(
                 d,
                 &component.states,
                 &instance_key[..boundary],
-                Some((component.name.clone(), schema_id(component))),
+                Some((component, schema_id(component))),
             ),
             None => return false,
         },
@@ -3090,8 +3505,8 @@ pub fn dispatch_with(
         },
     };
 
-    if let Some((name, schema)) = schema_owner {
-        store.reconcile_schema(&name, schema);
+    if let Some((component, schema)) = schema_owner {
+        store.reconcile_schema(component, schema);
     }
 
     let mut applied = false;

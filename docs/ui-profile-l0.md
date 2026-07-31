@@ -66,8 +66,10 @@ view-decl     = "view"   , path , view-body ;
 local         = state-decl | event-decl ;
 
 view-body     = element ;
-element       = construct | iteration | guard | reference ;
+element       = construct | iteration | guard | reference | slot | fill ;
 construct     = Constructor , [ "(" , [ arguments ] , ")" ] , [ block ] ;
+slot          = "slot" , [ ident ] ;                 (* in a component body *)
+fill          = "into" , ident , block ;             (* at a call site *)
 reference     = path ;                               (* splices another view record *)
 iteration     = "for" , ident , [ "," , ident ] , "in" , path , "key" , path , block ;
 guard         = "when" , predicate , block ;
@@ -80,7 +82,8 @@ operand       = path | literal | predicate ;         (* NO expressions *)
 predicate     = path , [ comparator , ( path | literal | token ) ] ;
 comparator    = "==" | "!=" | "<" | "<=" | ">" | ">=" ;
 
-path          = root , { "." , ident | "." , integer | "[" , path , "]" } ;
+path          = root , { "." , ident | "." , integer | "[" , path , "]" }
+                     , [ "." , "$state" ] ;          (* source lifecycle, §5.9 *)
 root          = ident ;
 
 transition-block = "{" , transition , { "," , transition } , "}" ;
@@ -90,7 +93,8 @@ total-form    = "set" , "(" , ( literal | token | path | "$value" ) , ")"
               | "cycle" , "(" , token , { "," , token } , ")"
               | "clear" ;                             (* restore declared initial *)
 
-shape-spec    = "shape" , ":" , shape , [ "," , "initial" , ":" , ( literal | path ) ] ;
+shape-spec    = "shape" , ":" , shape , [ "," , "initial" , ":" , ( literal | path ) ]
+                              , [ "," , "keep" , ":" , "true" ] ;
 shape         = "text" | "number" | "bool" | "enum" , "[" , ident , { "," , ident } , "]" ;
 provenance    = "vocabulary" | "user-copy" | "model-copy" ;
 ```
@@ -357,8 +361,27 @@ Panel(title: "Details") { Tile(…) Tile(…) }
 ```
 
 Children are realized in the parent's scope, not the component's — a child expression sees the
-call site's bindings. Named slots are deferred; nothing in the reference cards needs them, and
-adding them later is additive.
+call site's bindings.
+
+A component may also offer **named** slots, and a call site directs children at one with `into`:
+
+```
+component Framed(title: text) {
+  view Col { TextCaption(text: title)  slot header  Rule()  slot }
+}
+
+Framed(title: "Today") {
+  into header { TextRow(text: "above the rule") }
+  TextRow(text: "below it")
+}
+```
+
+Children written outside any `into` fill the anonymous slot, so a component with one slot needs
+no ceremony and every card written before named slots existed is unchanged.
+
+**An `into` naming a slot the component does not offer is rejected.** Its children would
+otherwise render nowhere, which is the same silent-drop failure as a binding that resolves to
+nothing — the card looks deliberate and the content is simply gone.
 
 ### 5.6 What is refused, and why
 
@@ -418,12 +441,62 @@ field cannot be assumed compatible with live values, and guessing is how a rolle
 ends up feeding version-A state to version-B code — at which point last-known-good is no longer
 known good.
 
-An explicit migration is a future addition and must be atomic with activation and rollback.
+**The opt-in is `keep: true`** on a state declaration:
+
+```
+state expanded { shape: bool, initial: false, keep: true }
+```
+
+A cell that opts in survives a schema change **only while its own shape is unchanged**. Adding
+an unrelated field elsewhere in the component preserves it; retyping `expanded` itself resets it
+regardless. Without that second condition `keep` would be precisely the "assume the old value
+still fits" that this section exists to prevent — it would just have moved the guess from the
+runtime to the card author, where it is no more reliable and considerably less visible.
+
+Reset therefore remains the default in both directions: a component that says nothing behaves
+exactly as before, and a component that opts in still resets on any change to the field it
+opted in for.
 
 **Consequence worth stating plainly:** folding the ledger reconstructs the *program*, not the
 visible application state. Local state is disposable UI state — scroll positions, expansion
 flags. Anything that must survive a definition change belongs in a `source` or in card state
 with a declared migration, not in a component.
+
+### 5.9 Source lifecycle
+
+Every source carries a lifecycle, readable as `<source>.$state`, whose value is one of four
+tokens:
+
+| Token | Meaning |
+|---|---|
+| `.pending` | never resolved |
+| `.ready` | resolved and current |
+| `.stale` | resolved, but past its freshness budget |
+| `.failed` | the fetch failed |
+
+```
+when now.$state == .pending { TextRow(text: copy.loading) }
+when now.$state == .failed  { TextRow(text: copy.offline) }
+```
+
+This exists because **absence is not a state.** Without it a card can only ask whether a value
+arrived, so "still loading", "the network is down" and "this field genuinely has no value" all
+render the same em dash. The card then looks like working software displaying real data, which
+is the worst of the three outcomes.
+
+`$state` must be the last segment of a path, and is available **only on a source** — a local
+state is not fetched and has no pending or failed. Both are rejected rather than resolving to
+nothing.
+
+The host reports the lifecycle; the card never computes it. When the host reports nothing, a
+source with a value is `.ready` and one without is `.pending` — enough for a host that does not
+track status, without inventing the distinction that only the host can actually make. Note that
+`.stale` and `.failed` are exactly that distinction: neither is derivable from the data, which
+is why a card cannot be left to infer them.
+
+**Cadence and freshness budget belong to the capability, not the card.** A card names what it
+needs; how often `sys.weather` is worth re-fetching is a property of weather, and duplicating it
+per card is how two cards on one screen disagree about how old their data is.
 
 ---
 
@@ -443,6 +516,16 @@ With all five, an L0 realization terminates. **Without them the grammar does not
 why "L0 is decidable" is a claim about authority and grammar membership, not about
 termination.
 
+Condition 4 is guaranteed **structurally rather than by a check**. All four total forms
+(§3) name a state, a transition target is validated against declared state, and `set`'s operand
+must be a readable name — so there is no position in the grammar where an event can be named as
+something to *do*. A cascade is unrepresentable, not merely rejected.
+
+That is a stronger guarantee than a validator, and correspondingly easier to lose: any future
+form that could raise an event would silently move termination from structural to unchecked. It
+is pinned by a test that enumerates the syntaxes a cascade could take — `emit e`, `e()`,
+`n: set(1) then e`, a transition targeting an event — and asserts each is refused.
+
 ---
 
 ## 7. Level determination
@@ -461,6 +544,16 @@ rejected until the level is explicitly raised; escalation is never silent. **Com
 versions must be pinned**, or an L0 card can be moved to L2 by a definition it references
 being replaced.
 
+The check therefore returns a **closure digest**: every component the card depends on, paired
+with a hash of its definition — params, state, events and view body — sorted by name. A host
+stores this beside the approved level. A digest that moved means the level was derived from a
+definition that no longer exists and must be re-derived before the card is accepted, rather
+than inherited from the record it no longer matches.
+
+The digest deliberately ignores declaration order, so reformatting is not a version change. A
+digest that moved on a cosmetic edit would make pinning useless in the way that matters: hosts
+would see it move constantly, and learn to ignore it.
+
 Three token tests are not sufficient and an earlier draft that used them was both incomplete
 and self-contradictory. Level must be an effect judgment over the closure.
 
@@ -476,19 +569,30 @@ construct and keep the widest.
 
 | # | Question |
 |---|---|
-| 1 | Whether `when` needs `else`, or whether two complementary guards suffice |
-| 2 | Whether `enum` shapes need ordering guarantees for `cycle` |
-| 3 | How a `source` declares refresh cadence, staleness and error surfaces |
+| ~~1~~ | ~~Whether `when` needs `else`~~ — **settled: no.** Two complementary guards suffice and both reference cards that branch already use them (`when selected == ""` / `when selected != ""`). An `else` would need the negation of the guard, and there is no expression form to negate with; adding one for this alone would buy nothing a second `when` does not already express |
+| ~~2~~ | ~~Whether `enum` shapes need ordering guarantees for `cycle`~~ — **settled: yes, declaration order is normative.** `cycle` advances to the successor in the enum's declared order and wraps, which is what keeps it total and O(1). A `cycle(…)` listing a different order is **rejected**, not reordered: otherwise the card would say one order and the runtime would run another |
+| ~~3~~ | ~~How a `source` declares refresh cadence, staleness and error surfaces~~ — **settled in §5.9.** Staleness and error are a four-token lifecycle the host reports and the card reads as `<source>.$state`. Cadence is not a card concern: it belongs to the capability, since how often a fetch is worth repeating is a property of the data, not of the card displaying it |
 | ~~4~~ | ~~A bounded `format()`~~ — **settled**: `format:` is a declared token and the runtime applies it. A card that wrote `"$"` or `"41.2M"` itself would be authoring a fact, and currency, grouping and compaction are locale-dependent besides |
-| 5 | Named slots — deferred; the single anonymous slot is implemented and nothing in the reference cards needs more |
-| 6 | An explicit state migration, to make preservation across a schema change opt-in rather than impossible (§5.8) |
-| 7 | The closed token sets per constructor argument that §2.2 depends on |
+| ~~5~~ | ~~Named slots~~ — **settled in §5.5.** `slot name` in the component, `into name { … }` at the call site, anonymous slot unchanged as the default. An `into` naming a slot that does not exist is rejected rather than silently dropping its children |
+| ~~6~~ | ~~An explicit state migration~~ — **settled in §5.8.** `keep: true` opts a cell out of the schema-change reset, and only while that field's own shape is unchanged |
+| ~~7~~ | ~~The closed token sets per constructor argument~~ — **settled**: `docs/ui-l0-constructors.toml` is the normative catalog, and a test asserts the Rust catalog and the TOML agree in both directions |
+
+All seven are now settled. What replaces them is not a shorter list of questions but a
+different kind of work: the profile is specified and implemented, and the remaining gaps are
+in the surrounding system rather than in the language.
+
+**Known gaps, stated plainly.** `makepad::lower` still lives in `splash-core` and belongs in a
+backend crate. `StockPlot` and `AqiContour` lower without their data arrays. L1 and L2 are
+specified only as "what L0 excludes" — neither is implemented, and the level classifier can
+therefore name them but not check them.
 
 Component contracts were question 1 and are now specified in §5.2–§5.8, validated by adding
 components to two reference cards. That exercise produced amendment #9, which nothing had
 surfaced before — props are the first bindings a card author names freely, so the
 token/path ambiguity was invisible until one existed.
 
-Question 4 is the likeliest to force a change, and question 7 is a prerequisite for
-implementing §2.2 at all. The reference cards in `octos-one/docs/l0/` remain the evidence: any
-construct they need that this document lacks is a defect here rather than in the cards.
+The reference cards in `octos-one/docs/l0/` remain the evidence: any construct they need that
+this document lacks is a defect here rather than in the cards. Two of the settlements above came
+from that rule rather than from argument — question 1 was answered by noticing both branching
+cards had already written the complementary-guard form without anyone specifying it, and
+question 7 by the cards exhausting the token sets in the course of being written.

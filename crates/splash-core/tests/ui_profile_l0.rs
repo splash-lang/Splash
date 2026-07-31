@@ -1260,3 +1260,514 @@ fn a_write_a_source_reads_invalidates_its_dependents() {
 fn an_unrelated_write_patches_nothing() {
     assert!(patch_points(WEATHER, &["nothing_reads_this"]).is_empty());
 }
+
+// ─── named slots (§5.5, open question 5) ─────────────────────────────────────
+
+/// Every `text` argument in the tree, in render order.
+fn texts(root: &splash_core::ui_l0::UiNode) -> Vec<String> {
+    fn walk(n: &splash_core::ui_l0::UiNode, out: &mut Vec<String>) {
+        for (name, v) in &n.args {
+            if name == "text" {
+                if let NodeValue::Text(t) = v {
+                    out.push(t.clone());
+                }
+            }
+        }
+        for c in &n.children {
+            walk(c, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, &mut out);
+    out
+}
+
+const TWO_SLOTS: &str = r#"
+component Framed(title: text) {
+  view Col {
+         TextCaption(text: title)
+         slot header
+         Rule()
+         slot
+       }
+}
+view root Panel {
+  Framed(title: "Today") {
+    into header { TextRow(text: "in the header") }
+    TextRow(text: "in the body")
+  }
+}
+"#;
+
+#[test]
+fn a_named_slot_card_is_l0() {
+    accepts("two-slots", TWO_SLOTS);
+}
+
+#[test]
+fn named_slot_routes_children_to_the_matching_slot() {
+    let report = realize(TWO_SLOTS, &serde_json::json!({}), RealizeLimits::default());
+    assert!(report.diagnostics.is_empty(), "{:#?}", report.diagnostics);
+
+    // Order is what proves routing: the `into header` child is written first at
+    // the call site but the component places that slot above the anonymous one,
+    // so the two must come out in component order, not call-site order.
+    assert_eq!(
+        texts(&report.root.unwrap()),
+        vec!["Today", "in the header", "in the body"],
+        "each group should land at its own slot"
+    );
+}
+
+#[test]
+fn a_slot_with_no_matching_group_renders_nothing() {
+    // Not an error: a component may offer a slot that a call site declines to
+    // fill. Children with nowhere to go are dropped rather than misplaced.
+    let source = r#"
+component Framed() { view Panel { slot aside } }
+view root Panel { Framed() { TextRow(text: "loose") } }
+"#;
+    let report = realize(source, &serde_json::json!({}), RealizeLimits::default());
+    assert!(
+        texts(&report.root.unwrap()).is_empty(),
+        "the anonymous group has no matching slot in this component"
+    );
+}
+
+#[test]
+fn an_anonymous_slot_still_needs_no_ceremony() {
+    // The common case must stay as it was — no `into` required, and every
+    // existing card keeps working.
+    let source = r#"
+component Framed() { view Panel { slot } }
+view root Panel { Framed() { TextRow(text: "plain") } }
+"#;
+    let report = realize(source, &serde_json::json!({}), RealizeLimits::default());
+    assert_eq!(texts(&report.root.unwrap()), vec!["plain"]);
+}
+
+// ─── source lifecycle (§5.9, open question 3) ────────────────────────────────
+
+const LIFECYCLE: &str = r#"
+source now sys.weather(lat: 35.0, lon: 135.0)
+view root Col {
+  when now.$state == .pending { TextRow(text: "Loading") }
+  when now.$state == .failed  { TextRow(text: "Unavailable") }
+  when now.$state == .ready   { TextRow(text: "Live") }
+}
+"#;
+
+#[test]
+fn a_source_lifecycle_card_is_l0() {
+    accepts("lifecycle", LIFECYCLE);
+}
+
+#[test]
+fn source_state_defaults_to_pending_when_no_value_arrived() {
+    let report = realize(LIFECYCLE, &serde_json::json!({}), RealizeLimits::default());
+    assert_eq!(
+        texts(&report.root.unwrap()),
+        vec!["Loading"],
+        "a source with no value and no report is pending, so a card can say so \
+         rather than rendering an em dash that looks like real data"
+    );
+}
+
+#[test]
+fn source_state_is_ready_once_a_value_arrives() {
+    let data = serde_json::json!({"now": {"temp": 21.0}});
+    let report = realize(LIFECYCLE, &data, RealizeLimits::default());
+    assert_eq!(texts(&report.root.unwrap()), vec!["Live"]);
+}
+
+#[test]
+fn the_host_can_report_failure_explicitly() {
+    // The distinction that matters: a fetch that FAILED is not the same as one
+    // that has not happened yet, and only the host knows which.
+    let data = serde_json::json!({"$status": {"now": "failed"}});
+    let report = realize(LIFECYCLE, &data, RealizeLimits::default());
+    assert_eq!(
+        texts(&report.root.unwrap()),
+        vec!["Unavailable"],
+        "failure must be distinguishable from pending"
+    );
+}
+
+#[test]
+fn a_stale_source_is_neither_pending_nor_failed() {
+    // Stale means old, not wrong: the card keeps its last good value rather
+    // than blanking a number that is merely a few minutes behind.
+    let data = serde_json::json!({"now": {"temp": 21.0}, "$status": {"now": "stale"}});
+    let report = realize(LIFECYCLE, &data, RealizeLimits::default());
+    assert!(
+        texts(&report.root.unwrap()).is_empty(),
+        "this card guards three states; stale is a fourth and matches none"
+    );
+}
+
+#[test]
+fn state_is_rejected_on_something_that_is_not_a_source() {
+    let report = check_ui_l0_named(
+        "not-a-source",
+        "state units { shape: enum[c, f], initial: .c }\n\
+         view root Col { when units.$state == .pending { Rule() } }",
+    );
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("only available on a source")),
+        "local state has no fetch lifecycle: {:#?}",
+        report.diagnostics
+    );
+}
+
+/// A literal prop must survive the call. This failed for the life of the
+/// component feature and no test caught it: the reference cards pass paths
+/// (`story: s`, `position: i`), so the literal arm was never exercised and
+/// `Framed(title: "Details")` rendered an em dash. Same shape as every other
+/// "specified but not retained" bug — the parser kept the value and the
+/// realizer dropped it on a catch-all arm.
+#[test]
+fn a_literal_prop_reaches_the_component() {
+    let source = r#"
+component Framed(title: text, rank: number) {
+  view Col { TextCaption(text: title) TextRow(text: rank) }
+}
+view root Panel { Framed(title: "Details", rank: 3) }
+"#;
+    let report = realize(source, &serde_json::json!({}), RealizeLimits::default());
+    assert!(report.diagnostics.is_empty(), "{:#?}", report.diagnostics);
+    let root = report.root.unwrap();
+
+    let mut caps = Vec::new();
+    find(&root, "TextCaption", &mut caps);
+    assert_eq!(
+        caps[0].args.iter().find(|(n, _)| n == "text").unwrap().1,
+        NodeValue::Text("Details".into()),
+        "a string literal prop must arrive, not become Missing"
+    );
+
+    let mut rows = Vec::new();
+    find(&root, "TextRow", &mut rows);
+    assert_eq!(
+        rows[0].args.iter().find(|(n, _)| n == "text").unwrap().1,
+        NodeValue::Number(3.0),
+        "a number literal prop must arrive too"
+    );
+}
+
+#[test]
+fn an_into_naming_an_absent_slot_is_rejected() {
+    // Children with nowhere to go vanish. Silent is the wrong failure mode:
+    // this is the same class as a binding that resolves to nothing.
+    let report = check_ui_l0_named(
+        "bad-slot",
+        "component Framed() { view Panel { slot body } }\n\
+         view root Panel { Framed() { into headr { Rule() } } }",
+    );
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("has no slot named") && d.message.contains("body")),
+        "the message should name the slots that do exist: {:#?}",
+        report.diagnostics
+    );
+}
+
+// ─── §6 condition 4: event cascades ──────────────────────────────────────────
+
+/// Profile §6.4 prohibits event cascades — a transition may not trigger another
+/// event. There is no check for this because there is nothing to check: the four
+/// total forms (`set`, `toggle`, `cycle`, `clear`) all name a STATE, and a
+/// transition target is validated against declared state. A cascade is therefore
+/// unrepresentable rather than merely rejected.
+///
+/// This test pins that. It enumerates every syntax that could plausibly express
+/// "and then fire another event" and asserts each is rejected. If someone later
+/// adds a form that can raise one, termination stops being structural and this
+/// test is where that shows up.
+#[test]
+fn an_event_cannot_trigger_another_event() {
+    const PRELUDE: &str = "state n { shape: number, initial: 0 }\n\
+                           state flag { shape: bool, initial: false }\n\
+                           event bump { n: set(1) }\n";
+
+    for (shape, body) in [
+        (
+            "a transition targeting an event name",
+            "event c { bump: toggle }",
+        ),
+        ("a transition setting an event", "event c { bump: set(1) }"),
+        (
+            "an event named as a payload target",
+            "event c { n: set(bump) }",
+        ),
+        ("an emit form", "event c { emit bump }"),
+        ("a call form", "event c { bump() }"),
+        ("a then form", "event c { n: set(1) then bump }"),
+    ] {
+        let source = format!("{PRELUDE}{body}\nview root Panel {{ Rule() }}");
+        let report = check_ui_l0_named("cascade", &source);
+        assert!(
+            !report.valid,
+            "{shape} would be a cascade and must not be accepted: {body:?}"
+        );
+    }
+
+    // The control: the same prelude with a legal transition IS accepted, so the
+    // rejections above are about cascades and not about the prelude.
+    let ok = check_ui_l0_named(
+        "no-cascade",
+        &format!("{PRELUDE}event c {{ flag: toggle }}\nview root Panel {{ Rule() }}"),
+    );
+    assert!(ok.valid, "{:#?}", ok.diagnostics);
+}
+
+// ─── §5.8 opt-in migration (open question 6) ─────────────────────────────────
+
+/// `keep: true` opts one cell out of the §5.8 reset. Reset stays the default;
+/// this makes preservation expressible rather than impossible.
+#[test]
+fn a_keep_cell_survives_a_schema_change() {
+    const KEPT: &str = r#"
+source items sys.list()
+component Rowy(item: record) {
+  state open { shape: bool, initial: false, keep: true }
+  event flip { open: toggle }
+  view Col {
+    Row(on_tap: flip) { TextRow(text: item.name) }
+    when open { TextCaption(text: item.name) }
+  }
+}
+view root Panel { for it in items key it.id { Rowy(item: it) } }
+"#;
+    let mut store = splash_core::ui_l0::InstanceStore::default();
+    let data = two_rows_data();
+    let first =
+        splash_core::ui_l0::realize_with_state(KEPT, &data, &store, RealizeLimits::default());
+    let mut rows = Vec::new();
+    let first_root = first.root.unwrap();
+    find(&first_root, "Row", &mut rows);
+    splash_core::ui_l0::dispatch(KEPT, &mut store, &rows[0].key, "flip");
+
+    // An unrelated field is added: the schema id changes, but `open` itself is
+    // untouched and asked to survive.
+    let edited = KEPT.replace(
+        "event flip",
+        "state seen { shape: bool, initial: false }\n  event flip",
+    );
+    let after =
+        splash_core::ui_l0::realize_with_state(&edited, &data, &store, RealizeLimits::default());
+    let mut captions = Vec::new();
+    let after_root = after.root.unwrap();
+    find(&after_root, "TextCaption", &mut captions);
+    assert_eq!(
+        captions.len(),
+        1,
+        "a cell that opted in and did not change shape should survive"
+    );
+}
+
+/// The limit of the opt-in: `keep` is a claim about a field, not a promise that
+/// any value fits. Retyping the field resets it anyway — otherwise `keep` would
+/// be exactly the "guess it still fits" that §5.8 exists to prevent.
+#[test]
+fn keep_does_not_survive_a_change_to_that_field_itself() {
+    const KEPT: &str = r#"
+source items sys.list()
+component Rowy(item: record) {
+  state open { shape: bool, initial: false, keep: true }
+  event flip { open: toggle }
+  view Col {
+    Row(on_tap: flip) { TextRow(text: item.name) }
+    when open { TextCaption(text: item.name) }
+  }
+}
+view root Panel { for it in items key it.id { Rowy(item: it) } }
+"#;
+    let mut store = splash_core::ui_l0::InstanceStore::default();
+    let data = two_rows_data();
+    let first =
+        splash_core::ui_l0::realize_with_state(KEPT, &data, &store, RealizeLimits::default());
+    let mut rows = Vec::new();
+    let first_root = first.root.unwrap();
+    find(&first_root, "Row", &mut rows);
+    splash_core::ui_l0::dispatch(KEPT, &mut store, &rows[0].key, "flip");
+
+    // `open` is retyped bool → enum. The opt-in does not apply to a field whose
+    // own shape moved.
+    let edited = KEPT
+        .replace(
+            "state open { shape: bool, initial: false, keep: true }",
+            "state open { shape: enum[shut, ajar], initial: .shut, keep: true }",
+        )
+        .replace(
+            "event flip { open: toggle }",
+            "event flip { open: cycle(.shut, .ajar) }",
+        );
+    let after =
+        splash_core::ui_l0::realize_with_state(&edited, &data, &store, RealizeLimits::default());
+    let mut captions = Vec::new();
+    let after_root = after.root.unwrap();
+    find(&after_root, "TextCaption", &mut captions);
+    assert_eq!(
+        captions.len(),
+        0,
+        "a retyped field resets even with keep: true"
+    );
+}
+
+/// Reset remains the default: without `keep`, nothing changes.
+#[test]
+fn without_keep_a_schema_change_still_resets() {
+    // This is `a_schema_change_resets_instance_state` restated as the control
+    // for the two tests above — the opt-in must not have become the default.
+    let mut store = splash_core::ui_l0::InstanceStore::default();
+    let data = two_rows_data();
+    let first =
+        splash_core::ui_l0::realize_with_state(TWO_ROWS, &data, &store, RealizeLimits::default());
+    let mut rows = Vec::new();
+    let first_root = first.root.unwrap();
+    find(&first_root, "Row", &mut rows);
+    splash_core::ui_l0::dispatch(TWO_ROWS, &mut store, &rows[0].key, "flip");
+
+    let edited = TWO_ROWS.replace(
+        "event flip",
+        "state seen { shape: bool, initial: false }\n  event flip",
+    );
+    let after =
+        splash_core::ui_l0::realize_with_state(&edited, &data, &store, RealizeLimits::default());
+    let mut captions = Vec::new();
+    let after_root = after.root.unwrap();
+    find(&after_root, "TextCaption", &mut captions);
+    assert_eq!(captions.len(), 0, "reset is still the default");
+}
+
+// ─── §7 component version pinning ────────────────────────────────────────────
+
+/// §7 requires component versions to be pinned, "or an L0 card can be moved to
+/// L2 by a definition it references being replaced". The report carries a digest
+/// per component so a host can store it beside the approved level and notice.
+#[test]
+fn the_report_carries_a_digest_per_component() {
+    let report = check_ui_l0_named("weather", WEATHER);
+    assert!(report.valid);
+    assert!(
+        !report.closure.is_empty(),
+        "the weather card declares a component, so the closure cannot be empty"
+    );
+    let names: Vec<&str> = report.closure.iter().map(|(n, _)| n.as_str()).collect();
+    assert!(names.contains(&"ForecastRow"), "got {names:?}");
+
+    // Sorted, so a host comparing two closures does not have to.
+    let mut sorted = report.closure.clone();
+    sorted.sort();
+    assert_eq!(sorted, report.closure);
+}
+
+#[test]
+fn replacing_a_component_body_changes_its_digest() {
+    let before = check_ui_l0_named("weather", WEATHER).closure;
+
+    // The change that motivates §7: a component gains a construct outside L0.
+    // The card text is otherwise identical, so a host that pinned only the
+    // card's level would carry the old L0 verdict onto a definition that no
+    // longer earns it.
+    let edited = WEATHER.replace(
+        "component ForecastRow(",
+        "component ForecastRow(extra: number, ",
+    );
+    assert_ne!(edited, WEATHER, "the replacement must actually apply");
+    let after = check_ui_l0_named("weather", &edited).closure;
+
+    let digest = |c: &[(String, u64)]| {
+        c.iter()
+            .find(|(n, _)| n == "ForecastRow")
+            .map(|(_, d)| *d)
+            .unwrap()
+    };
+    assert_ne!(
+        digest(&before),
+        digest(&after),
+        "a changed definition must produce a changed digest"
+    );
+}
+
+#[test]
+fn reordering_declarations_is_not_a_version_change() {
+    // A digest that moved on a cosmetic edit would make pinning useless: every
+    // reformat would look like a replacement and hosts would learn to ignore it.
+    let source = "\
+component A(x: number) { view Panel { TextRow(text: x) } }\n\
+component B(y: number) { view Panel { TextRow(text: y) } }\n\
+view root Panel { A(x: 1) B(y: 2) }\n";
+    let swapped = "\
+component B(y: number) { view Panel { TextRow(text: y) } }\n\
+component A(x: number) { view Panel { TextRow(text: x) } }\n\
+view root Panel { A(x: 1) B(y: 2) }\n";
+
+    let a = check_ui_l0_named("a", source);
+    let b = check_ui_l0_named("b", swapped);
+    assert!(
+        a.valid && b.valid,
+        "{:#?} {:#?}",
+        a.diagnostics,
+        b.diagnostics
+    );
+    assert_eq!(a.closure, b.closure);
+}
+
+// ─── §3 cycle ordering (open question 2) ─────────────────────────────────────
+
+/// `cycle` advances in the ENUM's declaration order. That is the guarantee
+/// question 2 asked for, and it is what makes the transition total and O(1) —
+/// there is no comparison to run, only a successor.
+#[test]
+fn cycle_advances_in_declaration_order() {
+    const TRI: &str = "\
+state mode { shape: enum[low, mid, high], initial: .low }\n\
+event step { mode: cycle(.low, .mid, .high) }\n\
+view root Panel { Row(on_tap: step) { Rule() } }\n";
+
+    let mut store = splash_core::ui_l0::InstanceStore::default();
+    let report = realize(TRI, &serde_json::json!({}), RealizeLimits::default());
+    let mut rows = Vec::new();
+    let root = report.root.unwrap();
+    find(&root, "Row", &mut rows);
+    let key = rows[0].key.clone();
+
+    for expected in ["mid", "high", "low"] {
+        splash_core::ui_l0::dispatch(TRI, &mut store, &key, "step");
+        assert_eq!(
+            store.get("@card", "mode").and_then(|v| v.as_str()),
+            Some(expected),
+            "cycle should wrap through declaration order"
+        );
+    }
+}
+
+/// The corollary: a `cycle` that lists a different order is rejected rather
+/// than quietly running the declared one. Accepting it would mean the card says
+/// one order and the runtime performs another.
+#[test]
+fn a_cycle_listing_a_different_order_is_rejected() {
+    let report = check_ui_l0_named(
+        "reordered",
+        "state mode { shape: enum[low, mid, high], initial: .low }\n\
+         event step { mode: cycle(.high, .mid, .low) }\n\
+         view root Panel { Rule() }\n",
+    );
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("declaration order")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
