@@ -1,10 +1,12 @@
 # Splash UI Profile — Level 0
 
-**Status:** proposed. Normative producer contract for generated UI source at Level 0.
-**Relationship to [Grammar v0.2](grammar.md):** a *sibling* canonical profile, not a subset
-of the workflow language. `check_syntax` rejects UI source today, and
-`eval_vm_compatibility` accepts it but must not receive generated source — so there is
-currently no supported path for LLM-authored UI. This profile is that path, at its narrowest.
+**Status:** **implemented.** Normative producer contract for generated UI source at Level 0.
+Parser, validator, realizer and instance store live in `splash-core::ui_l0`; 48 tests, three
+reference cards, and a card rendered on a OnePlus 6T through an unmodified host.
+**Relationship to [Grammar v0.2](grammar.md):** a *sibling* canonical profile, not a subset of
+the workflow language. `check_syntax` rejects UI source and `eval_vm_compatibility` must not
+receive generated source, so neither canonical entry point admits a generated card. This
+profile is the third path, and `check_ui_l0` is its entry point.
 
 ---
 
@@ -189,10 +191,16 @@ L0 therefore has no expression form in transitions. It has four **total forms**:
 
 | Form | Applies to | Semantics |
 |---|---|---|
-| `set(v)` | any | assign a literal, a bound path, or the event payload `$value` |
+| `set($value)` | any | the payload the raising element carried in its `value:` argument |
+| `set(.token)` | `enum` | a declared member |
+| `set("text")` | `text` | a literal |
+| `set(path)` | any | a bound path, resolved from injected data |
 | `toggle` | `bool` | the other value |
-| `cycle(a, b, …)` | `enum` | successor, wrapping; members must be declared in the shape |
+| `cycle(.a, .b, …)` | `enum` | successor, wrapping; members must be declared in the shape |
 | `clear` | any | restore the declared `initial` |
+
+A `set($value)` raised with no payload is a **no-op**, not a clear: falling back to the
+initial would read as a deliberate reset.
 
 Each is total on its declared shape and terminates in constant time. `units: cycle(c, f)`
 replaces the ternary; `expanded: toggle` replaces the negation.
@@ -387,6 +395,10 @@ runtime needs defined behaviour, and identity (§5.1) decides all of it:
 | **Update** — identity persists, props differ | view re-realizes; **local state persists** |
 | **Unmount** — identity disappears | local state discarded |
 
+Realization reports every instance key it produced. A host passes them to `prune` after each
+pass; without it the store grows for the life of the app, and a key that reappears inherits a
+stale value.
+
 **Duplicate keys are an error at realization**, surfaced as a diagnostic — never coalesced.
 Silent coalescing would make two rows share one state cell, which is the failure mode keys
 exist to prevent. A missing key on an iteration is a grammar error.
@@ -467,8 +479,8 @@ construct and keep the widest.
 | 1 | Whether `when` needs `else`, or whether two complementary guards suffice |
 | 2 | Whether `enum` shapes need ordering guarantees for `cycle` |
 | 3 | How a `source` declares refresh cadence, staleness and error surfaces |
-| 4 | Whether the profile should admit a bounded `format(path, style)` for dates and units, or keep all formatting in the runtime |
-| 5 | Named slots — deferred; nothing in the reference cards needs them and adding them is additive |
+| ~~4~~ | ~~A bounded `format()`~~ — **settled**: `format:` is a declared token and the runtime applies it. A card that wrote `"$"` or `"41.2M"` itself would be authoring a fact, and currency, grouping and compaction are locale-dependent besides |
+| 5 | Named slots — deferred; the single anonymous slot is implemented and nothing in the reference cards needs more |
 | 6 | An explicit state migration, to make preservation across a schema change opt-in rather than impossible (§5.8) |
 | 7 | The closed token sets per constructor argument that §2.2 depends on |
 

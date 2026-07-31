@@ -371,7 +371,7 @@
   reviewed adapter's host-owned resolver; broader selectors must remain denied
   until each is enforced.
 
-## Next: a canonical profile for generated UI
+## Complete: a canonical profile for generated UI
 
 Splash has no supported path for LLM-authored UI. The canonical grammar rejects
 UI constructs; the compatibility APIs accept them but must not receive generated
@@ -386,21 +386,34 @@ constructors, bindings, keyed loops, guarded branches and components with
 declared local state, with no expression form and no module access, evaluated
 against an empty host surface. Three reference cards exercise it.
 
-Remaining before it can be implemented:
+**Implemented** in `splash-core::ui_l0`: parser, validator, per-instance state store,
+event dispatch, and a renderer-neutral realizer. 48 tests; the three reference cards are
+accepted and the shipping nav card is rejected as L2; a card renders on a OnePlus 6T through
+an unmodified downstream host.
 
-- A normative AST and a parser/validator giving definite accept/reject.
-- A level classifier over the transitive component closure. Local record
-  inspection is insufficient: a card can be moved to a wider level by a
-  component definition it references being replaced, so component versions must
-  be pinned.
-- Lowering to a renderer-neutral node tree, and a host surface that installs no
-  modules.
-- Component contracts — child-to-parent outputs, slots, shared state,
-  per-component source declarations, and mount/update/unmount semantics.
-- Recursive instance identity, and a state-schema versioning rule for what
-  happens to live local state when a component definition changes.
-- Enforcement of the five conditions that make an L0 realization terminate;
-  grammar membership alone does not bound execution.
+Building it settled one claim in the profile's own favour and against its wording. L0 has no
+expression form, so there is nothing to evaluate: realization never enters the VM, and the
+implementation contains no reference to it. Authority confinement is structural in the
+strongest sense available — no execution machinery in the path, rather than a sandbox or an
+empty module table.
+
+Remaining:
+
+- **Component versions are not pinned.** The level classifier resolves over the
+  transitive closure, but a referenced component definition being replaced can
+  still widen a card's level without the card changing.
+- **Live sources.** Realization takes injected data; nothing yet maps a `source`
+  declaration to the helper that answers it. That mapping is also what would end
+  the duplication of `sys.*` across four hosts, where every divergence so far
+  has produced a device-visible bug.
+- **Reconciliation.** Realization rebuilds the tree; a state write does not yet
+  patch only its dependents.
+- **Named slots**, and an explicit state migration so preservation across a
+  schema change is opt-in rather than impossible.
+- **Termination** still rests on the five conditions in the profile's §6, of
+  which the implementation enforces two: component-graph acyclicity, and
+  iteration over a bound path. Collection length, node count and nesting depth
+  are traversal bounds the caller sets.
 
 ## Before a stable language release
 
