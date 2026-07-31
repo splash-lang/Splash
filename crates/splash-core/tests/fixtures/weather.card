@@ -1,0 +1,122 @@
+# ledger weather@1.0.0
+# level:   L0
+# profile: ui/l0
+# model:   glm-5.2
+#
+# Reference card for Splash/docs/ui-profile-l0.md. Expresses everything
+# app/app/src/app/plan/weather.rs lowers: CurrentConditions, Forecast,
+# AirQualityField, SunMoon, Details.
+
+# ── sources: queries the runtime executes; the view never calls them ──────────
+source place       sys.geocode(name: state.city)
+source now         sys.weather(lat: place.lat, lon: place.lon,
+                               fields: [temp, feels, hi, lo, cond, humidity, wind,
+                                        pressure, uv, visibility])
+source week        sys.weather(lat: place.lat, lon: place.lon, days: state.days,
+                               fields: [dayname, hi, lo, cond],
+                               aggregate: [min_lo, max_hi])
+source sun         sys.daylight(lat: place.lat, lon: place.lon)
+source moon        sys.moonphase()
+source aqi         sys.airquality(lat: place.lat, lon: place.lon)
+source scene       sys.photo(query: place.name)
+source env.locale  sys.locale()
+
+# ── state: shape only; the runtime holds the values ──────────────────────────
+state city  { shape: text, initial: "" }              # empty ⇒ device location
+state units { shape: enum[c, f], initial: env.locale.temp_unit }
+state days  { shape: number, initial: 7 }
+
+# ── events: total transitions, applied atomically ────────────────────────────
+event toggle_units { units: cycle(.c, .f) }
+event pick_city    { city: set($value) }
+
+# ── copy: declared literals, all host-owned vocabulary ───────────────────────
+copy feels      { class: vocabulary, en: "Feels like",   zh: "体感" }
+copy humidity   { class: vocabulary, en: "Humidity",     zh: "湿度" }
+copy wind       { class: vocabulary, en: "Wind",         zh: "风速" }
+copy pressure   { class: vocabulary, en: "Pressure",     zh: "气压" }
+copy uv         { class: vocabulary, en: "UV Index",     zh: "紫外线" }
+copy visibility { class: vocabulary, en: "Visibility",   zh: "能见度" }
+copy air        { class: vocabulary, en: "Air Quality",  zh: "空气质量" }
+copy sunrise    { class: vocabulary, en: "Sunrise",      zh: "日出" }
+copy sunset     { class: vocabulary, en: "Sunset",       zh: "日落" }
+
+# ── view ─────────────────────────────────────────────────────────────────────
+view root  Photo(src: scene, pad: .page) {
+             current
+             forecast
+             airfield
+             sunmoon
+             details
+           }
+
+view current  Col(align: .center) {
+                TextTitle(text: place.name)
+                WeatherIcon(cond: now.cond, size: .hero)
+                TextHero(value: now.temp, unit: units, on_tap: toggle_units)
+                Row(gap: 8) {
+                  TextCaption(glyph: "↑", value: now.hi, unit: units)
+                  TextCaption(glyph: "↓", value: now.lo, unit: units)
+                  TextCaption(glyph: "≈", value: now.feels, unit: units)
+                }
+              }
+
+# Exercises the other half of the component contracts:
+#   - LOCAL state and a local event (§5.7) — seven rows, seven `expanded` cells,
+#     keyed by (declaration path, loop key), none of them in the ledger
+#   - reads card-scope `source` directly (week.min_lo) — permitted by §5.3
+#   - takes `unit` as a PROP, because card state may not be read directly;
+#     that keeps the dependency visible to the tracker
+#   - the transition is `toggle`, a total form, not `!expanded` (§3)
+#
+# Prop named `item`, not `day`: `width: .day` is a layout token. See finding #9.
+component ForecastRow(item: record, unit: enum[c, f]) {
+  state expanded { shape: bool, initial: false }
+  event toggle   { expanded: toggle }
+  view Col {
+         Row(align: .center, on_tap: toggle) {
+           TextRow(text: item.dayname, width: .day)
+           WeatherIcon(cond: item.cond, size: .row)
+           TempBar(lo: item.lo, hi: item.hi, min: week.min_lo, max: week.max_hi)
+           TextValue(value: item.hi, unit: unit)
+         }
+         when expanded {
+           Row(gap: 8) {
+             TextCaption(glyph: "↓", value: item.lo, unit: unit)
+             TextCaption(text: item.cond)
+           }
+         }
+       }
+}
+
+view forecast  Panel {
+                 for d in week key d.dayname {
+                   ForecastRow(item: d, unit: units)
+                 }
+               }
+
+view airfield  Panel {
+                 TextCaption(text: copy.air)
+                 AqiContour(field: aqi.grid, index: aqi.index, band: aqi.band)
+               }
+
+view sunmoon  Panel {
+                Row {
+                  Col { TextCaption(text: copy.sunrise) TextStat(value: sun.rise, format: .time) }
+                  SunArc(rise: sun.rise, set: sun.set, now: sun.now)
+                  Col { TextCaption(text: copy.sunset)  TextStat(value: sun.set,  format: .time) }
+                }
+                MoonPhase(phase: moon.phase, illum: moon.illumination)
+              }
+
+# The plan's `tiles: Vec<String>` becomes explicit structure. The model picks
+# tiles by writing them, not by naming them in an array — more expressive, and
+# it removes a loop over a model-authored list.
+view details  Grid(cols: 2) {
+                Tile(label: copy.feels,      value: now.feels,      unit: units)
+                Tile(label: copy.humidity,   value: now.humidity,   unit: .pct)
+                Tile(label: copy.wind,       value: now.wind,       unit: .speed)
+                Tile(label: copy.pressure,   value: now.pressure,   unit: .pressure)
+                Tile(label: copy.uv,         value: now.uv,         unit: .index)
+                Tile(label: copy.visibility, value: now.visibility, unit: .distance)
+              }

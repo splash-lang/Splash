@@ -1,0 +1,94 @@
+# ledger stock@1.0.0
+# level:   L0
+# profile: ui/l0
+# model:   glm-5.2
+#
+# Reference card for Splash/docs/ui-profile-l0.md. Expresses everything
+# app/app/src/app/plan/stock.rs lowers: MoversList, QuoteHeader, PriceChart,
+# StatGrid. The hardest of the three: it is the only one with a genuine
+# list↔detail switch, and the only one whose chart depends on a second piece
+# of state.
+
+source movers      sys.movers(count: 10, fields: [ticker, name, last, change, pct])
+source quote       sys.quote(ticker: state.selected,
+                             fields: [name, last, change, pct, open, high, low,
+                                      volume, mktcap, pe])
+source series      sys.series(ticker: state.selected, range: state.range,
+                              fields: [points, min, max])
+source env.locale  sys.locale()
+
+state selected { shape: text, initial: "" }                    # "" ⇒ movers list
+state range    { shape: enum[d1, w1, m1, m6, y1], initial: .m1 }
+
+event open_quote { selected: set($value) }
+event back       { selected: clear, range: clear }              # two writes, one gesture
+event set_range  { range: set($value) }
+
+copy movers { class: vocabulary, en: "Top Movers", zh: "涨跌榜" }
+copy open   { class: vocabulary, en: "Open",       zh: "开盘" }
+copy high   { class: vocabulary, en: "High",       zh: "最高" }
+copy low    { class: vocabulary, en: "Low",        zh: "最低" }
+copy volume { class: vocabulary, en: "Volume",     zh: "成交量" }
+copy mktcap { class: vocabulary, en: "Mkt Cap",    zh: "市值" }
+copy pe     { class: vocabulary, en: "P/E",        zh: "市盈率" }
+
+view root  Surface(pad: .page) {
+             when selected == "" { list }
+             when selected != "" { detail }
+           }
+
+view list  Col {
+             TextHero(text: copy.movers)
+             Panel {
+               for m in movers key m.ticker {
+                 Row(align: .center, on_tap: open_quote, value: m.ticker) {
+                   Col(gap: 2) {
+                     TextRow(text: m.ticker)
+                     TextCaption(text: m.name, width: .fill)
+                   }
+                   TextValue(value: m.last, format: .money)
+                   TextValue(value: m.pct, format: .signed_pct, tint: m.change)
+                 }
+                 Rule()
+               }
+             }
+           }
+
+view detail  Col {
+               Row(on_tap: back) { TextCaption(glyph: "‹") }
+               header
+               chart
+               ranges
+               stats
+             }
+
+view header  Col {
+               TextCaption(text: quote.name)
+               TextHero(value: quote.last, format: .money)
+               Row(gap: 8) {
+                 TextStat(value: quote.change, format: .signed_money, tint: quote.change)
+                 TextStat(value: quote.pct,    format: .signed_pct,   tint: quote.change)
+               }
+             }
+
+view chart  StockPlot(points: series.points, min: series.min, max: series.max,
+                      tint: quote.change)
+
+# Range switching is a set() over a declared enum — no expression, and the
+# selected range is a guard rather than a computed style.
+view ranges  Row(gap: 6) {
+               Chip(text: "1D", on_tap: set_range, value: .d1, active: range == .d1)
+               Chip(text: "1W", on_tap: set_range, value: .w1, active: range == .w1)
+               Chip(text: "1M", on_tap: set_range, value: .m1, active: range == .m1)
+               Chip(text: "6M", on_tap: set_range, value: .m6, active: range == .m6)
+               Chip(text: "1Y", on_tap: set_range, value: .y1, active: range == .y1)
+             }
+
+view stats  Grid(cols: 2) {
+              Tile(label: copy.open,   value: quote.open,   format: .money)
+              Tile(label: copy.high,   value: quote.high,   format: .money)
+              Tile(label: copy.low,    value: quote.low,    format: .money)
+              Tile(label: copy.volume, value: quote.volume, format: .compact)
+              Tile(label: copy.mktcap, value: quote.mktcap, format: .compact)
+              Tile(label: copy.pe,     value: quote.pe,     format: .ratio)
+            }

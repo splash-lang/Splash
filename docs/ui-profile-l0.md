@@ -59,7 +59,7 @@ arguments     = argument , { "," , argument } ;
 argument      = ident , ":" , operand ;
 operand       = path | literal | predicate ;         (* NO expressions *)
 
-predicate     = path , comparator , ( path | literal ) ;
+predicate     = path , [ comparator , ( path | literal | token ) ] ;
 comparator    = "==" | "!=" | "<" | "<=" | ">" | ">=" ;
 
 path          = root , { "." , ident | "." , integer | "[" , path , "]" } ;
@@ -94,7 +94,8 @@ defect in this document, not in the cards.**
 | 6 | predicate as an argument value | stock — `active: range == d1` | `operand` admits `predicate` |
 | 7 | event payload at the call site | news, stock — which row was tapped | `value:` argument, §3.1 |
 | 8 | sub-collection of a source | news — feed skips the lead | **not granted** — see below |
-| 9 | bare identifiers are ambiguous | both components — `width: rank` is a token, `text: position` is a path | resolved by argument shape, §2.2 |
+| 9 | bare identifiers are ambiguous | both components — `width: rank` is a token, `text: position` is a path | tokens marked lexically, §2.2 |
+| 10 | a bare boolean guard | weather — `when expanded { … }` | `predicate` admits a lone path |
 
 **None of these introduces an expression.** Indexing is a total lookup, a predicate as an
 operand is the form `when` already admits, and a loop index is supplied by the iterator. The
@@ -434,6 +435,12 @@ being replaced.
 
 Three token tests are not sufficient and an earlier draft that used them was both incomplete
 and self-contradictory. Level must be an effect judgment over the closure.
+
+**"Maximum" is a scan, not a search.** A classifier that returns at the first construct outside
+L0 reports whichever appears earliest in the source, not the highest. The nav card demonstrates
+it: arithmetic on line 55 precedes `fn tick()` on line 80, so a short-circuiting classifier
+calls it L1 — a card with 65 imperative widget commands. The implementation must examine every
+construct and keep the widest.
 
 ---
 

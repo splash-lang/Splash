@@ -8,6 +8,7 @@
 //! Rust code.
 
 mod profile;
+pub mod ui_l0;
 
 use std::any::Any;
 use std::cell::Cell;
