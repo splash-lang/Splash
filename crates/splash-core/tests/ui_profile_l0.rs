@@ -1121,3 +1121,142 @@ fn every_reference_card_yields_a_resolvable_plan() {
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────── reconciliation ──
+
+use splash_core::ui_l0::{dirty_records, record_dependencies};
+
+/// L0 needs no dynamic read-tracking: no expression form means every binding is
+/// structurally visible, so the dependency set is computable without evaluating
+/// anything.
+#[test]
+fn dependencies_are_computed_without_evaluation() {
+    let deps = record_dependencies(WEATHER);
+    let of = |name: &str| {
+        deps.iter()
+            .find(|d| d.record == name)
+            .unwrap_or_else(|| panic!("no deps for {name}"))
+            .reads
+            .clone()
+    };
+
+    assert!(
+        of("current").contains(&"now".to_string()),
+        "{:?}",
+        of("current")
+    );
+    assert!(of("current").contains(&"units".to_string()));
+    assert!(of("details").contains(&"now".to_string()));
+    // The forecast reads the week and, through ForecastRow, the bounds.
+    assert!(
+        of("forecast").contains(&"week".to_string()),
+        "{:?}",
+        of("forecast")
+    );
+    // `sunmoon` reads sun and moon, and must NOT read the stock of the card.
+    let sunmoon = of("sunmoon");
+    assert!(sunmoon.contains(&"sun".to_string()) && sunmoon.contains(&"moon".to_string()));
+    assert!(!sunmoon.contains(&"week".to_string()), "{sunmoon:?}");
+}
+
+/// A loop binder is local. `for d in week` must not make `d` a dependency, or
+/// every record with a loop would look like it reads everything.
+#[test]
+fn a_loop_binder_is_not_a_dependency() {
+    let deps = record_dependencies(WEATHER);
+    let forecast = &deps.iter().find(|d| d.record == "forecast").unwrap().reads;
+    assert!(!forecast.contains(&"d".to_string()), "{forecast:?}");
+}
+
+/// The measurable claim behind "one event, one state change, one reconciliation
+/// pass" — toggling a unit touches the records that read it, not the tree.
+#[test]
+fn a_state_write_dirties_only_its_dependents() {
+    let all: Vec<String> = record_dependencies(WEATHER)
+        .into_iter()
+        .map(|d| d.record)
+        .collect();
+    let dirty = dirty_records(WEATHER, &["units"]);
+
+    assert!(!dirty.is_empty(), "toggling units must dirty something");
+    assert!(
+        dirty.len() < all.len(),
+        "it must not dirty everything: {dirty:?}"
+    );
+
+    // The sun/moon panel does not read units and must survive untouched — it is
+    // the panel whose rebuild would be most visible.
+    assert!(!dirty.contains(&"sunmoon".to_string()), "{dirty:?}");
+    assert!(!dirty.contains(&"airfield".to_string()), "{dirty:?}");
+    // The hero and the detail tiles do read it.
+    assert!(dirty.contains(&"current".to_string()), "{dirty:?}");
+    assert!(dirty.contains(&"details".to_string()), "{dirty:?}");
+}
+
+/// A component's own state dirties that component, so an expanded row
+/// re-realizes and its neighbours do not.
+#[test]
+fn component_local_state_dirties_its_component() {
+    let dirty = dirty_records(WEATHER, &["expanded"]);
+    assert!(
+        dirty.contains(&"ForecastRow".to_string()),
+        "local state must dirty its component: {dirty:?}"
+    );
+    assert!(!dirty.contains(&"details".to_string()), "{dirty:?}");
+}
+
+/// Over-approximation is the safe direction: re-realizing too much is slow,
+/// re-realizing too little shows stale data.
+#[test]
+fn an_unrelated_write_dirties_nothing() {
+    assert!(dirty_records(WEATHER, &["nothing_reads_this"]).is_empty());
+}
+
+use splash_core::ui_l0::patch_points;
+
+/// `dirty_records` is transitive, so `root` appears for almost any write — it
+/// splices everything, so it reads everything. Patching root rebuilds the tree,
+/// which is what reconciliation exists to avoid.
+#[test]
+fn patch_points_exclude_ancestors_that_merely_contain_the_change() {
+    let dirty = dirty_records(WEATHER, &["units"]);
+    let minimal = patch_points(WEATHER, &["units"]);
+    assert!(
+        dirty.contains(&"root".to_string()),
+        "root is transitively dirty"
+    );
+    assert!(
+        !minimal.contains(&"root".to_string()),
+        "but patching a descendant suffices: {minimal:?}"
+    );
+    assert!(minimal.len() < dirty.len());
+}
+
+/// The claim, at its sharpest: toggling one row's own state re-realizes that
+/// component and nothing else.
+#[test]
+fn local_state_patches_exactly_one_record() {
+    let minimal = patch_points(WEATHER, &["expanded"]);
+    assert_eq!(minimal, vec!["ForecastRow".to_string()], "{minimal:?}");
+}
+
+/// A write that a SOURCE reads invalidates the fetch, and everything binding its
+/// result. Changing the city re-geocodes, so every source downstream of `place`
+/// is stale — a genuine full rebuild, and the graph should say so rather than
+/// reporting nothing.
+#[test]
+fn a_write_a_source_reads_invalidates_its_dependents() {
+    let minimal = patch_points(WEATHER, &["city"]);
+    for record in ["current", "forecast", "airfield", "sunmoon", "details"] {
+        assert!(
+            minimal.contains(&record.to_string()),
+            "changing the city must invalidate {record}: {minimal:?}"
+        );
+    }
+}
+
+/// Under-approximating shows stale data; over-approximating is merely slow.
+#[test]
+fn an_unrelated_write_patches_nothing() {
+    assert!(patch_points(WEATHER, &["nothing_reads_this"]).is_empty());
+}

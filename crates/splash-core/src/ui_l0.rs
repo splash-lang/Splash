@@ -3249,3 +3249,216 @@ pub fn source_plan(source: &str) -> SourcePlan {
         diagnostics: sink.items,
     }
 }
+
+// ─────────────────────────────────────────────────────────────── reconciliation ──
+
+/// What one record reads, so a state write can be confined to its dependents.
+#[derive(Clone, Debug)]
+pub struct RecordDeps {
+    /// A `view` or `component` name.
+    pub record: String,
+    /// Roots it reads, transitively through referenced views and instantiated
+    /// components — `now`, `units`, `week`.
+    pub reads: Vec<String>,
+}
+
+/// What each record reads.
+///
+/// L0 needs no dynamic read-tracking: it has no expression form, so every
+/// binding is structurally visible and the dependency set is computable without
+/// evaluating anything. That is the difference between this and the signal
+/// graphs a dynamic language requires — there is no branch whose reads depend on
+/// a value.
+///
+/// The set is transitive and deliberately **over**-approximate at the edges: a
+/// record inherits everything the views it splices and the components it
+/// instantiates read. Over-approximating re-realizes too much; under-
+/// approximating shows stale data, and only one of those is a correctness bug.
+pub fn record_dependencies(source: &str) -> Vec<RecordDeps> {
+    let mut sink = Diagnostics::default();
+    let Some(tokens) = lex(source, &mut sink) else {
+        return Vec::new();
+    };
+    let card = Parser::new(&tokens, &mut sink).parse_card();
+
+    // Direct reads, plus the records each one pulls in.
+    let mut direct: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
+    for view in &card.views {
+        let (reads, pulls) = scan_element(&view.body);
+        direct.push((view.name.clone(), reads, pulls));
+    }
+    for component in &card.components {
+        let (mut reads, pulls) = scan_element(&component.body);
+        // A prop is supplied by the caller, so it is not a dependency of its own.
+        reads.retain(|r| !component.params.contains(r));
+        // Local state is a dependency: writing it must re-realize this instance.
+        for state in &component.states {
+            reads.push(root_of(&state.path));
+        }
+        direct.push((component.name.clone(), reads, pulls));
+    }
+
+    // Close over references. Bounded by record count, so a reference cycle
+    // terminates rather than spinning.
+    let mut out: Vec<RecordDeps> = Vec::new();
+    for (name, _, _) in &direct {
+        let mut reads: Vec<String> = Vec::new();
+        let mut queue = vec![name.clone()];
+        let mut seen: Vec<String> = Vec::new();
+        let mut steps = 0usize;
+        while let Some(current) = queue.pop() {
+            steps += 1;
+            if steps > MAX_UI_L0_DECLARATIONS || seen.contains(&current) {
+                continue;
+            }
+            seen.push(current.clone());
+            if let Some((_, r, pulls)) = direct.iter().find(|(n, _, _)| *n == current) {
+                reads.extend(r.iter().cloned());
+                queue.extend(pulls.iter().cloned());
+            }
+        }
+        reads.sort();
+        reads.dedup();
+        out.push(RecordDeps {
+            record: name.clone(),
+            reads,
+        });
+    }
+    out
+}
+
+/// The smallest set of records a backend must re-realize.
+///
+/// [`dirty_records`] is transitive, so `root` appears for almost any write — it
+/// splices every other record, so it reads everything they read. Patching root
+/// would rebuild the tree, which is the behaviour reconciliation exists to
+/// avoid. A record is a **patch point** only when its OWN bindings read a
+/// changed path; an ancestor that merely contains it is handled by patching the
+/// descendant.
+pub fn patch_points(source: &str, changed: &[&str]) -> Vec<String> {
+    let mut sink = Diagnostics::default();
+    let Some(tokens) = lex(source, &mut sink) else {
+        return Vec::new();
+    };
+    let card = Parser::new(&tokens, &mut sink).parse_card();
+    let roots: Vec<String> = changed.iter().map(root_of).collect();
+
+    // A source reading changed state must be re-fetched, and anything binding
+    // its result is then stale.
+    let mut invalidated: Vec<String> = roots.clone();
+    let mut steps = 0usize;
+    loop {
+        steps += 1;
+        if steps > MAX_UI_L0_DECLARATIONS {
+            break;
+        }
+        let before = invalidated.len();
+        for decl in &card.sources {
+            let reads_changed = decl.args.iter().any(|(_, arg)| match arg {
+                SourceArg::Path(p) => {
+                    // `state.city` names the state directly; `place.lat` names
+                    // another source.
+                    let mut parts = p.split('.');
+                    let head = parts.next().unwrap_or_default();
+                    let target = if head == "state" {
+                        parts.next().unwrap_or_default()
+                    } else {
+                        head
+                    };
+                    invalidated.iter().any(|i| i == target)
+                }
+                _ => false,
+            });
+            if reads_changed && !invalidated.contains(&decl.name) {
+                invalidated.push(decl.name.clone());
+            }
+        }
+        if invalidated.len() == before {
+            break;
+        }
+    }
+
+    let mut out = Vec::new();
+    for view in &card.views {
+        let (reads, _) = scan_element(&view.body);
+        if reads.iter().any(|r| invalidated.iter().any(|i| i == r)) {
+            out.push(view.name.clone());
+        }
+    }
+    for component in &card.components {
+        let (mut reads, _) = scan_element(&component.body);
+        reads.retain(|r| !component.params.contains(r));
+        for state in &component.states {
+            reads.push(root_of(&state.path));
+        }
+        if reads.iter().any(|r| invalidated.iter().any(|i| i == r)) {
+            out.push(component.name.clone());
+        }
+    }
+    out
+}
+
+/// Which records must re-realize when these paths change.
+///
+/// The measurable claim behind "one event, one state change, one reconciliation
+/// pass": toggling a unit should touch the records that read it, not the tree.
+pub fn dirty_records(source: &str, changed: &[&str]) -> Vec<String> {
+    let roots: Vec<String> = changed.iter().map(root_of).collect();
+    record_dependencies(source)
+        .into_iter()
+        .filter(|d| d.reads.iter().any(|r| roots.iter().any(|c| c == r)))
+        .map(|d| d.record)
+        .collect()
+}
+
+/// Paths read directly by an element tree, and the records it pulls in.
+fn scan_element(element: &Element) -> (Vec<String>, Vec<String>) {
+    let mut reads = Vec::new();
+    let mut pulls = Vec::new();
+    collect_reads(element, &mut reads, &mut pulls);
+    reads.sort();
+    reads.dedup();
+    pulls.sort();
+    pulls.dedup();
+    (reads, pulls)
+}
+
+fn collect_reads(element: &Element, reads: &mut Vec<String>, pulls: &mut Vec<String>) {
+    // A loop binder shadows: `for d in week` makes `d` local, not a dependency.
+    let binders = &element.binders;
+
+    for arg in &element.args {
+        match &arg.value {
+            Operand::Path(p) | Operand::Predicate(p) => {
+                let root = root_of(p);
+                if !binders.contains(&root) {
+                    reads.push(root);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(Operand::Path(p)) = element.rhs.as_ref() {
+        reads.push(root_of(p));
+    }
+
+    if element.is_reference || !element.name.is_empty() {
+        // A referenced view or an instantiated component contributes its own
+        // reads; a plain constructor is not a record and contributes nothing.
+        let n = &element.name;
+        if !n.is_empty() && n != "for" && n != "when" && n != "slot" {
+            pulls.push(n.clone());
+        }
+    }
+
+    for child in &element.children {
+        let mut child_reads = Vec::new();
+        collect_reads(child, &mut child_reads, pulls);
+        // Binders introduced here shadow inside this subtree only.
+        for r in child_reads {
+            if !binders.contains(&r) {
+                reads.push(r);
+            }
+        }
+    }
+}
