@@ -458,7 +458,7 @@ fn classify_beyond_l0(tokens: &[Token]) -> Option<(Level, SyntaxDiagnostic)> {
 
 #[derive(Debug, Default)]
 struct Card {
-    sources: Vec<String>,
+    sources: Vec<SourceDecl>,
     states: Vec<StateDecl>,
     events: Vec<EventDecl>,
     /// `copy` declarations: name -> locale -> text. Authored in the ledger, so
@@ -468,6 +468,28 @@ struct Card {
     copies: Vec<(String, Vec<(String, String)>)>,
     components: Vec<Component>,
     views: Vec<View>,
+}
+
+/// A declared capability dependency: the name it binds, the helper that answers
+/// it, and the arguments. Parsed rather than skipped — a card that declares what
+/// data it needs is useless if nothing can read the declaration.
+#[derive(Clone, Debug)]
+struct SourceDecl {
+    name: String,
+    helper: String,
+    args: Vec<(String, SourceArg)>,
+    line: usize,
+}
+
+/// One argument to a capability query. None of these is computed.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SourceArg {
+    /// A path into another source, card state, or a declared value.
+    Path(String),
+    Text(String),
+    Number(f64),
+    /// `fields: [temp, hi, lo]` — which fields the card needs back.
+    List(Vec<String>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -671,10 +693,16 @@ impl<'a> Parser<'a> {
             match t.text.as_str() {
                 "source" => {
                     self.at += 1;
-                    if let Some(p) = self.dotted_name() {
-                        card.sources.push(p);
+                    let line = t.line;
+                    if let Some(name) = self.dotted_name() {
+                        let (helper, args) = self.parse_source_query();
+                        card.sources.push(SourceDecl {
+                            name,
+                            helper,
+                            args,
+                            line,
+                        });
                     }
-                    self.skip_source_query();
                 }
                 "state" => {
                     self.at += 1;
@@ -763,17 +791,83 @@ impl<'a> Parser<'a> {
     /// A source body is a capability query the runtime executes. It is not
     /// evaluated here and its shape is the runtime's contract, so it is skipped
     /// to the end of its balanced parentheses.
-    fn skip_source_query(&mut self) {
-        // name
-        while self
-            .peek()
-            .is_some_and(|t| t.kind == Kind::Ident || t.is_punct("."))
-        {
-            self.at += 1;
+    /// `sys.weather(lat: place.lat, fields: [temp, hi])` — the helper and its
+    /// arguments. The body is a query the RUNTIME executes; the view can only
+    /// bind to its result, which is what keeps the host surface empty.
+    fn parse_source_query(&mut self) -> (String, Vec<(String, SourceArg)>) {
+        let mut helper = String::new();
+        while let Some(t) = self.peek().cloned() {
+            if t.kind == Kind::Ident || t.is_punct(".") {
+                helper.push_str(&t.text);
+                self.at += 1;
+            } else {
+                break;
+            }
         }
-        if self.peek().is_some_and(|t| t.is_punct("(")) {
-            self.skip_balanced("(", ")");
+
+        let mut args = Vec::new();
+        if !self.eat_punct("(") {
+            return (helper, args);
         }
+        let mut guard = 0usize;
+        loop {
+            guard += 1;
+            if guard > 64 || self.peek().is_none() {
+                break;
+            }
+            if self.eat_punct(")") {
+                break;
+            }
+            let Some(name) = self.ident() else {
+                self.at += 1;
+                continue;
+            };
+            if !self.eat_punct(":") {
+                break;
+            }
+            let value = match self.peek().cloned() {
+                Some(t) if t.is_punct("[") => {
+                    self.at += 1;
+                    let mut items = Vec::new();
+                    while let Some(i) = self.peek().cloned() {
+                        if i.is_punct("]") {
+                            break;
+                        }
+                        if matches!(i.kind, Kind::Ident | Kind::Str | Kind::Num) {
+                            items.push(i.text.clone());
+                        }
+                        self.at += 1;
+                    }
+                    self.expect_punct("]");
+                    SourceArg::List(items)
+                }
+                Some(t) if t.kind == Kind::Str => {
+                    self.at += 1;
+                    SourceArg::Text(t.text)
+                }
+                Some(t) if t.kind == Kind::Num => {
+                    self.at += 1;
+                    SourceArg::Number(t.text.parse().unwrap_or(0.0))
+                }
+                Some(t) if t.kind == Kind::Token => {
+                    self.at += 1;
+                    SourceArg::Text(t.text.trim_start_matches('.').to_string())
+                }
+                Some(t) if t.kind == Kind::Ident => {
+                    SourceArg::Path(self.dotted_name().unwrap_or(t.text))
+                }
+                _ => {
+                    self.at += 1;
+                    continue;
+                }
+            };
+            args.push((name, value));
+            if !self.eat_punct(",") {
+                self.expect_punct(")");
+                break;
+            }
+        }
+        (helper, args)
     }
 
     fn skip_braced(&mut self) {
@@ -1668,7 +1762,7 @@ struct Scope {
 impl Scope {
     fn card(card: &Card) -> Self {
         let mut roots: Vec<String> = Vec::new();
-        roots.extend(card.sources.iter().map(root_of));
+        roots.extend(card.sources.iter().map(|s| root_of(&s.name)));
         roots.extend(card.states.iter().map(|s| root_of(&s.path)));
         roots.push("copy".into());
         let events = card.events.iter().map(|e| e.name.clone()).collect();
@@ -1681,7 +1775,7 @@ impl Scope {
 
     fn component(card: &Card, component: &Component) -> Self {
         let mut roots: Vec<String> = Vec::new();
-        roots.extend(card.sources.iter().map(root_of));
+        roots.extend(card.sources.iter().map(|s| root_of(&s.name)));
         roots.push("copy".into());
         roots.extend(component.params.iter().cloned());
         roots.extend(component.states.iter().map(|s| root_of(&s.path)));
@@ -3038,4 +3132,120 @@ pub fn dispatch_with(
         applied = true;
     }
     applied
+}
+
+// ───────────────────────────────────────────────────────────────── source plan ──
+
+/// One capability query for the host to answer, with the name its result binds.
+#[derive(Clone, Debug)]
+pub struct SourceRequest {
+    /// The name the card binds the result to — `now`, `week`, `env.locale`.
+    pub name: String,
+    /// The helper that answers it — `sys.weather`. Resolving this to an actual
+    /// function is the HOST's job; splash-core never calls anything.
+    pub helper: String,
+    pub args: Vec<(String, SourceArg)>,
+    /// Names of other sources this one reads. The host must resolve those first.
+    pub depends_on: Vec<String>,
+}
+
+/// What a card needs fetched, in an order that satisfies its dependencies.
+#[derive(Clone, Debug, Default)]
+pub struct SourcePlan {
+    pub requests: Vec<SourceRequest>,
+    pub diagnostics: Vec<SyntaxDiagnostic>,
+}
+
+/// Read a card's `source` declarations and order them for resolution.
+///
+/// Sources form a DAG: `source now sys.weather(lat: place.lat, …)` cannot be
+/// fetched before `place`. The order is topological, so a host can walk the list
+/// and always have what the next request refers to.
+///
+/// This returns *what to fetch*, never fetches it. The card names a helper; only
+/// the host knows what answers it. That separation is what lets realization run
+/// against an empty host surface.
+pub fn source_plan(source: &str) -> SourcePlan {
+    let mut sink = Diagnostics::default();
+    let Some(tokens) = lex(source, &mut sink) else {
+        return SourcePlan {
+            requests: Vec::new(),
+            diagnostics: sink.items,
+        };
+    };
+    let card = Parser::new(&tokens, &mut sink).parse_card();
+
+    let declared: Vec<&str> = card.sources.iter().map(|s| s.name.as_str()).collect();
+
+    let mut pending: Vec<SourceRequest> = card
+        .sources
+        .iter()
+        .map(|decl| {
+            let mut depends_on: Vec<String> = decl
+                .args
+                .iter()
+                .filter_map(|(_, arg)| match arg {
+                    SourceArg::Path(p) => {
+                        let root = root_of(p);
+                        // Only another SOURCE is a fetch dependency. A path into
+                        // card state is available before any fetch begins.
+                        declared.iter().find(|d| **d == root).map(|_| root)
+                    }
+                    _ => None,
+                })
+                .collect();
+            depends_on.sort();
+            depends_on.dedup();
+            SourceRequest {
+                name: decl.name.clone(),
+                helper: decl.helper.clone(),
+                args: decl.args.clone(),
+                depends_on,
+            }
+        })
+        .collect();
+
+    // Topological order. A cycle is reported rather than resolved: two sources
+    // that read each other cannot both go first, and picking one silently would
+    // fetch against a value that does not exist yet.
+    let mut ordered: Vec<SourceRequest> = Vec::new();
+    let mut done: Vec<String> = Vec::new();
+    while !pending.is_empty() {
+        let ready: Vec<usize> = pending
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.depends_on.iter().all(|d| done.iter().any(|n| n == d)))
+            .map(|(i, _)| i)
+            .collect();
+
+        if ready.is_empty() {
+            for stuck in &pending {
+                sink.push(
+                    card.sources
+                        .iter()
+                        .find(|d| d.name == stuck.name)
+                        .map(|d| d.line)
+                        .unwrap_or(0),
+                    1,
+                    format!(
+                        "source {:?} is in a dependency cycle with {:?}",
+                        stuck.name,
+                        stuck.depends_on.join(", ")
+                    ),
+                );
+            }
+            break;
+        }
+
+        for i in ready.into_iter().rev() {
+            let request = pending.remove(i);
+            done.push(request.name.clone());
+            ordered.push(request);
+        }
+    }
+
+    SourcePlan {
+        requests: ordered,
+        diagnostics: sink.items,
+    }
 }

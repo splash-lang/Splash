@@ -1038,3 +1038,86 @@ fn copy_selects_the_reported_locale() {
         "an unknown locale falls back to en"
     );
 }
+
+// ───────────────────────────────────────────────────────────────── source plan ──
+
+use splash_core::ui_l0::{source_plan, SourceArg};
+
+/// A card declares what data it needs; the plan is what a host fetches. Without
+/// it the declaration was inert — the parser skipped the helper and every
+/// argument, so nothing could act on `source now sys.weather(…)`.
+#[test]
+fn the_plan_reports_helpers_and_arguments() {
+    let plan = source_plan(WEATHER);
+    assert!(plan.diagnostics.is_empty(), "{:#?}", plan.diagnostics);
+
+    let now = plan.requests.iter().find(|r| r.name == "now").expect("now");
+    assert_eq!(now.helper, "sys.weather");
+
+    let (_, lat) = now.args.iter().find(|(n, _)| n == "lat").expect("lat");
+    assert_eq!(*lat, SourceArg::Path("place.lat".into()));
+
+    let (_, fields) = now
+        .args
+        .iter()
+        .find(|(n, _)| n == "fields")
+        .expect("fields");
+    match fields {
+        SourceArg::List(items) => {
+            assert!(items.contains(&"temp".to_string()), "{items:?}");
+            assert!(items.contains(&"humidity".to_string()), "{items:?}");
+        }
+        other => panic!("fields should be a list, got {other:?}"),
+    }
+}
+
+/// `now` reads `place.lat`, so `place` must be fetched first. A host walking the
+/// list in order always has what the next request refers to.
+#[test]
+fn the_plan_orders_dependencies_before_dependents() {
+    let plan = source_plan(WEATHER);
+    let at = |name: &str| plan.requests.iter().position(|r| r.name == name).unwrap();
+    assert!(at("place") < at("now"), "place must precede now");
+    assert!(at("place") < at("week"), "place must precede week");
+    assert!(at("place") < at("aqi"), "place must precede aqi");
+
+    let now = &plan.requests[at("now")];
+    assert_eq!(now.depends_on, vec!["place".to_string()]);
+
+    // A source reading only card state depends on no other fetch.
+    let place = &plan.requests[at("place")];
+    assert!(place.depends_on.is_empty(), "{:?}", place.depends_on);
+}
+
+/// Two sources that read each other cannot both go first. Picking one silently
+/// would fetch against a value that does not exist yet.
+#[test]
+fn a_dependency_cycle_is_reported_rather_than_resolved() {
+    let plan =
+        source_plan("source a sys.one(x: b.value)\nsource b sys.two(y: a.value)\nview root Panel");
+    assert!(
+        plan.diagnostics.iter().any(|d| d.message.contains("cycle")),
+        "{:#?}",
+        plan.diagnostics
+    );
+}
+
+#[test]
+fn every_reference_card_yields_a_resolvable_plan() {
+    for (name, card) in [("weather", WEATHER), ("news", NEWS), ("stock", STOCK)] {
+        let plan = source_plan(card);
+        assert!(
+            plan.diagnostics.is_empty(),
+            "{name}: {:#?}",
+            plan.diagnostics
+        );
+        assert!(!plan.requests.is_empty(), "{name} declares no sources");
+        for request in &plan.requests {
+            assert!(
+                request.helper.starts_with("sys."),
+                "{name}: {:?} has no helper",
+                request.name
+            );
+        }
+    }
+}
