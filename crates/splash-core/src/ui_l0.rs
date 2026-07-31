@@ -555,8 +555,8 @@ struct Arg {
 enum Operand {
     Path(String),
     Token(String),
-    Str,
-    Num,
+    Str(String),
+    Num(f64),
     Predicate(String),
 }
 
@@ -1209,7 +1209,7 @@ impl<'a> Parser<'a> {
 
     fn parse_operand(&mut self) -> Operand {
         let Some(t) = self.peek().cloned() else {
-            return Operand::Str;
+            return Operand::Str(String::new());
         };
         match t.kind {
             Kind::Token => {
@@ -1218,11 +1218,11 @@ impl<'a> Parser<'a> {
             }
             Kind::Str => {
                 self.at += 1;
-                Operand::Str
+                Operand::Str(t.text.clone())
             }
             Kind::Num => {
                 self.at += 1;
-                Operand::Num
+                Operand::Num(t.text.parse().unwrap_or(0.0))
             }
             Kind::Ident => {
                 let path = self.dotted_name().unwrap_or_default();
@@ -1236,7 +1236,7 @@ impl<'a> Parser<'a> {
             }
             _ => {
                 self.at += 1;
-                Operand::Str
+                Operand::Str(String::new())
             }
         }
     }
@@ -2139,7 +2139,8 @@ impl Realizer<'_> {
             Some(Operand::Token(t)) => Some(crate::JsonValue::String(
                 t.trim_start_matches('.').to_string(),
             )),
-            Some(Operand::Str) | Some(Operand::Num) => None,
+            Some(Operand::Str(s)) => Some(crate::JsonValue::String(s.clone())),
+            Some(Operand::Num(n)) => crate::JsonValue::from(*n).into(),
             _ => None,
         };
 
@@ -2189,8 +2190,8 @@ impl Realizer<'_> {
         }
         match operand {
             Operand::Token(t) => NodeValue::Token(t.trim_start_matches('.').to_string()),
-            Operand::Str => NodeValue::Text(String::new()),
-            Operand::Num => NodeValue::Number(0.0),
+            Operand::Str(s) => NodeValue::Text(s.clone()),
+            Operand::Num(n) => NodeValue::Number(*n),
             Operand::Predicate(p) | Operand::Path(p) => match scope.lookup(p) {
                 Some(crate::JsonValue::String(s)) => NodeValue::Text(s),
                 Some(crate::JsonValue::Bool(b)) => NodeValue::Bool(b),
@@ -2208,5 +2209,315 @@ fn json_to_key(value: &crate::JsonValue) -> String {
     match value {
         crate::JsonValue::String(s) => s.clone(),
         other => other.to_string(),
+    }
+}
+
+// ──────────────────────────────────────────────────────── makepad text lowering ──
+
+/// Lower a realized tree to the Splash DSL a Makepad host renders.
+///
+/// **This is one backend's lowering and belongs in Splash-Makepad**, not here. It
+/// lives beside the node model only until that crate is wired up; nothing in
+/// [`realize`] depends on it, and a different backend consumes [`UiNode`]
+/// directly rather than going through text.
+///
+/// The output is fully concrete: realization already substituted the runtime's
+/// data, so the DSL carries values rather than `sys.*` calls. That is the ledger
+/// discipline holding — the card declares questions, and only the *realized
+/// output* contains answers.
+pub mod makepad {
+    use super::{NodeValue, UiNode};
+    use std::fmt::Write as _;
+
+    // Matching octos-one's `plan/common.rs`, so a lowered card sits beside the
+    // existing ones rather than looking like a different app.
+    const BASE: &str = "#0a0e14";
+    const SCRIM: &str = "#00000066";
+    const PANEL: &str = "#ffffff12";
+    const HAIRLINE: &str = "#ffffff1a";
+    const TEXT: &str = "#ffffff";
+    const SOFT: &str = "#ffffffe6";
+    const DIM: &str = "#ffffff99";
+    const PAGE_PAD: &str = "Inset{left: 20 top: 54 right: 20 bottom: 24}";
+
+    pub fn lower(root: &UiNode) -> String {
+        let mut out = String::new();
+        let _ = writeln!(out, "// name: l0-card");
+        let _ = writeln!(out, "// REALIZED from an L0 ledger — do not edit.");
+        element(root, 0, &mut out);
+        out
+    }
+
+    fn arg<'a>(node: &'a UiNode, name: &str) -> Option<&'a NodeValue> {
+        node.args.iter().find(|(n, _)| n == name).map(|(_, v)| v)
+    }
+
+    /// A value in text position. `Missing` becomes an em dash rather than an
+    /// empty string, so an unresolved binding is visible on screen instead of
+    /// silently rendering a blank field.
+    fn text_of(value: Option<&NodeValue>) -> String {
+        match value {
+            Some(NodeValue::Text(s)) => format!("{s:?}"),
+            Some(NodeValue::Number(n)) => format!("{:?}", trim_num(*n)),
+            Some(NodeValue::Bool(b)) => format!("{b:?}"),
+            Some(NodeValue::Token(t)) => format!("{t:?}"),
+            Some(NodeValue::Event(_)) | None => "\"\"".into(),
+            Some(NodeValue::Missing) => "\"—\"".into(),
+        }
+    }
+
+    fn num_of(value: Option<&NodeValue>) -> f64 {
+        match value {
+            Some(NodeValue::Number(n)) => *n,
+            Some(NodeValue::Text(s)) => s.parse().unwrap_or(0.0),
+            _ => 0.0,
+        }
+    }
+
+    fn trim_num(n: f64) -> String {
+        if (n - n.round()).abs() < f64::EPSILON {
+            format!("{}", n as i64)
+        } else {
+            format!("{n:.1}")
+        }
+    }
+
+    /// A value plus its unit suffix, which is a presentation concern the runtime
+    /// owns — the card never wrote "°" next to a number.
+    fn valued(node: &UiNode) -> String {
+        let value = arg(node, "value");
+        let unit = match arg(node, "unit") {
+            Some(NodeValue::Token(t)) if t == "c" || t == "f" => "°",
+            Some(NodeValue::Text(t)) if t == "c" || t == "f" => "°",
+            Some(NodeValue::Token(t)) if t == "pct" => "%",
+            _ => "",
+        };
+        let glyph = match arg(node, "glyph") {
+            Some(NodeValue::Text(g)) => g.clone(),
+            _ => String::new(),
+        };
+        match value {
+            Some(NodeValue::Missing) => "\"—\"".into(),
+            Some(v) => {
+                let body = match v {
+                    NodeValue::Number(n) => trim_num(*n),
+                    NodeValue::Text(s) => s.clone(),
+                    _ => String::new(),
+                };
+                format!("{:?}", format!("{glyph}{body}{unit}"))
+            }
+            None => text_of(arg(node, "text")),
+        }
+    }
+
+    fn pad(depth: usize) -> String {
+        "  ".repeat(depth.min(32))
+    }
+
+    fn children(node: &UiNode, depth: usize, out: &mut String) {
+        for child in &node.children {
+            element(child, depth + 1, out);
+        }
+    }
+
+    fn element(node: &UiNode, depth: usize, out: &mut String) {
+        let p = pad(depth);
+        match node.kind.as_str() {
+            "Surface" => {
+                let _ = writeln!(
+                    out,
+                    "{p}SolidView{{ width: Fill height: Fit flow: Down new_batch: true \
+                     draw_bg.color: {BASE} padding: {PAGE_PAD}"
+                );
+                children(node, depth, out);
+                let _ = writeln!(out, "{p}}}");
+            }
+            "Photo" => {
+                // Overlay: photo, scrim, then the column. A `Fit` overlay takes
+                // its tallest child, so the image needs a fixed height or the
+                // card ends in a band of bare base colour.
+                let src = match arg(node, "src") {
+                    Some(NodeValue::Text(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                let _ = writeln!(
+                    out,
+                    "{p}SolidView{{ width: Fill height: Fit flow: Overlay new_batch: true \
+                     draw_bg.color: {BASE}"
+                );
+                if !src.is_empty() {
+                    let _ = writeln!(
+                        out,
+                        "{p}  Image{{ src: http_resource({src:?}) fit: ImageFit.CropToFill \
+                         width: Fill height: 2000 }}"
+                    );
+                }
+                let _ = writeln!(
+                    out,
+                    "{p}  SolidView{{ width: Fill height: Fill draw_bg.color: {SCRIM} }}"
+                );
+                let _ = writeln!(
+                    out,
+                    "{p}  View{{ width: Fill height: Fit flow: Down padding: {PAGE_PAD}"
+                );
+                children(node, depth + 1, out);
+                let _ = writeln!(out, "{p}  }}");
+                let _ = writeln!(out, "{p}}}");
+            }
+            "Col" => {
+                let align =
+                    matches!(arg(node, "align"), Some(NodeValue::Token(t)) if t == "center");
+                let a = if align { " align: Align{x: 0.5}" } else { "" };
+                let _ = writeln!(out, "{p}View{{ width: Fill height: Fit flow: Down{a}");
+                children(node, depth, out);
+                let _ = writeln!(out, "{p}}}");
+            }
+            "Row" => {
+                let _ = writeln!(
+                    out,
+                    "{p}View{{ width: Fill height: Fit flow: Right align: Align{{y: 0.5}} spacing: 6"
+                );
+                children(node, depth, out);
+                let _ = writeln!(out, "{p}}}");
+            }
+            "Panel" | "Card" => {
+                let _ = writeln!(
+                    out,
+                    "{p}RoundedView{{ width: Fill height: Fit flow: Down new_batch: true \
+                     draw_bg.color: {PANEL} draw_bg.border_radius: 14.0 \
+                     margin: Inset{{top: 16}} padding: Inset{{left: 14 right: 14 top: 12 bottom: 12}}"
+                );
+                children(node, depth, out);
+                let _ = writeln!(out, "{p}}}");
+            }
+            "Grid" => {
+                // Two columns, emitted as rows of two so the existing layout
+                // engine needs no grid primitive.
+                let _ = writeln!(
+                    out,
+                    "{p}View{{ width: Fill height: Fit flow: Down spacing: 8"
+                );
+                for pair in node.children.chunks(2) {
+                    let _ = writeln!(
+                        out,
+                        "{p}  View{{ width: Fill height: Fit flow: Right spacing: 8"
+                    );
+                    for cell in pair {
+                        element(cell, depth + 2, out);
+                    }
+                    let _ = writeln!(out, "{p}  }}");
+                }
+                let _ = writeln!(out, "{p}}}");
+            }
+            "Rule" => {
+                let _ = writeln!(
+                    out,
+                    "{p}SolidView{{ width: Fill height: 1 draw_bg.color: {HAIRLINE} }}"
+                );
+            }
+            "Tile" => {
+                let _ = writeln!(
+                    out,
+                    "{p}RoundedView{{ width: Fill height: Fit flow: Down new_batch: true \
+                     draw_bg.color: {PANEL} draw_bg.border_radius: 18.0 \
+                     padding: Inset{{left: 14 right: 14 top: 12 bottom: 12}} spacing: 4"
+                );
+                let _ = writeln!(
+                    out,
+                    "{p}  TextCaption{{ text: {} draw_text.color: {DIM} }}",
+                    text_of(arg(node, "label"))
+                );
+                let _ = writeln!(
+                    out,
+                    "{p}  TextStat{{ text: {} draw_text.color: {TEXT} }}",
+                    valued(node)
+                );
+                let _ = writeln!(out, "{p}}}");
+            }
+            "TempBar" => {
+                let _ = writeln!(
+                    out,
+                    "{p}TempBar{{ width: Fill height: 8 margin: Inset{{left: 10 right: 10}} \
+                     draw_bg.tlo: {} draw_bg.thi: {} draw_bg.wmin: {} draw_bg.wmax: {} }}",
+                    trim_num(num_of(arg(node, "lo"))),
+                    trim_num(num_of(arg(node, "hi"))),
+                    trim_num(num_of(arg(node, "min"))),
+                    trim_num(num_of(arg(node, "max"))),
+                );
+            }
+            "WeatherIcon" => {
+                let size = matches!(arg(node, "size"), Some(NodeValue::Token(t)) if t == "hero");
+                let (w, h) = if size { (64, 64) } else { (34, 26) };
+                let _ = writeln!(
+                    out,
+                    "{p}WeatherIcon{{ width: {w} height: {h} draw_bg.cond: {} }}",
+                    trim_num(num_of(arg(node, "cond")))
+                );
+            }
+            "SunArc" => {
+                let _ = writeln!(
+                    out,
+                    "{p}SunArc{{ width: Fill height: 90 draw_bg.rise: {} draw_bg.set: {} draw_bg.now: {} }}",
+                    trim_num(num_of(arg(node, "rise"))),
+                    trim_num(num_of(arg(node, "set"))),
+                    trim_num(num_of(arg(node, "now"))),
+                );
+            }
+            "MoonPhase" => {
+                let _ = writeln!(
+                    out,
+                    "{p}MoonPhase{{ width: 64 height: 64 draw_bg.phase: {} }}",
+                    trim_num(num_of(arg(node, "phase")))
+                );
+            }
+            "AqiContour" => {
+                let _ = writeln!(
+                    out,
+                    "{p}AqiContour{{ width: Fill height: 190 draw_bg.have: 1.0 draw_bg.idx: {} }}",
+                    trim_num(num_of(arg(node, "index")))
+                );
+            }
+            "StockPlot" => {
+                let _ = writeln!(out, "{p}StockPlot{{ width: Fill height: 180 }}");
+            }
+            "Chip" => {
+                let _ = writeln!(
+                    out,
+                    "{p}RoundedView{{ width: Fit height: Fit draw_bg.color: {PANEL} \
+                     draw_bg.border_radius: 12.0 padding: Inset{{left: 10 right: 10 top: 5 bottom: 5}}"
+                );
+                let _ = writeln!(
+                    out,
+                    "{p}  TextCaption{{ text: {} draw_text.color: {SOFT} }}",
+                    text_of(arg(node, "text"))
+                );
+                let _ = writeln!(out, "{p}}}");
+            }
+            role if role.starts_with("Text") => {
+                let colour = match role {
+                    "TextCaption" => DIM,
+                    "TextRow" => SOFT,
+                    _ => TEXT,
+                };
+                let body = if arg(node, "value").is_some() || arg(node, "glyph").is_some() {
+                    valued(node)
+                } else {
+                    text_of(arg(node, "text"))
+                };
+                let _ = writeln!(
+                    out,
+                    "{p}{role}{{ width: Fill text: {body} draw_text.color: {colour} }}"
+                );
+            }
+            other => {
+                // An unmapped constructor is shown, not skipped. A card that
+                // silently drops a section looks correct and is not.
+                let _ = writeln!(
+                    out,
+                    "{p}TextCaption{{ text: {:?} draw_text.color: #ffb4b4 }}",
+                    format!("⚠ no makepad lowering for {other}")
+                );
+            }
+        }
     }
 }

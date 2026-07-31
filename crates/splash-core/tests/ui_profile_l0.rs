@@ -423,9 +423,13 @@ fn weather_data() -> serde_json::Value {
         "now":   { "temp": 18.0, "feels": 16.0, "hi": 21.0, "lo": 12.0, "cond": "cloudy",
                    "humidity": 61.0, "wind": 9.0, "pressure": 1013.0, "uv": 3.0,
                    "visibility": 10.0 },
-        "week":  [ { "dayname": "Mon", "hi": 21.0, "lo": 12.0, "cond": "cloudy" },
-                   { "dayname": "Tue", "hi": 23.0, "lo": 13.0, "cond": "sun" },
-                   { "dayname": "Wed", "hi": 19.0, "lo": 11.0, "cond": "rain" } ],
+        // `week` is a record: the days plus the bounds every bar scales against.
+        // An array could not carry both, which is what the first data snapshot
+        // got wrong and silently zeroed every TempBar.
+        "week":  { "days": [ { "dayname": "Mon", "hi": 21.0, "lo": 12.0, "cond": 2.0 },
+                             { "dayname": "Tue", "hi": 23.0, "lo": 13.0, "cond": 0.0 },
+                             { "dayname": "Wed", "hi": 19.0, "lo": 11.0, "cond": 3.0 } ],
+                   "min_lo": 11.0, "max_hi": 23.0 },
         "sun":   { "rise": 5.1, "set": 18.9, "now": 12.0 },
         "moon":  { "phase": 0.5, "illumination": 0.5 },
         "aqi":   { "grid": [1, 2], "index": 42.0, "band": "good" },
@@ -591,7 +595,7 @@ fn a_long_collection_is_truncated_rather_than_unbounded() {
     let week: Vec<serde_json::Value> = (0..5_000)
         .map(|i| serde_json::json!({ "dayname": format!("d{i}"), "hi": 1.0, "lo": 0.0, "cond": "x" }))
         .collect();
-    data["week"] = serde_json::Value::Array(week);
+    data["week"] = serde_json::json!({ "days": week, "min_lo": 0.0, "max_hi": 1.0 });
     let limits = RealizeLimits {
         max_collection: 8,
         ..RealizeLimits::default()
@@ -631,4 +635,68 @@ fn the_other_two_cards_realize_too() {
     let report = realize(STOCK, &stock, RealizeLimits::default());
     assert!(report.diagnostics.is_empty(), "{:#?}", report.diagnostics);
     assert!(report.root.is_some());
+}
+
+// ───────────────────────────────────────────────────────────── makepad lowering ──
+
+use splash_core::ui_l0::makepad;
+
+#[test]
+fn a_realized_card_lowers_to_renderable_dsl() {
+    let report = realize(WEATHER, &weather_data(), RealizeLimits::default());
+    let dsl = makepad::lower(&report.root.unwrap());
+
+    // Exactly one top-level node. Siblings at top level lay out SIDE BY SIDE and
+    // squeeze the card into half the width — a real generated-card bug.
+    let tops = dsl
+        .lines()
+        .filter(|l| !l.starts_with("//") && !l.starts_with(' ') && !l.trim().is_empty())
+        .filter(|l| l.contains('{'))
+        .count();
+    assert_eq!(tops, 1, "expected one root node:\n{dsl}");
+
+    assert!(
+        dsl.contains("http_resource"),
+        "the photo should be a resource"
+    );
+    assert!(
+        dsl.contains("TempBar{"),
+        "forecast bars should survive lowering"
+    );
+    assert!(
+        dsl.contains("MoonPhase{"),
+        "the moon phase should survive lowering"
+    );
+    assert!(
+        dsl.contains("\"Kyoto\""),
+        "the bound city should be concrete"
+    );
+    assert!(
+        !dsl.contains("sys."),
+        "realization already resolved sources: {dsl}"
+    );
+}
+
+/// Nothing may be silently dropped: an unmapped constructor renders a visible
+/// warning instead of vanishing.
+#[test]
+fn an_unmapped_constructor_is_visible_rather_than_dropped() {
+    let node = splash_core::ui_l0::UiNode {
+        kind: "Hologram".into(),
+        key: "root".into(),
+        args: vec![],
+        children: vec![],
+    };
+    let dsl = makepad::lower(&node);
+    assert!(dsl.contains("no makepad lowering for Hologram"), "{dsl}");
+}
+
+/// A missing binding reaches the screen as an em dash rather than a blank.
+#[test]
+fn a_missing_binding_lowers_to_a_visible_dash() {
+    let mut data = weather_data();
+    data["now"]["humidity"] = serde_json::Value::Null;
+    let report = realize(WEATHER, &data, RealizeLimits::default());
+    let dsl = makepad::lower(&report.root.unwrap());
+    assert!(dsl.contains('—'), "an unresolved field should be visible");
 }

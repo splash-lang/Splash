@@ -15,6 +15,10 @@ source now         sys.weather(lat: place.lat, lon: place.lon,
 source week        sys.weather(lat: place.lat, lon: place.lon, days: state.days,
                                fields: [dayname, hi, lo, cond],
                                aggregate: [min_lo, max_hi])
+# `week` is a RECORD: `week.days` is the collection, `week.min_lo`/`max_hi` are
+# the bounds every bar scales against. Those bounds were a hand-authored
+# `wmin`/`wmax` in an earlier card and got invented by the model; here they come
+# back with the data they describe.
 source sun         sys.daylight(lat: place.lat, lon: place.lon)
 source moon        sys.moonphase()
 source aqi         sys.airquality(lat: place.lat, lon: place.lon)
@@ -90,7 +94,7 @@ component ForecastRow(item: record, unit: enum[c, f]) {
 }
 
 view forecast  Panel {
-                 for d in week key d.dayname {
+                 for d in week.days key d.dayname {
                    ForecastRow(item: d, unit: units)
                  }
                }
