@@ -1599,6 +1599,30 @@ fn slot_names(component: &Component) -> Vec<String> {
     out
 }
 
+/// Path segments for a list of siblings, stable against insertion.
+///
+/// Profile §5.1 identifies an instance by its *instantiation site*, not its
+/// position, "so that identity survives a ledger edit that inserts an element
+/// above". A raw child index does not: inserting a `Rule()` renumbers every
+/// sibling after it, and each one loses its local state — which is React's rule,
+/// and precisely the rule §5.1 says L0 does not use.
+///
+/// Numbering within each element NAME fixes that. Two sibling `Row`s are still
+/// distinct (`Row#0`, `Row#1`), so keys stay unique for hit-testing, but a
+/// `Rule()` inserted above a `Toggly` leaves `Toggly#0` untouched.
+fn sibling_segments(children: &[Element]) -> Vec<(String, &Element)> {
+    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    children
+        .iter()
+        .map(|child| {
+            let n = seen.entry(child.name.as_str()).or_insert(0);
+            let segment = format!("{}#{}", child.name, *n);
+            *n += 1;
+            (segment, child)
+        })
+        .collect()
+}
+
 fn split_slots(children: &[Element]) -> Vec<(String, Vec<Element>)> {
     let mut groups: Vec<(String, Vec<Element>)> = vec![(String::new(), Vec::new())];
     for child in children {
@@ -2643,8 +2667,13 @@ impl Realizer<'_> {
             let value = self.value(&element.name, &arg.name, &arg.value, scope);
             node.args.push((arg.name.clone(), value));
         }
-        for (i, child) in element.children.iter().enumerate() {
-            self.element(child, scope, &format!("{key}/{i}"), &mut node.children);
+        for (segment, child) in sibling_segments(&element.children) {
+            self.element(
+                child,
+                scope,
+                &format!("{key}/{segment}"),
+                &mut node.children,
+            );
         }
         out.push(node);
     }

@@ -1771,3 +1771,93 @@ fn a_cycle_listing_a_different_order_is_rejected() {
         report.diagnostics
     );
 }
+
+// ─── §5.1 identity is a path, not a position ─────────────────────────────────
+
+const TOGGLY: &str = r#"
+component Toggly() {
+  state open { shape: bool, initial: false }
+  event flip { open: toggle }
+  view Col {
+    Row(on_tap: flip) { TextRow(text: "hdr") }
+    when open { TextCaption(text: "OPEN") }
+  }
+}
+view root Panel { Toggly() }
+"#;
+
+/// §5.1: "L0 binds to a declared path so that identity survives a ledger edit
+/// that inserts an element above." This is the profile's stated difference from
+/// React, and it went untested — the implementation keyed children by their raw
+/// index, so it was in fact using React's rule while the spec said it was not.
+///
+/// The scenario is not hypothetical for a ledger: appending a record that adds
+/// a rule above a list is an ordinary edit, and it should not collapse every
+/// expanded row on screen.
+#[test]
+fn state_survives_an_element_inserted_above() {
+    let data = serde_json::json!({});
+    let mut store = splash_core::ui_l0::InstanceStore::default();
+
+    let first =
+        splash_core::ui_l0::realize_with_state(TOGGLY, &data, &store, RealizeLimits::default());
+    let root = first.root.unwrap();
+    let mut rows = Vec::new();
+    find(&root, "Row", &mut rows);
+    let key = rows[0].key.clone();
+    splash_core::ui_l0::dispatch(TOGGLY, &mut store, &key, "flip");
+
+    // The same card with a Rule inserted ABOVE the component.
+    let edited = TOGGLY.replace(
+        "view root Panel { Toggly() }",
+        "view root Panel { Rule() Toggly() }",
+    );
+    assert_ne!(edited, TOGGLY, "the edit must actually apply");
+
+    let after =
+        splash_core::ui_l0::realize_with_state(&edited, &data, &store, RealizeLimits::default());
+    let after_root = after.root.unwrap();
+    let mut rows_after = Vec::new();
+    find(&after_root, "Row", &mut rows_after);
+    assert_eq!(
+        rows_after[0].key, key,
+        "the instance key must not depend on how many siblings precede it"
+    );
+
+    let mut caps = Vec::new();
+    find(&after_root, "TextCaption", &mut caps);
+    assert_eq!(
+        caps.len(),
+        1,
+        "the toggled state must survive an insertion above (profile §5.1)"
+    );
+}
+
+/// The other half: sibling instances of the same component stay distinct, so
+/// making keys insertion-stable must not make two of them collide.
+#[test]
+fn sibling_instances_of_one_component_keep_separate_state() {
+    let two = TOGGLY.replace(
+        "view root Panel { Toggly() }",
+        "view root Panel { Toggly() Toggly() }",
+    );
+    let data = serde_json::json!({});
+    let mut store = splash_core::ui_l0::InstanceStore::default();
+
+    let first =
+        splash_core::ui_l0::realize_with_state(&two, &data, &store, RealizeLimits::default());
+    let root = first.root.unwrap();
+    let mut rows = Vec::new();
+    find(&root, "Row", &mut rows);
+    assert_eq!(rows.len(), 2);
+    assert_ne!(rows[0].key, rows[1].key, "two instances need two keys");
+
+    // Flip only the first.
+    splash_core::ui_l0::dispatch(&two, &mut store, &rows[0].key.clone(), "flip");
+    let after =
+        splash_core::ui_l0::realize_with_state(&two, &data, &store, RealizeLimits::default());
+    let after_root = after.root.unwrap();
+    let mut caps = Vec::new();
+    find(&after_root, "TextCaption", &mut caps);
+    assert_eq!(caps.len(), 1, "exactly one instance should be expanded");
+}
