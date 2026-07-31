@@ -387,9 +387,10 @@ declared local state, with no expression form and no module access, evaluated
 against an empty host surface. Three reference cards exercise it.
 
 **Implemented** in `splash-core::ui_l0`: parser, validator, per-instance state store,
-event dispatch, and a renderer-neutral realizer. 48 tests; the three reference cards are
-accepted and the shipping nav card is rejected as L2; a card renders on a OnePlus 6T through
-an unmodified downstream host.
+event dispatch, a renderer-neutral realizer, a source plan, and static dependency tracking for
+reconciliation. 85 tests; the three reference cards are accepted and the shipping nav card is
+rejected as L2; four cases render on a OnePlus 6T through an unmodified downstream host, checked
+against golden images.
 
 Building it settled one claim in the profile's own favour and against its wording. L0 has no
 expression form, so there is nothing to evaluate: realization never enters the VM, and the
@@ -397,23 +398,47 @@ implementation contains no reference to it. Authority confinement is structural 
 strongest sense available — no execution machinery in the path, rather than a sandbox or an
 empty module table.
 
+Since resolved — every question the profile listed as open is now settled, and the
+constructs behind them are implemented:
+
+- **Component version pinning.** The check returns a per-component definition
+  digest. Level is a judgment over the transitive closure, so pinning the level
+  alone let a replaced definition carry an approved L0 verdict onto code that no
+  longer earned it. The digest ignores declaration order, so a reformat is not a
+  version change.
+- **Named slots** — `slot name` in a component, `into name { … }` at the call
+  site, with the anonymous slot unchanged as the default. An `into` naming a
+  slot that does not exist is rejected rather than dropping its children.
+- **State migration** — `keep: true` exempts one cell from the §5.8 schema
+  reset, and only while that field's own shape is unchanged.
+- **Source lifecycle** — `<source>.$state` yields pending/ready/stale/failed, so
+  a card can distinguish "loading" from "the fetch failed" from "no value".
+  Previously all three rendered the same em dash, which is the presentation a
+  card gives to data it actually has.
+- **Termination.** All five of the profile's §6 conditions are now accounted
+  for: acyclicity and total transition forms are validated, collection length,
+  node count and nesting depth are enforced at realization, and the prohibition
+  on event cascades holds structurally — no total form can name an event, so a
+  cascade is unrepresentable rather than rejected. That last one is pinned by a
+  test, because a future form that could raise an event would silently move
+  termination from structural to unchecked.
+
 Remaining:
 
-- **Component versions are not pinned.** The level classifier resolves over the
-  transitive closure, but a referenced component definition being replaced can
-  still widen a card's level without the card changing.
-- **Live sources.** Realization takes injected data; nothing yet maps a `source`
-  declaration to the helper that answers it. That mapping is also what would end
-  the duplication of `sys.*` across four hosts, where every divergence so far
-  has produced a device-visible bug.
-- **Reconciliation.** Realization rebuilds the tree; a state write does not yet
-  patch only its dependents.
-- **Named slots**, and an explicit state migration so preservation across a
-  schema change is opt-in rather than impossible.
-- **Termination** still rests on the five conditions in the profile's §6, of
-  which the implementation enforces two: component-graph acyclicity, and
-  iteration over a bound path. Collection length, node count and nesting depth
-  are traversal bounds the caller sets.
+- **Live sources.** `source_plan` says what to fetch and in what order, and a
+  host-side resolver fulfils it, but nothing yet maps a `source` declaration to
+  a shared helper definition. That mapping is what would end the duplication of
+  `sys.*` across four hosts, where every divergence so far has produced a
+  device-visible bug.
+- **Reconciliation is derived but not applied.** `record_dependencies`,
+  `dirty_records` and `patch_points` compute what a state write invalidates;
+  realization still rebuilds the tree rather than patching those points.
+- **`makepad::lower` is in the wrong crate.** It belongs in a backend crate, not
+  in `splash-core`, which otherwise names no renderer.
+- **`StockPlot` and `AqiContour` lower without their data arrays**, so both
+  render as empty frames on device.
+- **L1 and L2 are unimplemented.** Both are specified only as what L0 excludes,
+  so the level classifier can name them but cannot check them.
 
 ## Before a stable language release
 
