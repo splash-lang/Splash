@@ -94,10 +94,27 @@ defect in this document, not in the cards.**
 | 6 | predicate as an argument value | stock — `active: range == d1` | `operand` admits `predicate` |
 | 7 | event payload at the call site | news, stock — which row was tapped | `value:` argument, §3.1 |
 | 8 | sub-collection of a source | news — feed skips the lead | **not granted** — see below |
+| 9 | bare identifiers are ambiguous | both components — `width: rank` is a token, `text: position` is a path | resolved by argument shape, §2.2 |
 
 **None of these introduces an expression.** Indexing is a total lookup, a predicate as an
 operand is the form `when` already admits, and a loop index is supplied by the iterator. The
 authority property and the absence of arithmetic both survive.
+
+### 2.2 Bare identifiers resolve by argument shape
+
+`width: rank` and `text: position` are both `ident : ident`, but the first names a layout token
+and the second a bound path. Resolving this by scope — *a path if it names a binding, else a
+token* — would be a trap: declaring a prop named `fill` would silently change what
+`width: fill` meant everywhere in that component.
+
+**The argument's declared shape decides.** Each constructor argument accepts either a token
+from a closed set or a value; a bare identifier is read as whichever that argument admits, and
+a mismatch is a validation error rather than a silent reinterpretation. `width:` takes a
+layout token, `text:` takes a path or string literal.
+
+This surfaced only once components existed, because a component's props are the first bindings
+whose names the card author chooses freely. Both reference cards had to rename a prop —
+`day` → `item`, `rank` → `position` — before the ambiguity was even visible.
 
 **#8 was refused.** The news card wanted `stories.rest` to skip the lead story. Granting a
 derived sub-collection would be the thin end of computation — `rest` invites `filter`, which
@@ -227,12 +244,136 @@ instances each containing an unkeyed `Toggle` must not share one state cell.
 component type and keys both affect preservation. L0 binds to a declared path so that
 identity survives a ledger edit that inserts an element above.
 
-### 5.2 Unresolved
+### 5.2 Props
 
-The following are **not specified here** and must be before this profile is implementable:
-child-to-parent outputs, slots/children, shared or hoisted state, per-component source
-declarations, mount/update/unmount semantics, duplicate-key behaviour, and typed props with
-defaults. §7 records this.
+```ebnf
+params        = param , { "," , param } ;
+param         = ident , ":" , shape , [ "=" , literal ] ;
+```
+
+Props are **typed by the same shape vocabulary as state**, may carry a literal default, and
+are **immutable inside the component**. A prop is an input, not storage; a component that
+wants to change something declares local state or raises an event.
+
+```
+component ForecastRow(day: record, unit: enum[c, f] = c, on_pick: event)
+```
+
+`record` and `collection` are added to the shape vocabulary for props, since a row receives a
+whole item rather than a scalar.
+
+### 5.3 Scope: what a component may reference
+
+| May read | May not read |
+|---|---|
+| its own props | card `state` — pass it as a prop |
+| its own `state` and `event` | another component's locals |
+| card-scope `source` | — |
+| card-scope `copy` | — |
+
+**Sources and copy are readable; state is not.** Both are immutable and already declared
+dependencies the tracker sees, so reading them creates nothing implicit. Card state is what
+drives reconciliation, so it must arrive explicitly as a prop or the dependency becomes
+invisible — the failure §6.2 warns about.
+
+This is why `week.min_lo` may be read directly by a forecast row, while `units` must be passed.
+
+### 5.4 Outputs are event props
+
+A component raises an event the parent declared, passed in as a prop:
+
+```
+component StoryRow(story: record, on_open: event) {
+  view Row(on_tap: on_open, value: story.id) { … }
+}
+
+view latest  Panel { for s, i in feed key s.id { StoryRow(story: s, on_open: open_story) } }
+```
+
+**This needs no new mechanism.** An event name is a path, `operand` already admits paths, and
+the transition runs in the scope where it was *declared* — the parent's — so a child cannot
+reach state it was not handed a route to. It is React's callback prop with the scoping made
+explicit.
+
+A component may only name events it declares locally or receives as props. There is no way to
+raise an arbitrary event by constructing its name, because there is no expression form.
+
+### 5.5 Slots
+
+A single anonymous slot, marked in the component body:
+
+```
+component Panel(title: text) {
+  view Col { TextCaption(text: title) slot }
+}
+
+Panel(title: "Details") { Tile(…) Tile(…) }
+```
+
+Children are realized in the parent's scope, not the component's — a child expression sees the
+call site's bindings. Named slots are deferred; nothing in the reference cards needs them, and
+adding them later is additive.
+
+### 5.6 What is refused, and why
+
+**Hoisted or shared state.** If two components need the same state it lives at card scope and
+arrives as props, with the event declared at card scope too. Hoisting would raise an ownership
+question the grammar cannot answer, and a Context-like mechanism reintroduces exactly the
+invisible dependencies §6.2 exists to prevent.
+
+**Cross-field invariants are not expressible.** Two date pickers cannot enforce
+start-before-end through transitions, because total forms cannot compare. This is a real limit,
+not an oversight. Where an invariant matters it belongs in the **shape**, enforced by the
+runtime:
+
+```
+state start { shape: date, initial: today, max: end }
+```
+
+If that is insufficient, the card is L1 — and should say so rather than smuggling a
+comparison into a transition.
+
+**Per-component sources.** A component may not declare its own `source`. Sources are card-scope
+and resolved before evaluation; a component instantiated *n* times would fan out *n* fetches,
+with *n* determined by data. That breaks the bound §6.2 requires, and makes fetch volume a
+function of a collection the model does not control.
+
+### 5.7 Lifecycle
+
+There are no lifecycle hooks — §2.2 rejects `useEffect` and its dependency arrays. But the
+runtime needs defined behaviour, and identity (§5.1) decides all of it:
+
+| Event | Behaviour |
+|---|---|
+| **Mount** — identity appears | local state initialized from `initial` |
+| **Update** — identity persists, props differ | view re-realizes; **local state persists** |
+| **Unmount** — identity disappears | local state discarded |
+
+**Duplicate keys are an error at realization**, surfaced as a diagnostic — never coalesced.
+Silent coalescing would make two rows share one state cell, which is the failure mode keys
+exist to prevent. A missing key on an iteration is a grammar error.
+
+### 5.8 State schema versioning
+
+A component's **state schema id** is derived from its `state` declarations — names, shapes and
+initials — and forms part of instance identity (§5.1).
+
+| Definition change | Effect |
+|---|---|
+| view or props only | schema id unchanged → **local state persists** |
+| any `state` declaration added, removed, renamed or retyped | schema id changes → **new identity → state reset** |
+
+**Reset is the default; preservation is opt-in**, never inferred. A ledger edit that adds a
+field cannot be assumed compatible with live values, and guessing is how a rolled-back ledger
+ends up feeding version-A state to version-B code — at which point last-known-good is no longer
+known good.
+
+An explicit migration is a future addition and must be atomic with activation and rollback.
+
+**Consequence worth stating plainly:** folding the ledger reconstructs the *program*, not the
+visible application state. Local state is disposable UI state — scroll positions, expansion
+flags. Anything that must survive a definition change belongs in a `source` or in card state
+with a declared migration, not in a component.
 
 ---
 
@@ -279,12 +420,19 @@ and self-contradictory. Level must be an effect judgment over the closure.
 
 | # | Question |
 |---|---|
-| 1 | Component contracts (§5.2) — outputs, slots, shared state, lifecycle |
-| 2 | Whether `when` needs `else`, or whether two complementary guards suffice |
-| 3 | Whether `enum` shapes need ordering guarantees for `cycle` |
-| 4 | How a `source` declares refresh cadence, staleness and error surfaces |
-| 5 | Whether the profile should admit a bounded `format(path, style)` for dates and units, or keep all formatting in the runtime |
+| 1 | Whether `when` needs `else`, or whether two complementary guards suffice |
+| 2 | Whether `enum` shapes need ordering guarantees for `cycle` |
+| 3 | How a `source` declares refresh cadence, staleness and error surfaces |
+| 4 | Whether the profile should admit a bounded `format(path, style)` for dates and units, or keep all formatting in the runtime |
+| 5 | Named slots — deferred; nothing in the reference cards needs them and adding them is additive |
+| 6 | An explicit state migration, to make preservation across a schema change opt-in rather than impossible (§5.8) |
+| 7 | The closed token sets per constructor argument that §2.2 depends on |
 
-Question 5 is the one most likely to force a change: the three reference cards in
-`octos-one/docs/l0/` are the evidence, and any construct they need that §2 lacks is a defect
-in this document rather than in the cards.
+Component contracts were question 1 and are now specified in §5.2–§5.8, validated by adding
+components to two reference cards. That exercise produced amendment #9, which nothing had
+surfaced before — props are the first bindings a card author names freely, so the
+token/path ambiguity was invisible until one existed.
+
+Question 4 is the likeliest to force a change, and question 7 is a prerequisite for
+implementing §2.2 at all. The reference cards in `octos-one/docs/l0/` remain the evidence: any
+construct they need that this document lacks is a defect here rather than in the cards.
