@@ -237,6 +237,20 @@ it remains outside this grammar and cannot run through `splash-cli`. It
 requires a Makepad UI host that supplies widget modules and `ui`; see
 [Makepad UI compatibility](makepad-ui-compatibility.md).
 
+### Generated UI source
+
+The two boundaries above leave a gap. This grammar rejects UI constructs, and
+the compatibility APIs that accept them must not receive generated source — so
+a host wanting LLM-authored UI has no supported path and must embed the raw
+Makepad VM, which restores the very bindings this profile masks.
+
+[UI Profile Level 0](ui-profile-l0.md) is a **proposed** third path: a sibling
+canonical profile that admits UI constructs while admitting nothing that can
+reach a capability. Sources are queries the runtime resolves before evaluation
+and injects as data, so an L0 evaluator receives a host surface with no modules
+at all. It is not implemented, and until it is, generated UI remains outside
+every supported entry point.
+
 ## Canonical Workflow Source
 
 ```splash

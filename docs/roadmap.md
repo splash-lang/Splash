@@ -371,6 +371,37 @@
   reviewed adapter's host-owned resolver; broader selectors must remain denied
   until each is enforced.
 
+## Next: a canonical profile for generated UI
+
+Splash has no supported path for LLM-authored UI. The canonical grammar rejects
+UI constructs; the compatibility APIs accept them but must not receive generated
+source. A host that needs one must embed the raw Makepad VM, which restores the
+inherited UI, debug, shader, GC and direct-output bindings the standalone
+runtime masks — and with them an ambient filesystem, process and network
+surface. That is not a hypothetical: it is what a downstream host did, and how
+its generated cards ended up able to read and write arbitrary files.
+
+[UI Profile Level 0](ui-profile-l0.md) proposes the narrowest useful path —
+constructors, bindings, keyed loops, guarded branches and components with
+declared local state, with no expression form and no module access, evaluated
+against an empty host surface. Three reference cards exercise it.
+
+Remaining before it can be implemented:
+
+- A normative AST and a parser/validator giving definite accept/reject.
+- A level classifier over the transitive component closure. Local record
+  inspection is insufficient: a card can be moved to a wider level by a
+  component definition it references being replaced, so component versions must
+  be pinned.
+- Lowering to a renderer-neutral node tree, and a host surface that installs no
+  modules.
+- Component contracts — child-to-parent outputs, slots, shared state,
+  per-component source declarations, and mount/update/unmount semantics.
+- Recursive instance identity, and a state-schema versioning rule for what
+  happens to live local state when a component definition changes.
+- Enforcement of the five conditions that make an L0 realization terminate;
+  grammar membership alone does not bound execution.
+
 ## Before a stable language release
 
 - Additional semantic editor features beyond lexical completion, fixed

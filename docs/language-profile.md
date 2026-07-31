@@ -8,6 +8,18 @@ broader runtime profile. The v0.1 fixture remains a backward-compatibility
 regression. Parser features outside the grammar and fixtures remain inherited
 compatibility features until separately specified.
 
+**Scope.** This is the *workflow* profile: it is shaped for bounded dataflow and
+tool calls, and it deliberately rejects UI constructs. A second profile for
+generated UI is proposed but unimplemented — see
+[UI Profile Level 0](ui-profile-l0.md). The two are siblings rather than nested:
+a card is not a workflow with widgets bolted on, and neither profile is a subset
+of the other. Where they agree is the property that matters — a producer must be
+unable to write anything that reaches a capability it was not granted.
+
+Until L0 exists, `splash profile` reports only this profile, and a host with
+generated UI source has no canonical entry point (see
+[Generated UI source](grammar.md#generated-ui-source)).
+
 ## Source contract
 
 Provide normal Splash source. The runtime adds its own internal terminal
