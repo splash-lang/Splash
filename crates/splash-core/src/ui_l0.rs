@@ -536,6 +536,11 @@ struct Element {
     line: usize,
     column: usize,
     is_reference: bool,
+    /// `when` guard: comparator and right-hand operand, absent for a bare bool.
+    cmp: Option<String>,
+    rhs: Option<Operand>,
+    /// `for` loop: the per-item key expression. Identity never comes from position.
+    key_path: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1031,22 +1036,24 @@ impl<'a> Parser<'a> {
                 self.at += 1;
             }
             let collection = self.dotted_name().unwrap_or_default();
-            if !self.peek().is_some_and(|t| t.is_kw("key")) {
+            let key_path = if self.peek().is_some_and(|t| t.is_kw("key")) {
+                self.at += 1;
+                self.dotted_name()
+            } else {
                 if let Some(t) = self.peek().cloned() {
                     self.sink.at(
                         &t,
                         "a loop must declare `key`: identity may not come from position".into(),
                     );
                 }
-            } else {
-                self.at += 1;
-                let _ = self.dotted_name();
-            }
+                None
+            };
             let mut element = Element {
                 name: "for".into(),
                 binders,
                 line: t.line,
                 column: t.column,
+                key_path,
                 ..Default::default()
             };
             element.args.push(Arg {
@@ -1065,14 +1072,21 @@ impl<'a> Parser<'a> {
             let left = self.dotted_name().unwrap_or_default();
             // A comparison, or a bare path when the state is bool-shaped —
             // `when expanded { … }`. Neither form computes.
-            if self.peek().is_some_and(|t| t.kind == Kind::Cmp) {
-                self.at += 1;
-                self.at += 1; // right-hand operand
+            let mut cmp = None;
+            let mut rhs = None;
+            if let Some(op) = self.peek().cloned() {
+                if op.kind == Kind::Cmp {
+                    self.at += 1;
+                    cmp = Some(op.text.clone());
+                    rhs = Some(self.parse_operand());
+                }
             }
             let mut element = Element {
                 name: "when".into(),
                 line: t.line,
                 column: t.column,
+                cmp,
+                rhs,
                 ..Default::default()
             };
             element.args.push(Arg {
@@ -1766,4 +1780,433 @@ fn check_path(path: &str, scope: &Scope, line: usize, column: usize, sink: &mut 
         return;
     }
     sink.push(line, column, format!("{root:?} is not a declared name"));
+}
+
+// ─────────────────────────────────────────────────────────────────── realization ──
+
+/// A realized node. Renderer-neutral: a backend maps `kind` to its own widget.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UiNode {
+    pub kind: String,
+    /// Instance identity — the declaration path plus every enclosing loop key.
+    /// Never derived from position, so an edit that inserts a sibling above does
+    /// not rebind this node's state (profile §5.1).
+    pub key: String,
+    pub args: Vec<(String, NodeValue)>,
+    pub children: Vec<UiNode>,
+}
+
+/// A resolved argument value.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NodeValue {
+    Text(String),
+    Number(f64),
+    Bool(bool),
+    /// A `.token`, carried through with its meaning intact for the backend.
+    Token(String),
+    /// A declared event name for the runtime to bind at dispatch — never a
+    /// string constructed by the card (profile §3.1).
+    Event(String),
+    /// A binding that resolved to nothing. Surfaced rather than defaulted: a
+    /// silently empty field is how a card renders an em dash and looks fine.
+    Missing,
+}
+
+/// Traversal bounds. L0 has no expressions, so there is nothing to evaluate and
+/// no instruction budget to set — these bound the walk instead.
+#[derive(Clone, Copy, Debug)]
+pub struct RealizeLimits {
+    pub max_nodes: usize,
+    pub max_depth: usize,
+    pub max_collection: usize,
+}
+
+impl Default for RealizeLimits {
+    fn default() -> Self {
+        Self {
+            max_nodes: 8_192,
+            max_depth: 64,
+            max_collection: 512,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RealizeReport {
+    pub root: Option<UiNode>,
+    pub diagnostics: Vec<SyntaxDiagnostic>,
+    pub nodes: usize,
+    /// A bound was reached; the tree is partial.
+    pub truncated: bool,
+}
+
+/// Realize a card against resolved data.
+///
+/// `data` carries what the runtime fetched and holds: source results, state
+/// values and copy, keyed by declaration name. **No capability is reachable from
+/// here** — not because one is blocked, but because realization is a tree walk
+/// and there is no evaluator to reach anything with.
+pub fn realize(source: &str, data: &crate::JsonValue, limits: RealizeLimits) -> RealizeReport {
+    let mut sink = Diagnostics::default();
+
+    let check = check_ui_l0_named("card.l0", source);
+    if !check.valid {
+        return RealizeReport {
+            root: None,
+            diagnostics: check.diagnostics,
+            nodes: 0,
+            truncated: false,
+        };
+    }
+
+    let tokens = match lex(source, &mut sink) {
+        Some(t) => t,
+        None => {
+            return RealizeReport {
+                root: None,
+                diagnostics: sink.items,
+                nodes: 0,
+                truncated: false,
+            }
+        }
+    };
+    let card = Parser::new(&tokens, &mut sink).parse_card();
+
+    let Some(root) = card.views.iter().find(|v| v.name == "root") else {
+        sink.push(1, 1, "a card needs a `view root`".into());
+        return RealizeReport {
+            root: None,
+            diagnostics: sink.items,
+            nodes: 0,
+            truncated: false,
+        };
+    };
+
+    let mut ctx = Realizer {
+        card: &card,
+        limits,
+        nodes: 0,
+        truncated: false,
+        sink: &mut sink,
+    };
+    let mut scope = ValueScope {
+        frames: vec![],
+        data,
+    };
+    let mut out = Vec::new();
+    ctx.element(&root.body, &mut scope, "root", &mut out);
+
+    let nodes = ctx.nodes;
+    let truncated = ctx.truncated;
+    RealizeReport {
+        root: out.into_iter().next(),
+        diagnostics: sink.items,
+        nodes,
+        truncated,
+    }
+}
+
+/// Bindings introduced by loops and component props, innermost last.
+struct ValueScope<'a> {
+    frames: Vec<(String, crate::JsonValue)>,
+    data: &'a crate::JsonValue,
+}
+
+impl ValueScope<'_> {
+    fn lookup(&self, path: &str) -> Option<crate::JsonValue> {
+        let mut segments = path.split('.');
+        let root = segments.next()?;
+
+        let mut current = match self.frames.iter().rev().find(|(n, _)| n == root) {
+            Some((_, v)) => v.clone(),
+            None => self.data.get(root)?.clone(),
+        };
+        for segment in segments {
+            current = match segment.parse::<usize>() {
+                Ok(index) => current.get(index)?.clone(),
+                Err(_) => current.get(segment)?.clone(),
+            };
+        }
+        Some(current)
+    }
+}
+
+struct Realizer<'a> {
+    card: &'a Card,
+    limits: RealizeLimits,
+    nodes: usize,
+    truncated: bool,
+    sink: &'a mut Diagnostics,
+}
+
+impl Realizer<'_> {
+    fn element(
+        &mut self,
+        element: &Element,
+        scope: &mut ValueScope,
+        key: &str,
+        out: &mut Vec<UiNode>,
+    ) {
+        if self.nodes >= self.limits.max_nodes || key.len() > self.limits.max_depth * 32 {
+            self.truncated = true;
+            return;
+        }
+
+        match element.name.as_str() {
+            "" => {}
+            "slot" => {}
+            "for" => self.iteration(element, scope, key, out),
+            "when" => {
+                if self.guard_holds(element, scope) {
+                    for (i, child) in element.children.iter().enumerate() {
+                        self.element(child, scope, &format!("{key}/w{i}"), out);
+                    }
+                }
+            }
+            _ if element.is_reference => {
+                let card = self.card;
+                match card.views.iter().find(|v| v.name == element.name) {
+                    Some(view) => {
+                        // Keyed by the referenced view's own name, so its nodes
+                        // keep identity wherever it is spliced.
+                        self.element(&view.body, scope, &format!("{key}/{}", element.name), out);
+                    }
+                    None => self.sink.push(
+                        element.line,
+                        element.column,
+                        format!("{:?} is not a declared view", element.name),
+                    ),
+                }
+            }
+            name => {
+                let card = self.card;
+                if let Some(component) = card.components.iter().find(|c| c.name == name) {
+                    self.component(component, element, scope, key, out);
+                } else {
+                    self.constructor(element, scope, key, out);
+                }
+            }
+        }
+    }
+
+    fn constructor(
+        &mut self,
+        element: &Element,
+        scope: &mut ValueScope,
+        key: &str,
+        out: &mut Vec<UiNode>,
+    ) {
+        self.nodes += 1;
+        let mut node = UiNode {
+            kind: element.name.clone(),
+            key: key.to_string(),
+            args: Vec::new(),
+            children: Vec::new(),
+        };
+        for arg in &element.args {
+            let value = self.value(&element.name, &arg.name, &arg.value, scope);
+            node.args.push((arg.name.clone(), value));
+        }
+        for (i, child) in element.children.iter().enumerate() {
+            self.element(child, scope, &format!("{key}/{i}"), &mut node.children);
+        }
+        out.push(node);
+    }
+
+    fn component(
+        &mut self,
+        component: &Component,
+        call: &Element,
+        scope: &mut ValueScope,
+        key: &str,
+        out: &mut Vec<UiNode>,
+    ) {
+        // Props bind by name; a prop the caller omits is simply absent, and any
+        // path inside the component resolves against this frame first.
+        let mut bound = 0usize;
+        for arg in &call.args {
+            if component.params.contains(&arg.name) {
+                let value = match &arg.value {
+                    Operand::Path(p) => scope
+                        .lookup(p)
+                        // An event prop has no value in data; pass the name.
+                        .unwrap_or_else(|| crate::JsonValue::String(p.clone())),
+                    Operand::Token(t) => crate::JsonValue::String(t.clone()),
+                    _ => crate::JsonValue::Null,
+                };
+                scope.frames.push((arg.name.clone(), value));
+                bound += 1;
+            }
+        }
+        self.element(
+            &component.body,
+            scope,
+            &format!("{key}/{}", component.name),
+            out,
+        );
+        for _ in 0..bound {
+            scope.frames.pop();
+        }
+    }
+
+    fn iteration(
+        &mut self,
+        element: &Element,
+        scope: &mut ValueScope,
+        key: &str,
+        out: &mut Vec<UiNode>,
+    ) {
+        let Some(Arg {
+            value: Operand::Path(path),
+            ..
+        }) = element.args.first()
+        else {
+            return;
+        };
+        let Some(collection) = scope.lookup(path) else {
+            // A source that has not resolved yet renders nothing rather than an
+            // empty row; pending is the runtime's to surface, not ours to invent.
+            return;
+        };
+        let Some(items) = collection.as_array() else {
+            self.sink.push(
+                element.line,
+                element.column,
+                format!("{path:?} is not a collection"),
+            );
+            return;
+        };
+
+        for (index, item) in items.iter().enumerate() {
+            if index >= self.limits.max_collection {
+                self.truncated = true;
+                break;
+            }
+            // The key expression is evaluated per item, and identity is the
+            // enclosing key plus it — never the index.
+            let item_key = element
+                .key_path
+                .as_deref()
+                .and_then(|k| {
+                    let mut segments = k.split('.');
+                    segments.next()?;
+                    let mut current = item.clone();
+                    for segment in segments {
+                        current = current.get(segment)?.clone();
+                    }
+                    Some(json_to_key(&current))
+                })
+                .unwrap_or_else(|| index.to_string());
+
+            let mut bound = 0usize;
+            if let Some(binder) = element.binders.first() {
+                scope.frames.push((binder.clone(), item.clone()));
+                bound += 1;
+            }
+            if let Some(index_binder) = element.binders.get(1) {
+                scope
+                    .frames
+                    .push((index_binder.clone(), crate::JsonValue::from(index + 1)));
+                bound += 1;
+            }
+
+            for (i, child) in element.children.iter().enumerate() {
+                self.element(child, scope, &format!("{key}[{item_key}]/{i}"), out);
+            }
+
+            for _ in 0..bound {
+                scope.frames.pop();
+            }
+        }
+    }
+
+    fn guard_holds(&mut self, element: &Element, scope: &mut ValueScope) -> bool {
+        let Some(Arg {
+            value: Operand::Path(path),
+            ..
+        }) = element.args.first()
+        else {
+            return false;
+        };
+        let left = scope.lookup(path);
+
+        let Some(cmp) = element.cmp.as_deref() else {
+            // Bare boolean guard — amendment #10.
+            return matches!(left, Some(crate::JsonValue::Bool(true)));
+        };
+        let right = match element.rhs.as_ref() {
+            Some(Operand::Path(p)) => scope.lookup(p),
+            Some(Operand::Token(t)) => Some(crate::JsonValue::String(
+                t.trim_start_matches('.').to_string(),
+            )),
+            Some(Operand::Str) | Some(Operand::Num) => None,
+            _ => None,
+        };
+
+        // A comparison against a literal the parser did not retain cannot be
+        // decided here; treat it as false rather than guess.
+        let (Some(left), Some(right)) = (left, right) else {
+            return cmp == "!=";
+        };
+        match cmp {
+            "==" => left == right,
+            "!=" => left != right,
+            _ => match (left.as_f64(), right.as_f64()) {
+                (Some(a), Some(b)) => match cmp {
+                    "<" => a < b,
+                    "<=" => a <= b,
+                    ">" => a > b,
+                    ">=" => a >= b,
+                    _ => false,
+                },
+                _ => false,
+            },
+        }
+    }
+
+    fn value(
+        &mut self,
+        ctor: &str,
+        arg: &str,
+        operand: &Operand,
+        scope: &mut ValueScope,
+    ) -> NodeValue {
+        // An event argument carries a declared NAME through to the runtime,
+        // which binds it at dispatch. Nothing about it is looked up in data, and
+        // nothing about it is constructed by the card.
+        let is_event = catalog::lookup(ctor)
+            .and_then(|args| args.iter().find(|(n, _)| *n == arg))
+            .is_some_and(|(_, k)| matches!(k, catalog::ArgKind::Event));
+        if is_event {
+            if let Operand::Path(p) = operand {
+                // Through a component prop the name arrives bound; directly it
+                // is the path itself.
+                return match scope.lookup(p) {
+                    Some(crate::JsonValue::String(name)) => NodeValue::Event(name),
+                    _ => NodeValue::Event(p.clone()),
+                };
+            }
+        }
+        match operand {
+            Operand::Token(t) => NodeValue::Token(t.trim_start_matches('.').to_string()),
+            Operand::Str => NodeValue::Text(String::new()),
+            Operand::Num => NodeValue::Number(0.0),
+            Operand::Predicate(p) | Operand::Path(p) => match scope.lookup(p) {
+                Some(crate::JsonValue::String(s)) => NodeValue::Text(s),
+                Some(crate::JsonValue::Bool(b)) => NodeValue::Bool(b),
+                Some(v) => match v.as_f64() {
+                    Some(n) => NodeValue::Number(n),
+                    None => NodeValue::Missing,
+                },
+                None => NodeValue::Missing,
+            },
+        }
+    }
+}
+
+fn json_to_key(value: &crate::JsonValue) -> String {
+    match value {
+        crate::JsonValue::String(s) => s.clone(),
+        other => other.to_string(),
+    }
 }

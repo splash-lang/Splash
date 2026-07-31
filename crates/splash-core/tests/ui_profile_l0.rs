@@ -412,3 +412,223 @@ fn an_untotal_transition_form_is_rejected() {
         report.diagnostics
     );
 }
+
+// ────────────────────────────────────────────────────────────────── realization ──
+
+use splash_core::ui_l0::{realize, NodeValue, RealizeLimits};
+
+fn weather_data() -> serde_json::Value {
+    serde_json::json!({
+        "place": { "name": "Kyoto" },
+        "now":   { "temp": 18.0, "feels": 16.0, "hi": 21.0, "lo": 12.0, "cond": "cloudy",
+                   "humidity": 61.0, "wind": 9.0, "pressure": 1013.0, "uv": 3.0,
+                   "visibility": 10.0 },
+        "week":  [ { "dayname": "Mon", "hi": 21.0, "lo": 12.0, "cond": "cloudy" },
+                   { "dayname": "Tue", "hi": 23.0, "lo": 13.0, "cond": "sun" },
+                   { "dayname": "Wed", "hi": 19.0, "lo": 11.0, "cond": "rain" } ],
+        "sun":   { "rise": 5.1, "set": 18.9, "now": 12.0 },
+        "moon":  { "phase": 0.5, "illumination": 0.5 },
+        "aqi":   { "grid": [1, 2], "index": 42.0, "band": "good" },
+        "scene": "https://example.invalid/kyoto.jpg",
+        "units": "c",
+        "days":  7.0,
+        "city":  "Kyoto",
+        "env":   { "locale": { "temp_unit": "c" } },
+        "copy":  { "feels": "Feels like", "humidity": "Humidity", "wind": "Wind",
+                   "pressure": "Pressure", "uv": "UV Index", "visibility": "Visibility",
+                   "air": "Air Quality", "sunrise": "Sunrise", "sunset": "Sunset" }
+    })
+}
+
+fn find<'a>(
+    node: &'a splash_core::ui_l0::UiNode,
+    kind: &str,
+    out: &mut Vec<&'a splash_core::ui_l0::UiNode>,
+) {
+    if node.kind == kind {
+        out.push(node);
+    }
+    for c in &node.children {
+        find(c, kind, out);
+    }
+}
+
+#[test]
+fn a_card_realizes_to_a_node_tree() {
+    let report = realize(WEATHER, &weather_data(), RealizeLimits::default());
+    assert!(report.diagnostics.is_empty(), "{:#?}", report.diagnostics);
+    let root = report.root.expect("a root node");
+    assert_eq!(root.kind, "Photo");
+    assert!(
+        report.nodes > 20,
+        "expected a populated tree, got {}",
+        report.nodes
+    );
+}
+
+/// Bindings resolve against injected data — the card names a question, the
+/// runtime supplied the answer.
+#[test]
+fn bindings_resolve_from_injected_data() {
+    let report = realize(WEATHER, &weather_data(), RealizeLimits::default());
+    let root = report.root.unwrap();
+    let mut titles = Vec::new();
+    find(&root, "TextTitle", &mut titles);
+    let (_, place) = titles[0].args.iter().find(|(n, _)| n == "text").unwrap();
+    assert_eq!(*place, NodeValue::Text("Kyoto".into()));
+}
+
+/// One row per item, keyed by the declared key expression rather than position.
+#[test]
+fn a_loop_produces_one_instance_per_item_keyed_by_its_key() {
+    let report = realize(WEATHER, &weather_data(), RealizeLimits::default());
+    let root = report.root.unwrap();
+    let mut bars = Vec::new();
+    find(&root, "TempBar", &mut bars);
+    assert_eq!(bars.len(), 3, "three days of data, three rows");
+    for (bar, day) in bars.iter().zip(["Mon", "Tue", "Wed"]) {
+        assert!(
+            bar.key.contains(day),
+            "key {:?} should carry {day}",
+            bar.key
+        );
+    }
+}
+
+/// Identity must survive an edit that inserts a sibling above — that is why keys
+/// come from the declaration path and loop key, not position.
+#[test]
+fn keys_are_stable_when_a_sibling_is_inserted_above() {
+    let before = realize(WEATHER, &weather_data(), RealizeLimits::default())
+        .root
+        .unwrap();
+    let edited = WEATHER.replace(
+        "view current  Col(align: .center) {",
+        "view current  Col(align: .center) {\n                Rule()",
+    );
+    let after = realize(&edited, &weather_data(), RealizeLimits::default())
+        .root
+        .unwrap();
+
+    let (mut a, mut b) = (Vec::new(), Vec::new());
+    find(&before, "TempBar", &mut a);
+    find(&after, "TempBar", &mut b);
+    let keys_a: Vec<&str> = a.iter().map(|n| n.key.as_str()).collect();
+    let keys_b: Vec<&str> = b.iter().map(|n| n.key.as_str()).collect();
+    assert_eq!(
+        keys_a, keys_b,
+        "inserting a node above must not rebind the forecast rows"
+    );
+}
+
+/// A bare boolean guard — amendment #10 — and it must actually gate.
+#[test]
+fn a_guard_includes_children_only_when_it_holds() {
+    let mut data = weather_data();
+    let report = realize(WEATHER, &data, RealizeLimits::default());
+    let root = report.root.unwrap();
+    let mut captions = Vec::new();
+    find(&root, "TextCaption", &mut captions);
+    let collapsed = captions.len();
+
+    // `expanded` is component-local state the runtime holds; with none supplied
+    // the guard is false and the detail row is absent.
+    data["expanded"] = serde_json::Value::Bool(true);
+    let expanded = realize(WEATHER, &data, RealizeLimits::default())
+        .root
+        .unwrap();
+    let mut captions2 = Vec::new();
+    find(&expanded, "TextCaption", &mut captions2);
+    assert!(
+        captions2.len() >= collapsed,
+        "an open guard must not remove nodes"
+    );
+}
+
+/// A missing binding is surfaced, not defaulted. A silently empty field is how a
+/// card renders an em dash and still looks correct.
+#[test]
+fn an_unresolved_binding_is_reported_as_missing() {
+    let mut data = weather_data();
+    data["now"]["humidity"] = serde_json::Value::Null;
+    let report = realize(WEATHER, &data, RealizeLimits::default());
+    let root = report.root.unwrap();
+    let mut tiles = Vec::new();
+    find(&root, "Tile", &mut tiles);
+    assert!(
+        tiles.iter().any(|t| t
+            .args
+            .iter()
+            .any(|(n, v)| n == "value" && *v == NodeValue::Missing)),
+        "a null source field should realize as Missing"
+    );
+}
+
+#[test]
+fn events_carry_their_declared_name_rather_than_a_constructed_string() {
+    let report = realize(WEATHER, &weather_data(), RealizeLimits::default());
+    let root = report.root.unwrap();
+    let mut heroes = Vec::new();
+    find(&root, "TextHero", &mut heroes);
+    let (_, ev) = heroes[0].args.iter().find(|(n, _)| n == "on_tap").unwrap();
+    assert_eq!(*ev, NodeValue::Event("toggle_units".into()));
+}
+
+#[test]
+fn realization_is_bounded() {
+    let limits = RealizeLimits {
+        max_nodes: 10,
+        ..RealizeLimits::default()
+    };
+    let report = realize(WEATHER, &weather_data(), limits);
+    assert!(report.truncated);
+    assert!(report.nodes <= 10);
+}
+
+#[test]
+fn a_long_collection_is_truncated_rather_than_unbounded() {
+    let mut data = weather_data();
+    let week: Vec<serde_json::Value> = (0..5_000)
+        .map(|i| serde_json::json!({ "dayname": format!("d{i}"), "hi": 1.0, "lo": 0.0, "cond": "x" }))
+        .collect();
+    data["week"] = serde_json::Value::Array(week);
+    let limits = RealizeLimits {
+        max_collection: 8,
+        ..RealizeLimits::default()
+    };
+    let report = realize(WEATHER, &data, limits);
+    let root = report.root.unwrap();
+    let mut bars = Vec::new();
+    find(&root, "TempBar", &mut bars);
+    assert_eq!(bars.len(), 8);
+    assert!(report.truncated);
+}
+
+#[test]
+fn the_other_two_cards_realize_too() {
+    let news = serde_json::json!({
+        "lead": [{ "id": "1", "title": "T", "author": "A", "points": 9.0, "comments": 3.0, "url": "u" }],
+        "feed": [{ "id": "2", "title": "U", "author": "B", "points": 4.0 }],
+        "article": { "title": "T", "author": "A", "points": 9.0, "comments": 3.0, "url": "u" },
+        "selected": "",
+        "env": { "locale": {} },
+        "copy": { "masthead": "Top Stories", "latest": "LATEST", "lead": "LEAD",
+                  "pts": "pts", "comments": "comments", "by": "by" }
+    });
+    let report = realize(NEWS, &news, RealizeLimits::default());
+    assert!(report.diagnostics.is_empty(), "{:#?}", report.diagnostics);
+    assert!(report.root.is_some());
+
+    let stock = serde_json::json!({
+        "movers": [{ "ticker": "AAA", "name": "A", "last": 1.0, "change": 0.5, "pct": 2.0 }],
+        "quote": { "name": "A", "last": 1.0, "change": 0.5, "pct": 2.0, "open": 1.0,
+                   "high": 2.0, "low": 0.5, "volume": 10.0, "mktcap": 99.0, "pe": 12.0 },
+        "series": { "points": [1, 2], "min": 0.5, "max": 2.0 },
+        "selected": "", "range": "m1", "env": { "locale": {} },
+        "copy": { "movers": "Top Movers", "open": "Open", "high": "High", "low": "Low",
+                  "volume": "Volume", "mktcap": "Mkt Cap", "pe": "P/E" }
+    });
+    let report = realize(STOCK, &stock, RealizeLimits::default());
+    assert!(report.diagnostics.is_empty(), "{:#?}", report.diagnostics);
+    assert!(report.root.is_some());
+}

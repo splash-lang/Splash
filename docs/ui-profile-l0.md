@@ -14,16 +14,32 @@ A generated card is untrusted source. The workflow profile answers this by refus
 constructs; the compatibility parser answers it by refusing untrusted input. L0 answers it a
 third way: **admit UI constructs, but admit nothing that could reach a capability.**
 
-The consequence is that an L0 evaluator is handed a host surface with **no** modules — no
-`sys.*`, no `fs`, `run` or `net`. Sources are resolved by the runtime *before* evaluation and
-injected as data (`set_json_global`). There is no dangerous call to block, because no call
-can be written.
+Sources are resolved by the runtime *before* realization and injected as data. There is no
+dangerous call to block, because no call can be written.
 
-**What this does and does not buy.** Two properties are decidable at L0: membership in the
-grammar, and absence of authority-bearing operations. **Termination and bounded state are
-*not* consequences of the grammar alone** — §6 states what makes them hold. A bounded
-evaluator (heap, stack, call-depth, instruction and time limits) remains mandatory at every
-level; L0 removes the need for an *OS authority* boundary, not for resource containment.
+**L0 needs no evaluator at all.** Earlier drafts of this section said an L0 *evaluator* is
+handed a host surface with no modules, and that a bounded evaluator — heap, stack, call-depth,
+instruction and time limits — remains mandatory. Implementing the profile showed that to be
+wrong in an interesting direction: **L0 has no expression form, so there is nothing to
+evaluate.** Realization is a pure walk over the parsed tree with data substituted. The
+reference implementation contains no reference to the VM whatsoever.
+
+What that changes:
+
+| | Earlier claim | Actual |
+|---|---|---|
+| Host surface | empty | **absent** — no evaluator to hand one to |
+| Instruction limit | mandatory | not applicable |
+| Heap / stack / call-frame caps | mandatory | not applicable |
+| Bounds still required | — | node count, nesting depth, collection length — all traversal bounds |
+
+So authority confinement is structural in the strongest available sense: not a sandbox that
+blocks calls, and not an evaluator with an empty module table, but **no execution machinery in
+the path at all**.
+
+**What is still not bought.** Two properties are decidable at L0 — membership in the grammar,
+and absence of authority-bearing operations. **Termination is not a consequence of the grammar
+alone**; §6 states the five conditions that make it hold, and traversal bounds enforce the rest.
 
 ---
 
