@@ -700,3 +700,90 @@ fn a_missing_binding_lowers_to_a_visible_dash() {
     let dsl = makepad::lower(&report.root.unwrap());
     assert!(dsl.contains('—'), "an unresolved field should be visible");
 }
+
+// ────────────────────────────────────────────────────────────── instance state ──
+
+const TWO_ROWS: &str = r#"
+source items sys.list()
+component Rowy(item: record) {
+  state open { shape: bool, initial: false }
+  event flip { open: toggle }
+  view Col {
+    Row(on_tap: flip) { TextRow(text: item.name) }
+    when open { TextCaption(text: item.name) }
+  }
+}
+view root Panel { for it in items key it.id { Rowy(item: it) } }
+"#;
+
+fn two_rows_data() -> serde_json::Value {
+    serde_json::json!({ "items": [ {"id": "a", "name": "A"}, {"id": "b", "name": "B"} ] })
+}
+
+/// Each instance must own its `open` cell. Opening one row may not open the
+/// other — the property the whole component model exists to provide.
+#[test]
+fn local_state_is_per_instance() {
+    let mut store = splash_core::ui_l0::InstanceStore::default();
+    let data = two_rows_data();
+
+    let first =
+        splash_core::ui_l0::realize_with_state(TWO_ROWS, &data, &store, RealizeLimits::default());
+    let root = first.root.expect("root");
+    let mut rows = Vec::new();
+    find(&root, "Row", &mut rows);
+    assert_eq!(rows.len(), 2);
+
+    // Open only the first row.
+    let key = rows[0].key.clone();
+    let applied = splash_core::ui_l0::dispatch(TWO_ROWS, &mut store, &key, "flip");
+    assert!(applied, "flip should have applied at {key}");
+
+    let second =
+        splash_core::ui_l0::realize_with_state(TWO_ROWS, &data, &store, RealizeLimits::default());
+    let root = second.root.expect("root");
+    let mut captions = Vec::new();
+    find(&root, "TextCaption", &mut captions);
+    assert_eq!(
+        captions.len(),
+        1,
+        "exactly one row should be open, not {}",
+        captions.len()
+    );
+    let (_, shown) = captions[0].args.iter().find(|(n, _)| n == "text").unwrap();
+    assert_eq!(
+        *shown,
+        NodeValue::Text("A".into()),
+        "the row that was tapped"
+    );
+}
+
+/// Profile §5.8: a state schema change resets instances rather than guessing
+/// that old values still fit.
+#[test]
+fn a_schema_change_resets_instance_state() {
+    let mut store = splash_core::ui_l0::InstanceStore::default();
+    let data = two_rows_data();
+    let first =
+        splash_core::ui_l0::realize_with_state(TWO_ROWS, &data, &store, RealizeLimits::default());
+    let mut rows = Vec::new();
+    let first_root = first.root.unwrap();
+    find(&first_root, "Row", &mut rows);
+    splash_core::ui_l0::dispatch(TWO_ROWS, &mut store, &rows[0].key, "flip");
+
+    // The component gains a field: same name, different state schema.
+    let edited = TWO_ROWS.replace(
+        "state open { shape: bool, initial: false }",
+        "state open { shape: bool, initial: false }\n  state seen { shape: bool, initial: false }",
+    );
+    let after =
+        splash_core::ui_l0::realize_with_state(&edited, &data, &store, RealizeLimits::default());
+    let mut captions = Vec::new();
+    let after_root = after.root.unwrap();
+    find(&after_root, "TextCaption", &mut captions);
+    assert_eq!(
+        captions.len(),
+        0,
+        "a schema change resets, it does not migrate"
+    );
+}

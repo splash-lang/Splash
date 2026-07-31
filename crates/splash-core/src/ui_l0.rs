@@ -1847,6 +1847,15 @@ pub struct RealizeReport {
 /// here** — not because one is blocked, but because realization is a tree walk
 /// and there is no evaluator to reach anything with.
 pub fn realize(source: &str, data: &crate::JsonValue, limits: RealizeLimits) -> RealizeReport {
+    realize_inner(source, data, None, limits)
+}
+
+fn realize_inner(
+    source: &str,
+    data: &crate::JsonValue,
+    store: Option<&InstanceStore>,
+    limits: RealizeLimits,
+) -> RealizeReport {
     let mut sink = Diagnostics::default();
 
     let check = check_ui_l0_named("card.l0", source);
@@ -1888,6 +1897,7 @@ pub fn realize(source: &str, data: &crate::JsonValue, limits: RealizeLimits) -> 
         nodes: 0,
         truncated: false,
         sink: &mut sink,
+        store,
     };
     let mut scope = ValueScope {
         frames: vec![],
@@ -1937,6 +1947,9 @@ struct Realizer<'a> {
     nodes: usize,
     truncated: bool,
     sink: &'a mut Diagnostics,
+    /// Where component-local values live. Absent means every instance sees its
+    /// declared initial.
+    store: Option<&'a InstanceStore>,
 }
 
 impl Realizer<'_> {
@@ -2038,12 +2051,27 @@ impl Realizer<'_> {
                 bound += 1;
             }
         }
-        self.element(
-            &component.body,
-            scope,
-            &format!("{key}/{}", component.name),
-            out,
-        );
+        let instance_key = format!("{key}/{}", component.name);
+
+        // Local state resolves PER INSTANCE: from the store when it holds a
+        // value for this key, otherwise from the declared initial. Two instances
+        // of one component therefore never share a cell — the property the
+        // component model exists to provide.
+        let schema = schema_id(component);
+        for state in &component.states {
+            let live = self
+                .store
+                .filter(|s| s.schemas.get(&component.name).is_none_or(|k| *k == schema))
+                .and_then(|s| s.get(&instance_key, &state.path))
+                .cloned();
+            scope.frames.push((
+                state.path.clone(),
+                live.unwrap_or_else(|| initial_for(&state.shape)),
+            ));
+            bound += 1;
+        }
+
+        self.element(&component.body, scope, &instance_key, out);
         for _ in 0..bound {
             scope.frames.pop();
         }
@@ -2520,4 +2548,196 @@ pub mod makepad {
             }
         }
     }
+}
+
+// ────────────────────────────────────────────────────────────── instance state ──
+
+use std::collections::BTreeMap;
+
+/// Per-instance local state — the runtime's half of the immutable/mutable split.
+///
+/// The ledger declares a component's state *shape*; the values live here, keyed
+/// by instance identity (§5.1). Seven `ForecastRow` instances therefore hold
+/// seven independent cells, none of which appear in the card.
+///
+/// Nothing in the store is authored by the model. A card cannot name an
+/// instance, cannot address another instance's cell, and cannot write anything
+/// except through a declared transition on its own state.
+#[derive(Clone, Debug, Default)]
+pub struct InstanceStore {
+    /// `instance-key` → field → value.
+    cells: BTreeMap<String, BTreeMap<String, crate::JsonValue>>,
+    /// Component name → the schema id its live cells were written under.
+    schemas: BTreeMap<String, u64>,
+}
+
+impl InstanceStore {
+    pub fn get(&self, key: &str, field: &str) -> Option<&crate::JsonValue> {
+        self.cells.get(key)?.get(field)
+    }
+
+    fn set(&mut self, key: &str, field: &str, value: crate::JsonValue) {
+        self.cells
+            .entry(key.to_string())
+            .or_default()
+            .insert(field.to_string(), value);
+    }
+
+    /// Drop every cell belonging to instances of `component`.
+    fn reset_component(&mut self, component: &str) {
+        let marker = format!("/{component}");
+        self.cells.retain(|key, _| !key.contains(&marker));
+    }
+
+    /// Profile §5.8: a component whose state declarations changed gets a new
+    /// schema id, and its live cells are dropped rather than migrated. Guessing
+    /// that an old value still fits is how a rolled-back ledger feeds version-A
+    /// state to version-B code.
+    fn reconcile_schema(&mut self, component: &str, schema: u64) {
+        match self.schemas.get(component) {
+            Some(&known) if known == schema => {}
+            Some(_) => {
+                self.reset_component(component);
+                self.schemas.insert(component.to_string(), schema);
+            }
+            None => {
+                self.schemas.insert(component.to_string(), schema);
+            }
+        }
+    }
+
+    /// Forget instances that no longer appear — the unmount half of §5.7.
+    pub fn prune(&mut self, live: &[String]) {
+        self.cells.retain(|key, _| live.iter().any(|k| k == key));
+    }
+
+    pub fn len(&self) -> usize {
+        self.cells.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cells.is_empty()
+    }
+}
+
+/// A component's state schema: its declarations, order-independent. Changing a
+/// shape, name or initial changes this; changing the view does not.
+fn schema_id(component: &Component) -> u64 {
+    let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut fields: Vec<String> = component
+        .states
+        .iter()
+        .map(|s| format!("{}:{:?}", s.path, s.shape))
+        .collect();
+    fields.sort();
+    for byte in fields.join(",").bytes() {
+        acc ^= byte as u64;
+        acc = acc.wrapping_mul(0x100_0000_01b3);
+    }
+    acc
+}
+
+fn initial_for(shape: &Shape) -> crate::JsonValue {
+    match shape {
+        Shape::Bool => crate::JsonValue::Bool(false),
+        Shape::Enum(members) => members
+            .first()
+            .map(|m| crate::JsonValue::String(m.clone()))
+            .unwrap_or(crate::JsonValue::Null),
+        Shape::Other => crate::JsonValue::Null,
+    }
+}
+
+/// Realize against a store, so component-local state resolves per instance.
+///
+/// [`realize`] is this with an empty store: a card with no local state behaves
+/// identically either way.
+pub fn realize_with_state(
+    source: &str,
+    data: &crate::JsonValue,
+    store: &InstanceStore,
+    limits: RealizeLimits,
+) -> RealizeReport {
+    realize_inner(source, data, Some(store), limits)
+}
+
+/// Apply an event's transitions to one instance's cells.
+///
+/// Returns whether anything applied. The event name is resolved against the
+/// component's *declarations* — a card cannot construct one, because it has no
+/// expression form to build a name with.
+pub fn dispatch(source: &str, store: &mut InstanceStore, instance_key: &str, event: &str) -> bool {
+    let mut sink = Diagnostics::default();
+    let Some(tokens) = lex(source, &mut sink) else {
+        return false;
+    };
+    let card = Parser::new(&tokens, &mut sink).parse_card();
+
+    // A backend dispatches with the key of the NODE that was tapped, which sits
+    // inside the component rather than at its boundary — `…/Rowy/0/1`. The cell
+    // belongs to the instance, so the key is truncated to the component segment.
+    // Where components nest, the innermost one declaring this event wins.
+    let mut owner: Option<(&Component, usize)> = None;
+    for component in &card.components {
+        if !component.events.iter().any(|e| e.name == event) {
+            continue;
+        }
+        let marker = format!("/{}", component.name);
+        if let Some(at) = instance_key.rfind(&marker) {
+            let end = at + marker.len();
+            // Only a whole segment matches: `/Row` must not match `/Rowy`.
+            let whole = instance_key[end..]
+                .chars()
+                .next()
+                .is_none_or(|c| c == '/' || c == '[');
+            if whole && owner.as_ref().is_none_or(|(_, best)| end > *best) {
+                owner = Some((component, end));
+            }
+        }
+    }
+    let Some((component, boundary)) = owner else {
+        return false;
+    };
+    let instance_key = &instance_key[..boundary];
+    let Some(declared) = component.events.iter().find(|e| e.name == event) else {
+        return false;
+    };
+
+    let schema = schema_id(component);
+    store.reconcile_schema(&component.name, schema);
+
+    let mut applied = false;
+    for transition in &declared.transitions {
+        let Some(state) = component
+            .states
+            .iter()
+            .find(|s| s.path == transition.target)
+        else {
+            continue;
+        };
+        let current = store
+            .get(instance_key, &transition.target)
+            .cloned()
+            .unwrap_or_else(|| initial_for(&state.shape));
+
+        let next = match (&transition.form, &state.shape) {
+            (Form::Toggle, Shape::Bool) => {
+                crate::JsonValue::Bool(!current.as_bool().unwrap_or(false))
+            }
+            (Form::Clear, shape) => initial_for(shape),
+            (Form::Cycle, Shape::Enum(members)) if !members.is_empty() => {
+                let at = current
+                    .as_str()
+                    .and_then(|s| members.iter().position(|m| m == s))
+                    .unwrap_or(0);
+                crate::JsonValue::String(members[(at + 1) % members.len()].clone())
+            }
+            // `set` carries its operand in the source; realization supplies it
+            // through the event payload, which this entry point does not take.
+            _ => continue,
+        };
+        store.set(instance_key, &transition.target, next);
+        applied = true;
+    }
+    applied
 }
