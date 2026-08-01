@@ -158,8 +158,8 @@ fn definition_digest(component: &Component) -> u64 {
     }
     for st in &component.states {
         acc.push_str(&format!(
-            "{}:{:?}:{:?}:{}",
-            st.path, st.shape, st.initial, st.keep
+            "{}:{:?}:{:?}:{:?}:{}",
+            st.path, st.shape, st.initial, st.initial_path, st.keep
         ));
     }
     for ev in &component.events {
@@ -591,6 +591,11 @@ struct StateDecl {
     /// on a freshly-mounted state compares against null and takes the wrong
     /// branch on first render.
     initial: Option<crate::JsonValue>,
+    /// A path-valued `initial`, e.g. `initial: env.locale.temp_unit`. Held
+    /// separately because it resolves against injected data at realization,
+    /// not at parse. Dropping it made weather.card fall back to the enum's
+    /// first member, so a device set to Fahrenheit still rendered Celsius.
+    initial_path: Option<String>,
     /// `keep: true` — profile §5.8. A schema change resets local state by
     /// default; this opts one cell out, and even then only while its own shape
     /// is unchanged. Preservation is never inferred from a shape that merely
@@ -616,7 +621,7 @@ struct Transition {
     column: usize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum Form {
     Set(SetSource),
     Toggle,
@@ -628,7 +633,7 @@ enum Form {
 
 /// What `set(…)` assigns. Each is a value the runtime already holds; none is
 /// computed, so the transition stays total.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum SetSource {
     /// `$value` — the payload from the element that raised the event.
     Payload,
@@ -638,6 +643,11 @@ enum SetSource {
     Text(String),
     /// A bound path, resolved against the data the runtime injected.
     Path(String),
+    /// A numeric literal. Without this `set(1)` parsed as `Payload` and did
+    /// nothing at all when no payload was present.
+    Num(f64),
+    /// A boolean literal.
+    Bool(bool),
 }
 
 #[derive(Debug)]
@@ -690,7 +700,17 @@ enum Operand {
     Token(String),
     Str(String),
     Num(f64),
-    Predicate(String),
+    /// A comparison in argument position: `active: range == .d1`.
+    ///
+    /// Previously this kept only the left path and discarded the comparator and
+    /// right operand, so `active: range == .d1` realized as the VALUE of
+    /// `range` rather than as a boolean — live in stock.card, and invisible
+    /// because the device golden recorded the wrong rendering as correct.
+    Predicate {
+        path: String,
+        cmp: String,
+        rhs: Box<Operand>,
+    },
 }
 
 // ─────────────────────────────────────────────────────────────────────── parser ──
@@ -885,8 +905,16 @@ impl<'a> Parser<'a> {
             }
             if self.peek().is_some_and(|t| t.is_punct("[")) {
                 self.at += 1;
-                // The index is itself a path; it must resolve like any other.
-                let _ = self.dotted_name();
+                // The index is itself a path and must be RETAINED, not just
+                // recognised: dropping it turned `stories[selected].title` into
+                // `stories.title`, which resolved to nothing and rendered an
+                // em dash. Held as a `[…]` segment so lookup can resolve the
+                // inner path and use its value as the key.
+                if let Some(index) = self.dotted_name() {
+                    name.push_str(".[");
+                    name.push_str(&index);
+                    name.push(']');
+                }
                 self.expect_punct("]");
                 continue;
             }
@@ -1004,6 +1032,7 @@ impl<'a> Parser<'a> {
         let path = self.dotted_name()?;
         let mut shape = Shape::Other;
         let mut initial = None;
+        let mut initial_path = None;
         let mut keep = false;
         // `{ shape: enum[a, b], initial: .a }` — capture the shape, skip the rest.
         let start = self.at;
@@ -1028,6 +1057,24 @@ impl<'a> Parser<'a> {
                             Kind::Num => v.text.parse::<f64>().ok().map(crate::JsonValue::from),
                             Kind::Ident if v.text == "true" || v.text == "false" => {
                                 Some(crate::JsonValue::Bool(v.text == "true"))
+                            }
+                            Kind::Ident => {
+                                // A path. Collect its dotted segments from the
+                                // token stream; it resolves at realization.
+                                let mut path = v.text.clone();
+                                let mut at = scan + 3;
+                                while self.tokens.get(at).is_some_and(|t| t.is_punct("."))
+                                    && self
+                                        .tokens
+                                        .get(at + 1)
+                                        .is_some_and(|t| t.kind == Kind::Ident)
+                                {
+                                    path.push('.');
+                                    path.push_str(&self.tokens[at + 1].text);
+                                    at += 2;
+                                }
+                                initial_path = Some(path);
+                                None
                             }
                             _ => None,
                         };
@@ -1065,6 +1112,7 @@ impl<'a> Parser<'a> {
             path,
             shape,
             initial,
+            initial_path,
             keep,
         })
     }
@@ -1177,9 +1225,30 @@ impl<'a> Parser<'a> {
                                 self.at += 1;
                             }
                             Kind::Punct if inner.text == "$" => {
-                                // `$value` — the payload.
+                                // `$value` — the payload. The name is checked:
+                                // `$anything` used to be accepted as a synonym,
+                                // so a typo silently became the payload.
                                 self.at += 1;
-                                let _ = self.ident();
+                                match self.ident() {
+                                    Some(name) if name == "value" => {}
+                                    Some(other) => {
+                                        self.sink.at(
+                                            &inner,
+                                            format!(
+                                                "`${other}` is not a payload; L0 names it `$value`"
+                                            ),
+                                        );
+                                    }
+                                    None => {}
+                                }
+                            }
+                            Kind::Num => {
+                                source = SetSource::Num(inner.text.parse().unwrap_or(0.0));
+                                self.at += 1;
+                            }
+                            Kind::Ident if inner.text == "true" || inner.text == "false" => {
+                                source = SetSource::Bool(inner.text == "true");
+                                self.at += 1;
                             }
                             Kind::Ident => {
                                 source = self
@@ -1564,10 +1633,16 @@ impl<'a> Parser<'a> {
             Kind::Ident => {
                 let path = self.dotted_name().unwrap_or_default();
                 // A comparison in argument position is a predicate operand.
-                if self.peek().is_some_and(|t| t.kind == Kind::Cmp) {
-                    self.at += 1;
-                    self.at += 1;
-                    return Operand::Predicate(path);
+                if let Some(op) = self.peek().cloned() {
+                    if op.kind == Kind::Cmp {
+                        self.at += 1;
+                        let rhs = self.parse_operand();
+                        return Operand::Predicate {
+                            path,
+                            cmp: op.text,
+                            rhs: Box::new(rhs),
+                        };
+                    }
                 }
                 Operand::Path(path)
             }
@@ -1585,6 +1660,58 @@ impl<'a> Parser<'a> {
 /// anything outside a group goes to the anonymous one. Keeping the default
 /// unnamed means a component with one slot needs no ceremony.
 /// The slot names a component declares. An anonymous `slot` is `""`.
+/// Resolve an operand in a comparison's right-hand position.
+/// Follow a dotted path into injected data. Used for a path-valued `initial`,
+/// which resolves against what the host supplied rather than at parse time.
+fn data_path(data: &crate::JsonValue, path: &str) -> Option<crate::JsonValue> {
+    let mut current = data.clone();
+    for segment in path.split('.') {
+        current = match segment.parse::<usize>() {
+            Ok(i) => current.get(i)?.clone(),
+            Err(_) => current.get(segment)?.clone(),
+        };
+    }
+    Some(current)
+}
+
+fn scope_value(scope: &ValueScope, operand: &Operand) -> Option<crate::JsonValue> {
+    match operand {
+        Operand::Path(p) => scope.lookup(p),
+        Operand::Token(t) => Some(crate::JsonValue::String(
+            t.trim_start_matches('.').to_string(),
+        )),
+        Operand::Str(s) => Some(crate::JsonValue::String(s.clone())),
+        Operand::Num(n) => Some(crate::JsonValue::from(*n)),
+        // A nested comparison is not in the grammar.
+        Operand::Predicate { .. } => None,
+    }
+}
+
+/// Compare two resolved values. Shared by guards (`when a == b`) and by
+/// predicate arguments (`active: range == .d1`), so the two cannot drift.
+fn compare(left: Option<crate::JsonValue>, cmp: &str, right: Option<crate::JsonValue>) -> bool {
+    let (Some(left), Some(right)) = (left, right) else {
+        // An operand that did not resolve cannot be compared. `!=` used to
+        // return true here, so a guard against an UNDECLARED name took its
+        // branch; an unresolvable comparison is now simply false.
+        return false;
+    };
+    match cmp {
+        "==" => left == right,
+        "!=" => left != right,
+        _ => match (left.as_f64(), right.as_f64()) {
+            (Some(a), Some(b)) => match cmp {
+                "<" => a < b,
+                "<=" => a <= b,
+                ">" => a > b,
+                ">=" => a >= b,
+                _ => false,
+            },
+            _ => false,
+        },
+    }
+}
+
 fn slot_names(component: &Component) -> Vec<String> {
     fn walk(elements: &[Element], out: &mut Vec<String>) {
         for e in elements {
@@ -2183,6 +2310,12 @@ fn walk(
             }) = element.args.first()
             {
                 check_path(p, scope, *line, *column, sink);
+                // The right operand is a binding too. Unchecked, an undeclared
+                // name on the right resolved to nothing and the comparison
+                // decided the branch on that absence.
+                if let Some(Operand::Path(r)) = element.rhs.as_ref() {
+                    check_path(r, scope, *line, *column, sink);
+                }
             }
         }
         _ if element.is_reference => {
@@ -2335,7 +2468,14 @@ fn check_arg(
         // event name — profile §5.4, outputs are event props. Accept either.
         (Operand::Path(path), None) if scope.events.iter().any(|e| e == path) => {}
         (Operand::Path(path), _) => check_path(path, scope, arg.line, arg.column, sink),
-        (Operand::Predicate(path), _) => check_path(path, scope, arg.line, arg.column, sink),
+        (Operand::Predicate { path, rhs, .. }, _) => {
+            check_path(path, scope, arg.line, arg.column, sink);
+            // The right operand is a binding too. Leaving it unchecked is how
+            // `when selected != absent` took its branch with `absent` undeclared.
+            if let Operand::Path(r) = rhs.as_ref() {
+                check_path(r, scope, arg.line, arg.column, sink);
+            }
+        }
         _ => {}
     }
 
@@ -2345,6 +2485,14 @@ fn check_arg(
 fn check_path(path: &str, scope: &Scope, line: usize, column: usize, sink: &mut Diagnostics) {
     if path.is_empty() {
         return;
+    }
+
+    // A `[inner]` segment holds a path of its own. Checking it here is what
+    // makes `stories[typo].title` a diagnostic rather than a silent em dash.
+    for segment in path.split('.') {
+        if let Some(inner) = segment.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            check_path(inner, scope, line, column, sink);
+        }
     }
     let root = root_of(path);
 
@@ -2553,6 +2701,7 @@ fn realize_inner(
             .cloned()
             .or_else(|| data.get(&state.path).cloned())
             .or_else(|| state.initial.clone())
+            .or_else(|| state.initial_path.as_ref().and_then(|p| data_path(data, p)))
             .unwrap_or_else(|| initial_for(&state.shape));
         frames.push((state.path.clone(), value));
     }
@@ -2636,6 +2785,18 @@ impl ValueScope<'_> {
             None => self.data.get(root)?.clone(),
         };
         for segment in segments {
+            // `[inner]` — resolve the inner path, then index by its value.
+            if let Some(inner) = segment.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                let key = self.lookup(inner)?;
+                current = match &key {
+                    crate::JsonValue::String(k) => current.get(k.as_str())?.clone(),
+                    v => match v.as_u64() {
+                        Some(i) => current.get(i as usize)?.clone(),
+                        None => return None,
+                    },
+                };
+                continue;
+            }
             current = match segment.parse::<usize>() {
                 Ok(index) => current.get(index)?.clone(),
                 Err(_) => current.get(segment)?.clone(),
@@ -2782,7 +2943,7 @@ impl Realizer<'_> {
                     // it away.
                     Operand::Str(t) => crate::JsonValue::String(t.clone()),
                     Operand::Num(n) => crate::JsonValue::from(*n),
-                    Operand::Predicate(p) => scope
+                    Operand::Predicate { path: p, .. } => scope
                         .lookup(p)
                         .unwrap_or_else(|| crate::JsonValue::String(p.clone())),
                 };
@@ -2813,9 +2974,11 @@ impl Realizer<'_> {
                 })
                 .and_then(|s| s.get(&instance_key, &state.path))
                 .cloned();
+            let from_path = state.initial_path.as_ref().and_then(|p| scope.lookup(p));
             scope.frames.push((
                 state.path.clone(),
                 live.or_else(|| state.initial.clone())
+                    .or(from_path)
                     .unwrap_or_else(|| initial_for(&state.shape)),
             ));
             bound += 1;
@@ -2913,35 +3076,8 @@ impl Realizer<'_> {
             // Bare boolean guard — amendment #10.
             return matches!(left, Some(crate::JsonValue::Bool(true)));
         };
-        let right = match element.rhs.as_ref() {
-            Some(Operand::Path(p)) => scope.lookup(p),
-            Some(Operand::Token(t)) => Some(crate::JsonValue::String(
-                t.trim_start_matches('.').to_string(),
-            )),
-            Some(Operand::Str(s)) => Some(crate::JsonValue::String(s.clone())),
-            Some(Operand::Num(n)) => crate::JsonValue::from(*n).into(),
-            _ => None,
-        };
-
-        // A comparison against a literal the parser did not retain cannot be
-        // decided here; treat it as false rather than guess.
-        let (Some(left), Some(right)) = (left, right) else {
-            return cmp == "!=";
-        };
-        match cmp {
-            "==" => left == right,
-            "!=" => left != right,
-            _ => match (left.as_f64(), right.as_f64()) {
-                (Some(a), Some(b)) => match cmp {
-                    "<" => a < b,
-                    "<=" => a <= b,
-                    ">" => a > b,
-                    ">=" => a >= b,
-                    _ => false,
-                },
-                _ => false,
-            },
-        }
+        let right = element.rhs.as_ref().and_then(|r| scope_value(scope, r));
+        compare(left, cmp, right)
     }
 
     fn value(
@@ -2971,7 +3107,10 @@ impl Realizer<'_> {
             Operand::Token(t) => NodeValue::Token(t.trim_start_matches('.').to_string()),
             Operand::Str(s) => NodeValue::Text(s.clone()),
             Operand::Num(n) => NodeValue::Number(*n),
-            Operand::Predicate(p) | Operand::Path(p) => match scope.lookup(p) {
+            Operand::Predicate { path, cmp, rhs } => {
+                NodeValue::Bool(compare(scope.lookup(path), cmp, scope_value(scope, rhs)))
+            }
+            Operand::Path(p) => match scope.lookup(p) {
                 Some(crate::JsonValue::String(s)) => NodeValue::Text(s),
                 Some(crate::JsonValue::Bool(b)) => NodeValue::Bool(b),
                 Some(v) => match v.as_f64() {
@@ -3566,6 +3705,30 @@ pub fn dispatch_with(
     event: &str,
     payload: Option<&crate::JsonValue>,
 ) -> bool {
+    dispatch_with_data(
+        source,
+        store,
+        instance_key,
+        event,
+        payload,
+        &crate::JsonValue::Null,
+    )
+}
+
+/// `dispatch_with`, plus the data a `set(path)` reads from.
+///
+/// Separated rather than folded in because most events do not read: `toggle`,
+/// `cycle`, `clear` and `set(.token)` need nothing. Only a transition that
+/// names a path needs the host's data, and passing Null simply makes that one
+/// form a no-op instead of writing something wrong.
+pub fn dispatch_with_data(
+    source: &str,
+    store: &mut InstanceStore,
+    instance_key: &str,
+    event: &str,
+    payload: Option<&crate::JsonValue>,
+    data: &crate::JsonValue,
+) -> bool {
     let mut sink = Diagnostics::default();
     let Some(tokens) = lex(source, &mut sink) else {
         return false;
@@ -3641,13 +3804,22 @@ pub fn dispatch_with(
                 crate::JsonValue::String(members[(at + 1) % members.len()].clone())
             }
             (Form::Set(source), _) => match source {
-                SetSource::Payload | SetSource::Path(_) => match payload {
+                SetSource::Payload => match payload {
                     Some(v) => v.clone(),
                     // No payload is a no-op rather than a silent clear: falling
                     // back to the initial would look like a deliberate reset.
                     None => continue,
                 },
+                // A path READS. Treating it as the payload meant
+                // `n: set(config.answer)` wrote whatever the tap carried — or
+                // nothing at all when it carried nothing.
+                SetSource::Path(p) => match data_path(data, p) {
+                    Some(v) => v,
+                    None => continue,
+                },
                 SetSource::Token(t) | SetSource::Text(t) => crate::JsonValue::String(t.clone()),
+                SetSource::Num(n) => crate::JsonValue::from(*n),
+                SetSource::Bool(b) => crate::JsonValue::Bool(*b),
             },
             _ => continue,
         };
@@ -3958,7 +4130,7 @@ fn collect_reads(element: &Element, reads: &mut Vec<String>, pulls: &mut Vec<Str
 
     for arg in &element.args {
         match &arg.value {
-            Operand::Path(p) | Operand::Predicate(p) => {
+            Operand::Path(p) | Operand::Predicate { path: p, .. } => {
                 let root = root_of(p);
                 if !binders.contains(&root) {
                     reads.push(root);

@@ -1974,3 +1974,170 @@ fn the_source_catalog_matches_the_toml_spec() {
         );
     }
 }
+
+// ─── parse-then-discard: forms recognised but whose values were dropped ──────
+//
+// Every one of these parsed cleanly and then lost the value. That is the single
+// most common defect in this work, and each of these was found by the codex
+// review rather than by a failing test — which is the point of writing them.
+
+/// `active: range == .d1` realized as the VALUE of `range` rather than a
+/// boolean, because the parser kept the left path and dropped the comparator
+/// and right operand. Live in stock.card, and the device golden recorded the
+/// wrong rendering as correct.
+#[test]
+fn a_predicate_argument_evaluates_to_a_boolean() {
+    let source = "state range { shape: enum[d1, w1], initial: .d1 }\n\
+                  view root Col { Chip(text: \"1D\", active: range == .d1) \
+                                  Chip(text: \"1W\", active: range == .w1) }";
+    let report = realize(source, &serde_json::json!({}), RealizeLimits::default());
+    let root = report.root.unwrap();
+    let mut chips = Vec::new();
+    find(&root, "Chip", &mut chips);
+    assert_eq!(chips.len(), 2);
+    let active = |c: &splash_core::ui_l0::UiNode| {
+        c.args
+            .iter()
+            .find(|(n, _)| n == "active")
+            .map(|(_, v)| v.clone())
+    };
+    assert_eq!(active(chips[0]), Some(NodeValue::Bool(true)));
+    assert_eq!(active(chips[1]), Some(NodeValue::Bool(false)));
+}
+
+/// A guard's right operand is a binding too. Unchecked, `when x != absent`
+/// resolved `absent` to nothing and the comparison decided the branch on that
+/// absence — so the branch rendered with an undeclared name in it.
+#[test]
+fn a_guard_right_operand_must_be_declared() {
+    let report = check_ui_l0_named(
+        "rhs",
+        "state selected { shape: text, initial: \"\" }\n\
+         view root Col { when selected != absent { Rule() } }",
+    );
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("absent")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+/// `initial: env.locale.temp_unit` was recognised and dropped, so the state
+/// fell back to the enum's first member — a phone set to Fahrenheit rendered
+/// Celsius, which is weather.card's actual declaration.
+#[test]
+fn a_path_valued_initial_resolves_against_data() {
+    let source = "source env.locale sys.locale()\n\
+                  state units { shape: enum[c, f], initial: env.locale.temp_unit }\n\
+                  view root TextRow(text: units)";
+    for locale in ["f", "c"] {
+        let data = serde_json::json!({"env": {"locale": {"temp_unit": locale}}});
+        let report = realize(source, &data, RealizeLimits::default());
+        let root = report.root.unwrap();
+        assert_eq!(
+            root.args.iter().find(|(n, _)| n == "text").unwrap().1,
+            NodeValue::Text(locale.into()),
+            "the declared initial must follow the host's locale"
+        );
+    }
+}
+
+/// `stories[selected].title` became `stories.title` — the index was parsed and
+/// thrown away, so it resolved to nothing.
+#[test]
+fn a_dynamic_index_resolves_through_its_inner_path() {
+    let source = "source movers sys.movers()\n\
+                  state selected { shape: text, initial: \"b\" }\n\
+                  view root TextRow(text: movers[selected].title)";
+    let data = serde_json::json!({"movers": {"a": {"title": "FIRST"}, "b": {"title": "SECOND"}}});
+    let report = realize(source, &data, RealizeLimits::default());
+    let root = report.root.unwrap();
+    assert_eq!(
+        root.args.iter().find(|(n, _)| n == "text").unwrap().1,
+        NodeValue::Text("SECOND".into())
+    );
+}
+
+#[test]
+fn a_dynamic_index_path_is_itself_checked() {
+    let report = check_ui_l0_named(
+        "idx",
+        "source movers sys.movers()\nview root TextRow(text: movers[typo].title)",
+    );
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("typo")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+/// `set` had no numeric or boolean variant, so `set(1)` fell through to the
+/// payload form and did nothing at all when no payload was present. And
+/// `SetSource::Path` was treated exactly like `$value`, so `set(config.answer)`
+/// wrote whatever the tap carried rather than what it named.
+#[test]
+fn every_set_form_writes_what_it_names() {
+    let card = "state n { shape: number, initial: 0 }\n\
+                state ok { shape: bool, initial: false }\n\
+                source movers sys.movers(count: 1)\n\
+                event bump { n: set(1) }\n\
+                event frompath { n: set(movers.answer) }\n\
+                event yes { ok: set(true) }\n\
+                view root Row(on_tap: bump) { Rule() }";
+    let data = serde_json::json!({"movers": {"answer": 7}});
+    let mut store = splash_core::ui_l0::InstanceStore::default();
+
+    splash_core::ui_l0::dispatch_with_data(card, &mut store, "root", "bump", None, &data);
+    assert_eq!(store.get("@card", "n").and_then(|v| v.as_f64()), Some(1.0));
+
+    splash_core::ui_l0::dispatch_with_data(card, &mut store, "root", "frompath", None, &data);
+    assert_eq!(store.get("@card", "n").and_then(|v| v.as_f64()), Some(7.0));
+
+    splash_core::ui_l0::dispatch_with_data(card, &mut store, "root", "yes", None, &data);
+    assert_eq!(
+        store.get("@card", "ok").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+
+    // A payload must not hijack a transition that names a path to read.
+    let stray = serde_json::json!("STRAY");
+    splash_core::ui_l0::dispatch_with_data(
+        card,
+        &mut store,
+        "root",
+        "frompath",
+        Some(&stray),
+        &data,
+    );
+    assert_eq!(
+        store.get("@card", "n").and_then(|v| v.as_f64()),
+        Some(7.0),
+        "set(path) reads its path, not the payload"
+    );
+}
+
+#[test]
+fn only_dollar_value_names_the_payload() {
+    // `$anything` was accepted as a synonym, so a typo silently became $value.
+    let report = check_ui_l0_named(
+        "typo",
+        "state n { shape: number, initial: 0 }\nevent e { n: set($valu) }\nview root Rule()",
+    );
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("$value")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
