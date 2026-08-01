@@ -4389,7 +4389,7 @@ pub mod makepad {
         }
     }
 
-    fn trim_num(n: f64) -> String {
+    pub(super) fn trim_num(n: f64) -> String {
         if (n - n.round()).abs() < f64::EPSILON {
             format!("{}", n as i64)
         } else {
@@ -6353,4 +6353,115 @@ pub mod splash_surface {
             })
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────── DSL lowering (§1.1) ──
+
+/// Lower a realized card to **Splash DSL**, the data form `splash-render`
+/// evaluates into a `UiNode` and every backend renders from.
+///
+/// This is what §1.1 requires and what `makepad::lower` does not do. That one
+/// emits makepad's widget dialect with ten hardcoded colours and a font-size
+/// ramp, which reaches one backend of three and puts a theme inside the crate
+/// whose job is deciding whether a card is safe.
+///
+/// The split §1.1 settles:
+///
+/// - **16 roles** become an existing node kind carrying their data. The seven
+///   text roles collapse onto `text` with a `role:` attribute, because a hero
+///   and a caption differ in *presentation* and that is the theme's to decide.
+/// - **6 roles** keep their own kind. They are fragment shaders parameterised by
+///   data and cannot be composed from boxes and text, so each backend implements
+///   them — the category `splash-render` already has for `Map`.
+/// - **`Photo`** is an image.
+///
+/// No colour, size, weight or radius is emitted. If one appears here, §1.1 has
+/// been broken and `lowering_emits_splash_dsl_not_a_backend_dialect` will say so.
+pub fn lower_dsl(root: &UiNode) -> String {
+    let mut out = String::new();
+    out.push_str("// REALIZED from an L0 ledger — do not edit.\n");
+    emit(root, 0, &mut out);
+    out.push('\n');
+    out
+}
+
+/// The node kind a role lowers to, and the role name it carries when several
+/// roles share a kind.
+fn kind_of(role: &str) -> (&'static str, Option<&'static str>) {
+    match role {
+        // ── containers and structure ────────────────────────────────────────
+        "Surface" => ("column", Some("surface")),
+        "Panel" => ("card", Some("panel")),
+        "Card" => ("card", Some("elevated")),
+        "Col" => ("column", None),
+        "Row" => ("row", None),
+        "Grid" => ("grid", None),
+        "Rule" => ("divider", None),
+        "Tile" => ("listitem", None),
+        "Chip" => ("chip", None),
+        "Photo" => ("image", None),
+
+        // ── text roles: one kind, seven roles ───────────────────────────────
+        "TextHero" => ("text", Some("hero")),
+        "TextTitle" => ("text", Some("title")),
+        "TextBody" => ("text", Some("body")),
+        "TextStat" => ("text", Some("stat")),
+        "TextRow" => ("text", Some("row")),
+        "TextCaption" => ("text", Some("caption")),
+        "TextValue" => ("text", Some("value")),
+
+        // ── data visualisations: backend widgets (§1.1) ─────────────────────
+        "WeatherIcon" => ("weathericon", None),
+        "TempBar" => ("tempbar", None),
+        "SunArc" => ("sunarc", None),
+        "MoonPhase" => ("moonphase", None),
+        "AqiContour" => ("aqicontour", None),
+        "StockPlot" => ("stockplot", None),
+
+        // An unmapped role is emitted as itself. A backend that does not know it
+        // should fail visibly; silently dropping a section is how a card looks
+        // finished and is not.
+        other => (Box::leak(other.to_lowercase().into_boxed_str()), None),
+    }
+}
+
+fn emit(node: &UiNode, depth: usize, out: &mut String) {
+    use std::fmt::Write as _;
+    let pad = "  ".repeat(depth);
+    let (kind, role) = kind_of(&node.kind);
+
+    let _ = write!(out, "{pad}{{t: {kind:?}");
+    if let Some(role) = role {
+        let _ = write!(out, ", role: {role:?}");
+    }
+
+    for (name, value) in &node.args {
+        // `on_tap` and its payload are interaction, not presentation, and the
+        // key is what lets a tap name WHICH instance was hit.
+        let _ = match value {
+            NodeValue::Text(s) => write!(out, ", {name}: {s:?}"),
+            NodeValue::Number(n) => write!(out, ", {name}: {}", makepad::trim_num(*n)),
+            NodeValue::Bool(b) => write!(out, ", {name}: {b}"),
+            NodeValue::Token(t) => write!(out, ", {name}: {t:?}"),
+            NodeValue::Event(e) => write!(out, ", {name}: {e:?}"),
+            NodeValue::Status(s) => write!(out, ", {name}: {:?}", s.as_token()),
+            // An unresolved binding is emitted as such rather than as an em
+            // dash: the theme decides how absence looks, and a dash baked in
+            // here would be presentation.
+            NodeValue::Missing => write!(out, ", {name}: null"),
+        };
+    }
+    if !node.key.is_empty() {
+        let _ = write!(out, ", key: {:?}", node.key);
+    }
+
+    if node.children.is_empty() {
+        out.push_str("}\n");
+        return;
+    }
+    out.push_str(", c: [\n");
+    for child in &node.children {
+        emit(child, depth + 1, out);
+    }
+    let _ = writeln!(out, "{pad}]}}");
 }
