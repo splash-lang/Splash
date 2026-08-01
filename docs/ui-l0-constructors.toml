@@ -18,6 +18,9 @@
 #   path        a bound path — source, state, prop, copy or loop binder
 #   event       a declared event name (local or received as a prop)
 #   number/text/bool   a literal of that type, or a path of that shape
+#   data        a bound path that renders a FACT. Distinct from `number`
+#               because `gap: 6` is layout the card may choose and
+#               `value: 41.2` is a measurement it may not (§4 no-facts)
 #   any         path or literal
 #   record/collection  component props only
 
@@ -58,7 +61,7 @@ cols = { kind = "number" }
 
 [TextHero]
 text   = { kind = "text" }
-value  = { kind = "number" }
+value  = { kind = "data" }
 unit   = { kind = "unit" }
 format = { kind = "format" }
 on_tap = { kind = "event" }
@@ -72,7 +75,7 @@ text  = { kind = "text" }
 width = { kind = "width" }
 
 [TextStat]
-value  = { kind = "number" }
+value  = { kind = "data" }
 format = { kind = "format" }
 tint   = { kind = "path" }
 
@@ -82,21 +85,21 @@ width = { kind = "width" }
 
 [TextCaption]
 text   = { kind = "text" }
-value  = { kind = "number" }
+value  = { kind = "data" }
 glyph  = { kind = "text" }
 suffix = { kind = "text" }
 unit   = { kind = "unit" }
 width  = { kind = "width" }
 
 [TextValue]
-value  = { kind = "number" }
+value  = { kind = "data" }
 unit   = { kind = "unit" }
 format = { kind = "format" }
 tint   = { kind = "path" }
 
 [Tile]
 label  = { kind = "text" }
-value  = { kind = "number" }
+value  = { kind = "data" }
 unit   = { kind = "unit" }
 format = { kind = "format" }
 

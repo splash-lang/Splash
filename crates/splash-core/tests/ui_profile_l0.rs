@@ -2199,3 +2199,107 @@ fn lowering_distinguishes_an_active_chip() {
         "the selected chip must not look like the unselected one"
     );
 }
+
+// ─── §7 the header is checked, not decorated ─────────────────────────────────
+
+#[test]
+fn the_header_is_read_from_a_real_card() {
+    let report = check_ui_l0_named("weather", WEATHER);
+    let header = report.header.expect("weather.card declares a header");
+    assert_eq!(header.ledger.as_deref(), Some("weather"));
+    assert_eq!(header.version.as_deref(), Some("1.0.0"));
+    assert_eq!(header.level.as_deref(), Some("L0"));
+    assert_eq!(header.profile.as_deref(), Some("ui/l0"));
+}
+
+/// §7: "Level is declared in the header and checked at append." Nothing read
+/// it — every `#` line lexed as a comment — so a card could declare L2 and be
+/// accepted and realized as L0. A declaration never compared to the derived
+/// level is a comment, not a check.
+#[test]
+fn a_header_declaring_the_wrong_level_is_rejected() {
+    let report = check_ui_l0_named("evil", "# ledger evil@1.0.0\n# level: L2\nview root Rule()");
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("declares level L2")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn a_header_declaring_an_unknown_profile_is_rejected() {
+    let report = check_ui_l0_named(
+        "wrong",
+        "# ledger x@1.0.0\n# profile: nonsense/v9\nview root Rule()",
+    );
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("ui/l0")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn a_card_without_a_header_is_still_accepted() {
+    // The header is optional; only a header that CONTRADICTS the card is an
+    // error. Requiring one would reject every inline fragment in these tests.
+    let report = check_ui_l0_named("bare", "view root Rule()");
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert!(report.header.is_none());
+}
+
+// ─── §4 the no-facts rule ────────────────────────────────────────────────────
+
+/// §4 calls a model-authored literal in a data position "a structural
+/// violation, not a judgement call". It was neither — `kind = "path"` was
+/// declared in the catalog and never enforced, so every drawing widget accepted
+/// invented values.
+#[test]
+fn a_literal_in_a_data_position_is_rejected() {
+    for source in [
+        "view root TextHero(value: \"34 mph\")",
+        "view root TextStat(value: 41.2)",
+        "view root TempBar(lo: 5, hi: 9, min: 0, max: 10)",
+        "view root WeatherIcon(cond: \"sunny\")",
+    ] {
+        let report = check_ui_l0_named("facts", source);
+        assert!(!report.valid, "should be rejected: {source}");
+        assert!(
+            report.diagnostics.iter().any(|d| d.message.contains("§4")),
+            "the diagnostic should cite the rule: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+/// The line the rule actually draws: a card MAY choose its own layout, and may
+/// not invent a measurement. Without this distinction the check either rejects
+/// `gap: 6` or permits `value: 41.2`.
+#[test]
+fn a_layout_literal_is_not_a_fact() {
+    for source in [
+        "view root Row(gap: 6) { Rule() }",
+        "view root Grid(cols: 2) { Rule() }",
+        "view root Col(gap: 3) { Rule() }",
+    ] {
+        let report = check_ui_l0_named("layout", source);
+        assert!(report.valid, "{source} — {:#?}", report.diagnostics);
+    }
+}
+
+#[test]
+fn a_bound_value_is_accepted() {
+    let report = check_ui_l0_named(
+        "bound",
+        "source now sys.weather(lat: 1.0, lon: 2.0)\nview root TextStat(value: now.temp)",
+    );
+    assert!(report.valid, "{:#?}", report.diagnostics);
+}

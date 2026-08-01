@@ -43,6 +43,8 @@ pub struct UiL0Report {
     pub level: Level,
     pub diagnostics: Vec<SyntaxDiagnostic>,
     pub diagnostics_truncated: bool,
+    /// The header a card declares — profile §2. `None` when it has none.
+    pub header: Option<CardHeader>,
     /// Profile §7: every component the card depends on, with a digest of its
     /// definition, sorted by name.
     ///
@@ -53,6 +55,61 @@ pub struct UiL0Report {
     /// a digest that moved means the level must be re-derived before the card
     /// is accepted, rather than inherited from the record it no longer matches.
     pub closure: Vec<(String, u64)>,
+}
+
+/// What a card's header declares — ledger name, version, level and profile.
+///
+/// §7 says "level is declared in the header and checked at append", and nothing
+/// read it: every `#` line lexed as a comment, so a card could declare
+/// `# level: L2` and be accepted and realized as L0. A declared level that is
+/// never compared to the derived one is not a check, it is a comment.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CardHeader {
+    pub ledger: Option<String>,
+    pub version: Option<String>,
+    pub level: Option<String>,
+    pub profile: Option<String>,
+    pub model: Option<String>,
+}
+
+/// Read the header from the leading `#` lines, which the lexer discards.
+pub fn parse_header(source: &str) -> Option<CardHeader> {
+    let mut header = CardHeader::default();
+    let mut saw_any = false;
+    for line in source.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix('#') else {
+            if line.is_empty() {
+                continue;
+            }
+            break; // The header is the leading comment block only.
+        };
+        let rest = rest.trim();
+        if let Some(decl) = rest.strip_prefix("ledger ") {
+            saw_any = true;
+            let (name, version) = match decl.split_once('@') {
+                Some((n, v)) => (n.trim().to_string(), Some(v.trim().to_string())),
+                None => (decl.trim().to_string(), None),
+            };
+            header.ledger = Some(name);
+            header.version = version;
+        } else if let Some((key, value)) = rest.split_once(':') {
+            let value = value.trim().to_string();
+            match key.trim() {
+                "level" => {
+                    saw_any = true;
+                    header.level = Some(value);
+                }
+                "profile" => {
+                    saw_any = true;
+                    header.profile = Some(value);
+                }
+                "model" => header.model = Some(value),
+                _ => {}
+            }
+        }
+    }
+    saw_any.then_some(header)
 }
 
 /// Diagnostics retained before truncation, so a pathological source cannot grow
@@ -70,6 +127,7 @@ pub fn check_ui_l0(source: &str) -> UiL0Report {
 /// Check source against the L0 profile, naming it for diagnostics.
 pub fn check_ui_l0_named(_name: &str, source: &str) -> UiL0Report {
     let mut sink = Diagnostics::default();
+    let header = parse_header(source);
 
     if source.len() > DEFAULT_MAX_SOURCE_BYTES {
         sink.push(
@@ -104,7 +162,54 @@ pub fn check_ui_l0_named(_name: &str, source: &str) -> UiL0Report {
     validate(&card, &mut sink);
     let mut report = sink.into_report(Level::L0);
     report.closure = component_closure(&card);
+    report.header = header.clone();
+    check_header(&header, report.level, &mut report);
     report
+}
+
+/// §7: a declared level must match the derived one, and escalation is never
+/// silent. Reading the header without comparing it would leave the declaration
+/// decorative — which is what it was.
+fn check_header(header: &Option<CardHeader>, derived: Level, report: &mut UiL0Report) {
+    let Some(header) = header else { return };
+
+    if let Some(declared) = &header.level {
+        let matches = match declared.trim() {
+            "L0" => derived == Level::L0,
+            "L1" => derived == Level::L1,
+            "L2" => derived == Level::L2,
+            _ => false,
+        };
+        if !matches {
+            report.valid = false;
+            report.diagnostics.push(SyntaxDiagnostic {
+                line: 1,
+                column: 1,
+                message: format!(
+                    "the header declares level {declared}, but the card requires {derived:?} \
+                     — a record needing a wider grammar is rejected until the level is \
+                     explicitly raised (profile §7)"
+                ),
+            });
+        }
+    }
+
+    // The profile names which grammar the card was written against. A card
+    // claiming a profile this checker does not implement must not be silently
+    // accepted as though it had claimed this one.
+    if let Some(profile) = &header.profile {
+        if profile.trim() != "ui/l0" {
+            report.valid = false;
+            report.diagnostics.push(SyntaxDiagnostic {
+                line: 1,
+                column: 1,
+                message: format!(
+                    "the header declares profile {profile:?}, but this checker implements \
+                     \"ui/l0\""
+                ),
+            });
+        }
+    }
 }
 
 /// A digest per component definition, sorted by name — profile §7.
@@ -209,6 +314,7 @@ impl Diagnostics {
 
     fn into_report(self, level: Level) -> UiL0Report {
         UiL0Report {
+            header: None,
             closure: Vec::new(),
             valid: self.items.is_empty() && level == Level::L0,
             level,
@@ -1790,8 +1896,15 @@ pub mod catalog {
         Any,
         /// A declared event name.
         Event,
-        /// A number literal or a path; also admits a width token.
+        /// A number literal or a path; also admits a width token. Layout, not
+        /// data — `gap: 6` and `cols: 2` are structure the card chooses.
         Number,
+        /// A bound path that renders a FACT. Distinct from `Number` because
+        /// `gap: 6` is layout the card is entitled to choose and
+        /// `value: 41.2` is a measurement it is not (§4). Without the
+        /// distinction the no-facts rule cannot be stated in the catalog at
+        /// all, so both were `Number` and neither was checked.
+        Data,
         /// Text literal or path.
         Text,
         /// A predicate or a bool path.
@@ -1841,7 +1954,7 @@ pub mod catalog {
             "TextHero",
             &[
                 ("text", Text),
-                ("value", Number),
+                ("value", Data),
                 ("unit", TokenOrPath(UNIT)),
                 ("format", Token(FORMAT)),
                 ("on_tap", Event),
@@ -1854,14 +1967,14 @@ pub mod catalog {
         ("TextBody", &[("text", Text), ("width", TokenOrPath(WIDTH))]),
         (
             "TextStat",
-            &[("value", Number), ("format", Token(FORMAT)), ("tint", Path)],
+            &[("value", Data), ("format", Token(FORMAT)), ("tint", Path)],
         ),
         ("TextRow", &[("text", Text), ("width", TokenOrPath(WIDTH))]),
         (
             "TextCaption",
             &[
                 ("text", Text),
-                ("value", Number),
+                ("value", Data),
                 ("glyph", Text),
                 ("suffix", Text),
                 ("unit", TokenOrPath(UNIT)),
@@ -1871,7 +1984,7 @@ pub mod catalog {
         (
             "TextValue",
             &[
-                ("value", Number),
+                ("value", Data),
                 ("unit", TokenOrPath(UNIT)),
                 ("format", Token(FORMAT)),
                 ("tint", Path),
@@ -1881,7 +1994,7 @@ pub mod catalog {
             "Tile",
             &[
                 ("label", Text),
-                ("value", Number),
+                ("value", Data),
                 ("unit", TokenOrPath(UNIT)),
                 ("format", Token(FORMAT)),
             ],
@@ -2433,6 +2546,61 @@ fn check_arg(
                     ),
                 );
             }
+        }
+        (Operand::Str(lit), Some(Path)) => {
+            sink.push(
+                arg.line,
+                arg.column,
+                format!(
+                    "{ctor}.{} takes a bound path, not the literal {lit:?} — a literal in a \
+                     data position is a model-authored fact (profile §4)",
+                    arg.name
+                ),
+            );
+        }
+        (Operand::Num(lit), Some(Path)) => {
+            sink.push(
+                arg.line,
+                arg.column,
+                format!(
+                    "{ctor}.{} takes a bound path, not the literal {lit} — a literal in a \
+                     data position is a model-authored fact (profile §4)",
+                    arg.name
+                ),
+            );
+        }
+        // A data position renders a fact and must be bound, not authored.
+        (Operand::Str(_) | Operand::Num(_), Some(Data)) => {
+            let shown = match &arg.value {
+                Operand::Num(n) => format!("{n}"),
+                Operand::Str(t) => format!("{t:?}"),
+                other => format!("{other:?}"),
+            };
+            sink.push(
+                arg.line,
+                arg.column,
+                format!(
+                    "{ctor}.{} renders a value and must be bound; {shown} is a literal the \
+                     model authored (profile §4). Layout numbers like `gap:` may be literal; \
+                     a measurement may not",
+                    arg.name
+                ),
+            );
+        }
+        // A number position rendering a fact must be bound, not authored.
+        // `TextHero(value: "34 mph")` is the case §4 exists to make
+        // unrepresentable: units concatenated onto a value the model invented.
+        (Operand::Str(lit), Some(Number)) => {
+            sink.push(
+                arg.line,
+                arg.column,
+                format!(
+                    "{ctor}.{} renders a value and must be bound; {lit:?} is a literal, and \
+                     text in a number position is a fact the model authored (profile §4). \
+                     Units belong in `unit:`, formatting in `format:`",
+                    arg.name
+                ),
+            );
         }
         (Operand::Token(tok), Some(Path)) => {
             sink.push(
