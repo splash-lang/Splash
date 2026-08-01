@@ -65,24 +65,35 @@ INJECT = '        if message.contains(%s) { return; }\n'
 
 
 def messages():
-    """Distinct diagnostic literals, as proxies for the rules they enforce."""
+    """Every diagnostic literal, found by WHERE IT IS USED rather than by keyword.
+
+    A keyword list silently missed rules as new ones were added — "declares no
+    `shape`" and "reaches a data position" were both invisible, so the harness
+    reported full coverage while not testing them at all. That is the same
+    failure the harness exists to catch, one level up.
+    """
     src = SRC.read_text()
     found = set()
-    for m in re.finditer(r'"((?:[^"\\\n]|\\.){12,90})"', src):
-        t = m.group(1)
-        if any(k in t for k in ("is not", "must", "cannot", "takes a", "has no",
-                                "needs a", "may not", "is recursive", "only",
-                                "does not accept", "is an event", "renders a value",
-                                "declares level", "declares profile", "writes")):
-            found.add(t)
-    # The runtime message is formatted, so match on its longest LITERAL run —
-    # the text between placeholders. Using only the prefix dropped every message
-    # that starts with one, e.g. "{root:?} is not a declared name".
+    # Scan forward from each diagnostic call and take the string literals in it.
+    for m in re.finditer(r"(?:sink\.push|sink\.at|self\.sink\.at|self\.sink\.push)\s*\(", src):
+        window = src[m.end(): m.end() + 900]
+        depth, cut = 1, len(window)
+        for i, ch in enumerate(window):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    cut = i
+                    break
+        for lit in re.findall(r'"((?:[^"\\\n]|\\.){10,})"', window[:cut]):
+            found.add(lit)
+
+    # Match on the longest LITERAL run — the text between format placeholders.
     out = {}
     for t in found:
         runs = [r.strip() for r in re.split(r"\{[^}]*\}", t)]
         longest = max(runs, key=len) if runs else ""
-        # Trim a trailing fragment that would not appear verbatim once formatted.
         if len(longest) >= 12:
             out.setdefault(longest, t)
     return sorted(out.items())

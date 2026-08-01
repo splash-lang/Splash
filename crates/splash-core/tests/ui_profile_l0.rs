@@ -3002,3 +3002,320 @@ fn every_construct_outside_l0_raises_the_level() {
         );
     }
 }
+
+// ─── codex round three ───────────────────────────────────────────────────────
+// Written BEFORE the fixes, and each confirmed failing first.
+
+/// #6: `parse_state` scanned every token in the body for a shape word instead
+/// of reading the one after `shape:`. So an enum whose members include a shape
+/// name was silently retyped by its own member.
+#[test]
+fn an_enum_member_named_like_a_shape_does_not_retype_the_state() {
+    let report = check_ui_l0_named(
+        "shadow",
+        "state mode { shape: enum[a, text], initial: .a }\n\
+         event e { mode: set(\"arbitrary\") }\nview root Rule()",
+    );
+    assert!(
+        !report.valid,
+        "`mode` is an enum; a member happening to be called `text` must not \
+         turn it into text and let any string be written"
+    );
+}
+
+/// #7: a misspelled shape produced `Other` with no diagnostic, and the `set`
+/// checks treat `Other` as "accepts anything" — so the typo disabled them.
+#[test]
+fn a_misspelled_shape_is_rejected_rather_than_silently_permissive() {
+    let report = check_ui_l0_named(
+        "typo-shape",
+        "state n { shape: nubmer, initial: 0 }\nevent e { n: set(\"oops\") }\nview root Rule()",
+    );
+    assert!(!report.valid, "`nubmer` is not a shape");
+}
+
+/// #8: a token was checked only when the target was an enum; every other shape
+/// fell through, so `set(.c)` into a number wrote the string "c".
+#[test]
+fn a_token_set_into_a_non_enum_is_rejected() {
+    let report = check_ui_l0_named(
+        "toknum",
+        "state n { shape: number, initial: 0 }\nevent e { n: set(.c) }\nview root Rule()",
+    );
+    assert!(!report.valid);
+}
+
+/// #7 (second half): a declared initial was never checked against the shape it
+/// was declared alongside.
+#[test]
+fn an_initial_must_fit_its_declared_shape() {
+    let report = check_ui_l0_named(
+        "badinit",
+        "state n { shape: number, initial: \"oops\" }\nview root Rule()",
+    );
+    assert!(!report.valid);
+}
+
+/// #3: this falsifies §4's claim that "a fabricated number cannot reach a
+/// numeric position" — which I wrote into the spec the same day. A literal
+/// launders through a prop into the drawing widgets, which exist to render
+/// live data and hold no authored values.
+#[test]
+fn a_literal_cannot_launder_through_a_prop_into_a_data_position() {
+    let report = check_ui_l0_named(
+        "launder",
+        "component Bar(n: number) { view TempBar(lo: n, hi: n, min: n, max: n) }\n\
+         view root Bar(n: 41.2)",
+    );
+    assert!(
+        !report.valid,
+        "an authored number must not reach TempBar by way of a prop"
+    );
+}
+
+/// #4: prop shapes were retained at parse and discarded again at realization,
+/// so an enum token bound with its leading dot and every comparison against it
+/// inside the component was false.
+#[test]
+fn an_enum_token_prop_binds_its_bare_member() {
+    let source = "component F(unit: enum[c, f]) { \
+                    view Col { when unit == .c { TextRow(text: \"MATCHED\") } } }\n\
+                  view root F(unit: .c)";
+    let report = realize(source, &serde_json::json!({}), RealizeLimits::default());
+    assert_eq!(
+        texts(&report.root.unwrap()),
+        vec!["MATCHED"],
+        "`.c` must bind as `c`, or the component cannot compare against its own prop"
+    );
+}
+
+/// #4 (second half): an event prop was looked up as DATA at realization, so a
+/// state whose name collided with an event name hijacked the routing.
+#[test]
+fn an_event_prop_binds_the_event_not_same_named_state() {
+    let source = "state go { shape: text, initial: \"wrong\" }\n\
+                  event go { go: set(\"x\") }\n\
+                  event wrong { go: set(\"y\") }\n\
+                  component F(out: event) { view Panel { Row(on_tap: out) { Rule() } } }\n\
+                  view root F(out: go)";
+    let report = realize(source, &serde_json::json!({}), RealizeLimits::default());
+    let root = report.root.unwrap();
+    let mut rows = Vec::new();
+    find(&root, "Row", &mut rows);
+    let on_tap = rows[0]
+        .args
+        .iter()
+        .find(|(n, _)| n == "on_tap")
+        .map(|(_, v)| v.clone());
+    assert_eq!(
+        on_tap,
+        Some(NodeValue::Event("go".into())),
+        "the event named at the call site must be the event that fires"
+    );
+}
+
+/// #5: a declared default was parsed and dropped, an omitted argument created
+/// no binding, and lookup then fell through to top-level injected data — so an
+/// unfilled prop could capture whatever the host happened to supply.
+#[test]
+fn a_prop_default_is_used_and_injected_data_cannot_capture_it() {
+    let source = "component Banner(title: text = \"Safe\") { view TextRow(text: title) }\n\
+                  view root Banner()";
+
+    let empty = realize(source, &serde_json::json!({}), RealizeLimits::default());
+    assert_eq!(
+        texts(&empty.root.unwrap()),
+        vec!["Safe"],
+        "an omitted prop must fall back to its declared default"
+    );
+
+    let hostile = realize(
+        source,
+        &serde_json::json!({"title": "attacker"}),
+        RealizeLimits::default(),
+    );
+    assert_eq!(
+        texts(&hostile.root.unwrap()),
+        vec!["Safe"],
+        "and must not be captured by same-named data the host injected"
+    );
+}
+
+#[test]
+fn laundering_a_literal_through_a_chain_of_props_is_also_refused() {
+    // One hop would be a spot fix. The check runs to a fixpoint, so a longer
+    // chain is no better a hiding place than a short one.
+    let bar = "component Bar(n: number) { view TempBar(lo: n, hi: n, min: n, max: n) }\n";
+    for depth in [
+        format!("{bar}view root Bar(n: 41.2)"),
+        format!("{bar}component Outer(v: number) {{ view Panel {{ Bar(n: v) }} }}\nview root Outer(v: 41.2)"),
+        format!(
+            "{bar}component Mid(m: number) {{ view Panel {{ Bar(n: m) }} }}\n\
+             component Outer(v: number) {{ view Panel {{ Mid(m: v) }} }}\nview root Outer(v: 41.2)"
+        ),
+    ] {
+        assert!(
+            !check_ui_l0_named("chain", &depth).valid,
+            "an authored number must not reach a data position at any depth"
+        );
+    }
+
+    // And the two things that must stay legal: a BOUND value through the same
+    // chain, and a literal in a position that renders no fact.
+    let bound = format!(
+        "source now sys.weather(lat: 1.0, lon: 2.0)\n{bar}\
+         component Outer(v: number) {{ view Panel {{ Bar(n: v) }} }}\nview root Outer(v: now.temp)"
+    );
+    assert!(check_ui_l0_named("bound", &bound).valid);
+    assert!(
+        check_ui_l0_named(
+            "label",
+            "component Lbl(t: text) { view TextTitle(text: t) }\nview root Lbl(t: \"Heading\")"
+        )
+        .valid,
+        "a literal label renders no fact and must stay legal"
+    );
+}
+
+/// #1: provenance failed OPEN. A declaration with no `class` at all defaulted
+/// to trusted, so the check only bit when a card volunteered the label — which
+/// a model with something to hide would not.
+#[test]
+fn copy_without_a_class_is_refused_rather_than_trusted() {
+    let report = check_ui_l0_named(
+        "noclass",
+        "copy claim { en: \"Revenue: $41.2M\" }\nview root TextTitle(text: copy.claim)",
+    );
+    assert!(
+        !report.valid,
+        "undeclared provenance must not default to vocabulary"
+    );
+}
+
+/// #2: even correctly-marked model-copy laundered through a state initial,
+/// because provenance was checked only where an element referenced copy.x
+/// directly.
+#[test]
+fn model_copy_cannot_launder_through_a_state_initial() {
+    let report = check_ui_l0_named(
+        "via-state",
+        "copy claim { class: model-copy, en: \"Revenue: $41.2M\" }\n\
+         component F() { state s { shape: text, initial: copy.claim } view TextTitle(text: s) }\n\
+         view root F()",
+    );
+    assert!(!report.valid);
+}
+
+// ─── parser and resource bounds ──────────────────────────────────────────────
+//
+// Found by the second mutation run, after fixing the harness's own blind spot:
+// it had been selecting diagnostics by keyword and silently missing newer ones.
+// Four of these are §6's termination bounds, which the profile claims outright.
+
+#[test]
+fn a_source_over_the_size_limit_is_rejected() {
+    let huge = format!("view root Panel {{ }}\n# {}", "x".repeat(300_000));
+    let report = check_ui_l0_named("huge", &huge);
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("byte limit")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn malformed_input_is_rejected_rather_than_parsed_loosely() {
+    for (source, expect, what) in [
+        (
+            "state n { shape: number, initial: 0 }\nbanana root Rule()",
+            "expected a declaration",
+            "unknown declaration",
+        ),
+        (
+            "view root Panel { 42 }",
+            "expected an element",
+            "a literal where an element belongs",
+        ),
+        (
+            "component F() { banana }",
+            "expected state, event or view",
+            "junk in a component body",
+        ),
+        (
+            "view root TextRow(text: \"unterminated)",
+            "unterminated string",
+            "an unterminated string",
+        ),
+        (
+            "view root Panel { } \u{0007}",
+            "unexpected character",
+            "a character outside the grammar",
+        ),
+    ] {
+        let report = check_ui_l0_named("malformed", source);
+        assert!(!report.valid, "{what} must be rejected");
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains(expect)),
+            "{what}: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+/// §6, condition 5: node count and nesting depth are capped, and the
+/// declaration count with them. These are the bounds that make realization
+/// terminate on input the grammar alone does not bound.
+#[test]
+fn the_resource_bounds_hold() {
+    let deep = format!(
+        "view root {}Rule(){}",
+        "Panel { ".repeat(200),
+        " }".repeat(200)
+    );
+    let report = check_ui_l0_named("deep", &deep);
+    assert!(!report.valid, "nesting must be bounded");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("too deep")),
+        "{:#?}",
+        report.diagnostics
+    );
+
+    let many = format!(
+        "{}view root Rule()",
+        (0..2_000)
+            .map(|i| format!("state s{i} {{ shape: number, initial: 0 }}\n"))
+            .collect::<String>()
+    );
+    let report = check_ui_l0_named("many", &many);
+    assert!(!report.valid, "declaration count must be bounded");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("too many declarations")),
+        "{:#?}",
+        report.diagnostics
+    );
+
+    let wide = format!("view root Panel {{ {} }}", "Rule() ".repeat(3_000));
+    let report = check_ui_l0_named("wide", &wide);
+    assert!(!report.valid, "block width must be bounded");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("too many elements")),
+        "{:#?}",
+        report.diagnostics
+    );
+}

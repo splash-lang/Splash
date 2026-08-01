@@ -290,7 +290,7 @@ fn definition_digest(component: &Component) -> u64 {
     let mut acc = String::new();
     acc.push_str(&component.name);
     for p in &component.params {
-        acc.push_str(&format!("{}:{:?}", p.name, p.shape));
+        acc.push_str(&format!("{}:{:?}:{:?}", p.name, p.shape, p.default));
         acc.push(',');
     }
     for st in &component.states {
@@ -786,6 +786,11 @@ enum Provenance {
 struct Param {
     name: String,
     shape: Shape,
+    /// `title: text = "Safe"`. Dropped, an omitted argument created no binding
+    /// at all and lookup fell through to top-level injected data — so an
+    /// unfilled prop could capture whatever the host happened to supply under
+    /// the same name.
+    default: Option<crate::JsonValue>,
 }
 
 #[derive(Debug)]
@@ -1034,6 +1039,24 @@ impl<'a> Parser<'a> {
                     self.at += 1;
                     if let Some(n) = self.ident() {
                         let (provenance, locales) = self.parse_locale_map();
+                        // Absent `class` is NOT vocabulary. Defaulting to
+                        // trusted meant the rule only bit when a card
+                        // volunteered the label, which a model with something to
+                        // hide would simply not do.
+                        let provenance = match provenance {
+                            Some(p) => p,
+                            None => {
+                                self.sink.at(
+                                    &t,
+                                    format!(
+                                        "copy {n:?} declares no `class`; L0 needs one of \
+                                         `vocabulary`, `user-copy` or `model-copy` \
+                                         (profile §4)"
+                                    ),
+                                );
+                                Provenance::ModelCopy
+                            }
+                        };
                         card.copies.push(CopyDecl {
                             name: n,
                             provenance,
@@ -1244,95 +1267,119 @@ impl<'a> Parser<'a> {
         let mut initial = None;
         let mut initial_path = None;
         let mut keep = false;
-        // `{ shape: enum[a, b], initial: .a }` — capture the shape, skip the rest.
-        let start = self.at;
+        // `{ shape: enum[a, b], initial: .a, keep: true }`.
+        //
+        // Read the value AFTER each key rather than scanning the body for shape
+        // words. Scanning meant a member of an enum could retype the state it
+        // belonged to: `shape: enum[a, text]` parsed as the enum and then the
+        // member `text` overwrote it, so the field accepted any string.
         if self.peek().is_some_and(|t| t.is_punct("{")) {
-            let mut scan = self.at;
+            let mut scan = self.at + 1;
+            let mut saw_shape = false;
             while let Some(t) = self.tokens.get(scan) {
                 if t.is_punct("}") {
                     break;
                 }
-                if t.is_kw("bool") {
-                    shape = Shape::Bool;
+                let is_key = t.kind == Kind::Ident
+                    && self.tokens.get(scan + 1).is_some_and(|n| n.is_punct(":"));
+                if !is_key {
+                    scan += 1;
+                    continue;
                 }
-                if t.is_kw("text") {
-                    shape = Shape::Text;
-                }
-                if t.is_kw("number") {
-                    shape = Shape::Number;
-                }
-                if t.is_kw("record") {
-                    shape = Shape::Record;
-                }
-                if t.is_kw("collection") {
-                    shape = Shape::Collection;
-                }
-                if t.is_kw("event") {
-                    shape = Shape::Event;
-                }
-                // `initial: <literal>` — a token, string or number.
-                if t.is_kw("initial") && self.tokens.get(scan + 1).is_some_and(|n| n.is_punct(":"))
-                {
-                    if let Some(v) = self.tokens.get(scan + 2) {
-                        initial = match v.kind {
-                            Kind::Str => Some(crate::JsonValue::String(v.text.clone())),
-                            Kind::Token => Some(crate::JsonValue::String(
-                                v.text.trim_start_matches('.').to_string(),
-                            )),
-                            Kind::Num => v.text.parse::<f64>().ok().map(crate::JsonValue::from),
-                            Kind::Ident if v.text == "true" || v.text == "false" => {
-                                Some(crate::JsonValue::Bool(v.text == "true"))
-                            }
-                            Kind::Ident => {
-                                // A path. Collect its dotted segments from the
-                                // token stream; it resolves at realization.
-                                let mut path = v.text.clone();
-                                let mut at = scan + 3;
-                                while self.tokens.get(at).is_some_and(|t| t.is_punct("."))
-                                    && self
-                                        .tokens
-                                        .get(at + 1)
-                                        .is_some_and(|t| t.kind == Kind::Ident)
-                                {
-                                    path.push('.');
-                                    path.push_str(&self.tokens[at + 1].text);
-                                    at += 2;
+                let key = t.text.clone();
+                let value = self.tokens.get(scan + 2);
+                match key.as_str() {
+                    "shape" => {
+                        saw_shape = true;
+                        shape = match value.map(|v| v.text.as_str()) {
+                            Some("text") => Shape::Text,
+                            Some("number") => Shape::Number,
+                            Some("bool") => Shape::Bool,
+                            Some("record") => Shape::Record,
+                            Some("collection") => Shape::Collection,
+                            Some("event") => Shape::Event,
+                            Some("enum") => {
+                                let mut members = Vec::new();
+                                let mut at = scan + 4; // past `enum` and `[`
+                                while let Some(m) = self.tokens.get(at) {
+                                    if m.is_punct("]") {
+                                        break;
+                                    }
+                                    if m.kind == Kind::Ident {
+                                        members.push(m.text.clone());
+                                    }
+                                    at += 1;
                                 }
-                                initial_path = Some(path);
-                                None
+                                Shape::Enum(members)
                             }
-                            _ => None,
+                            Some(other) => {
+                                // A misspelling used to become `Other`, which
+                                // the `set` checks treat as "accepts anything" —
+                                // so a typo silently disabled them.
+                                let other = other.to_string();
+                                if let Some(v) = value {
+                                    self.sink.at(
+                                        v,
+                                        format!(
+                                            "{other:?} is not an L0 shape; L0 has text, \
+                                             number, bool, enum[…], record, collection \
+                                             and event"
+                                        ),
+                                    );
+                                }
+                                Shape::Other
+                            }
+                            None => Shape::Other,
                         };
                     }
-                }
-                if t.is_kw("keep") && self.tokens.get(scan + 1).is_some_and(|n| n.is_punct(":")) {
-                    keep = self
-                        .tokens
-                        .get(scan + 2)
-                        .is_some_and(|v| v.kind == Kind::Ident && v.text == "true");
-                }
-                if t.is_kw("enum") {
-                    let mut members = Vec::new();
-                    let mut j = scan + 1;
-                    if self.tokens.get(j).is_some_and(|t| t.is_punct("[")) {
-                        j += 1;
-                        while let Some(m) = self.tokens.get(j) {
-                            if m.is_punct("]") {
-                                break;
-                            }
-                            if m.kind == Kind::Ident {
-                                members.push(m.text.clone());
-                            }
-                            j += 1;
+                    "initial" => {
+                        if let Some(v) = value {
+                            initial = match v.kind {
+                                Kind::Str => Some(crate::JsonValue::String(v.text.clone())),
+                                Kind::Token => Some(crate::JsonValue::String(
+                                    v.text.trim_start_matches('.').to_string(),
+                                )),
+                                Kind::Num => v.text.parse::<f64>().ok().map(crate::JsonValue::from),
+                                Kind::Ident if v.text == "true" || v.text == "false" => {
+                                    Some(crate::JsonValue::Bool(v.text == "true"))
+                                }
+                                Kind::Ident => {
+                                    let mut path = v.text.clone();
+                                    let mut at = scan + 3;
+                                    while self.tokens.get(at).is_some_and(|t| t.is_punct("."))
+                                        && self
+                                            .tokens
+                                            .get(at + 1)
+                                            .is_some_and(|t| t.kind == Kind::Ident)
+                                    {
+                                        path.push('.');
+                                        path.push_str(&self.tokens[at + 1].text);
+                                        at += 2;
+                                    }
+                                    initial_path = Some(path);
+                                    None
+                                }
+                                _ => None,
+                            };
                         }
                     }
-                    shape = Shape::Enum(members);
+                    "keep" => {
+                        keep = value.is_some_and(|v| v.kind == Kind::Ident && v.text == "true");
+                    }
+                    _ => {}
                 }
                 scan += 1;
             }
-            self.at = start;
+
+            if !saw_shape {
+                if let Some(t) = self.peek().cloned() {
+                    self.sink
+                        .at(&t, format!("state {path:?} declares no `shape`"));
+                }
+            }
             self.skip_braced();
         }
+
         Some(StateDecl {
             path,
             shape,
@@ -1343,9 +1390,9 @@ impl<'a> Parser<'a> {
     }
 
     /// `{ class: vocabulary, en: "…", zh: "…" }` — the text per locale.
-    fn parse_locale_map(&mut self) -> (Provenance, Vec<(String, String)>) {
+    fn parse_locale_map(&mut self) -> (Option<Provenance>, Vec<(String, String)>) {
         let mut out = Vec::new();
-        let mut provenance = Provenance::Vocabulary;
+        let mut provenance = None;
         if !self.eat_punct("{") {
             return (provenance, out);
         }
@@ -1368,7 +1415,7 @@ impl<'a> Parser<'a> {
                         // `-` lexes as punctuation, so `user-copy` arrives as
                         // the identifier `user`. Match the head rather than
                         // reassembling: the three classes differ there.
-                        provenance = match v.text.as_str() {
+                        provenance = Some(match v.text.as_str() {
                             "user" => Provenance::UserCopy,
                             "model" => Provenance::ModelCopy,
                             "vocabulary" => Provenance::Vocabulary,
@@ -1382,7 +1429,7 @@ impl<'a> Parser<'a> {
                                 );
                                 Provenance::Vocabulary
                             }
-                        };
+                        });
                     } else if v.kind == Kind::Str {
                         out.push((t.text.clone(), v.text.clone()));
                     }
@@ -1587,9 +1634,37 @@ impl<'a> Parser<'a> {
                             }
                             _ => Shape::Other,
                         };
+                        // `= <literal>` after the shape.
+                        let mut default = None;
+                        let mut at = self.at + 3;
+                        if matches!(shape, Shape::Enum(_)) {
+                            // Skip `[a, b]`.
+                            while self.tokens.get(at).is_some_and(|t| !t.is_punct("]")) {
+                                at += 1;
+                            }
+                            at += 1;
+                        }
+                        if self.tokens.get(at).is_some_and(|t| t.is_punct("=")) {
+                            if let Some(v) = self.tokens.get(at + 1) {
+                                default = match v.kind {
+                                    Kind::Str => Some(crate::JsonValue::String(v.text.clone())),
+                                    Kind::Token => Some(crate::JsonValue::String(
+                                        v.text.trim_start_matches('.').to_string(),
+                                    )),
+                                    Kind::Num => {
+                                        v.text.parse::<f64>().ok().map(crate::JsonValue::from)
+                                    }
+                                    Kind::Ident if v.text == "true" || v.text == "false" => {
+                                        Some(crate::JsonValue::Bool(v.text == "true"))
+                                    }
+                                    _ => None,
+                                };
+                            }
+                        }
                         params.push(Param {
                             name: t.text.clone(),
                             shape,
+                            default,
                         });
                     }
                 }
@@ -1939,6 +2014,18 @@ impl<'a> Parser<'a> {
 /// Resolve an operand in a comparison's right-hand position.
 /// Follow a dotted path into injected data. Used for a path-valued `initial`,
 /// which resolves against what the host supplied rather than at parse time.
+/// A literal operand's value.
+fn literal_of(operand: &Operand) -> crate::JsonValue {
+    match operand {
+        Operand::Str(t) => crate::JsonValue::String(t.clone()),
+        Operand::Num(n) => crate::JsonValue::from(*n),
+        Operand::Token(t) => crate::JsonValue::String(t.trim_start_matches('.').to_string()),
+        Operand::Path(p) | Operand::Predicate { path: p, .. } => {
+            crate::JsonValue::String(p.clone())
+        }
+    }
+}
+
 fn data_path(data: &crate::JsonValue, path: &str) -> Option<crate::JsonValue> {
     let mut current = data.clone();
     for segment in path.split('.') {
@@ -2263,12 +2350,16 @@ fn validate(card: &Card, sink: &mut Diagnostics) {
     validate_transitions(card, sink);
     validate_sources(card, sink);
 
+    // Which props of which components end up rendering a fact (§4).
+    let data_positions = data_position_params(card);
+
     let view_names: Vec<&str> = card.views.iter().map(|v| v.name.as_str()).collect();
     let component_names: Vec<&str> = card.components.iter().map(|c| c.name.as_str()).collect();
 
     for view in &card.views {
         let mut scope = Scope::card(card);
         walk(
+            &data_positions,
             &view.body,
             &mut scope,
             &view_names,
@@ -2280,6 +2371,7 @@ fn validate(card: &Card, sink: &mut Diagnostics) {
     for component in &card.components {
         let mut scope = Scope::component(card, component);
         walk(
+            &data_positions,
             &component.body,
             &mut scope,
             &view_names,
@@ -2296,6 +2388,29 @@ fn validate(card: &Card, sink: &mut Diagnostics) {
 /// events, which a component reaches only by receiving one as a prop (§5.4) — so
 /// the transition still runs in the scope that declared it.
 fn validate_transitions(card: &Card, sink: &mut Diagnostics) {
+    check_state_initials(&card.states, sink, 1);
+    for component in &card.components {
+        check_state_initials(&component.states, sink, component.line);
+    }
+
+    // A path-valued `initial` is a rendering position by proxy: whatever it
+    // names ends up on screen. Checking only direct `copy.x` references let
+    // model-copy through by way of a state.
+    let card_scope = Scope::card(card);
+    for state in &card.states {
+        if let Some(path) = &state.initial_path {
+            check_path(path, &card_scope, 1, 1, sink);
+        }
+    }
+    for component in &card.components {
+        let scope = Scope::component(card, component);
+        for state in &component.states {
+            if let Some(path) = &state.initial_path {
+                check_path(path, &scope, component.line, 1, sink);
+            }
+        }
+    }
+
     // `set(path)` READS. Its operand must therefore be a readable name, which
     // an event is not: `set(some_event)` parses, resolves to nothing and writes
     // garbage into the cell.
@@ -2355,6 +2470,37 @@ fn shape_name(shape: &Shape) -> &'static str {
         Shape::Collection => "a collection",
         Shape::Event => "an event",
         Shape::Other => "of an unnamed shape",
+    }
+}
+
+/// Profile §2: a declared `initial` must fit the shape it is declared with.
+/// Neither was checked against the other, so `shape: number, initial: "oops"`
+/// mounted a string into a numeric cell before any event ran.
+fn check_state_initials(states: &[StateDecl], sink: &mut Diagnostics, line: usize) {
+    for state in states {
+        let Some(initial) = &state.initial else {
+            continue;
+        };
+        let fits = match (&state.shape, initial) {
+            (Shape::Text, crate::JsonValue::String(_)) => true,
+            (Shape::Number, v) => v.is_number(),
+            (Shape::Bool, crate::JsonValue::Bool(_)) => true,
+            (Shape::Enum(members), crate::JsonValue::String(s)) => members.iter().any(|m| m == s),
+            // A shape that names no literal form, or one we could not classify.
+            (Shape::Record | Shape::Collection | Shape::Event | Shape::Other, _) => true,
+            _ => false,
+        };
+        if !fits {
+            sink.push(
+                line,
+                1,
+                format!(
+                    "state {:?} declares {} but an initial of {initial}",
+                    state.path,
+                    shape_name(&state.shape)
+                ),
+            );
+        }
     }
 }
 
@@ -2418,6 +2564,18 @@ fn check_event_batch(
                     );
                 }
                 Form::Set(SetSource::Token(t)) => {
+                    if !matches!(state.shape, Shape::Enum(_) | Shape::Other) {
+                        sink.push(
+                            transition.line,
+                            transition.column,
+                            format!(
+                                "`set` writes the token .{t}, but {:?} is {} — only an enum \
+                                 has members",
+                                transition.target,
+                                shape_name(&state.shape)
+                            ),
+                        );
+                    }
                     if let Shape::Enum(members) = &state.shape {
                         if !members.iter().any(|m| m == t) {
                             sink.push(
@@ -2720,6 +2878,7 @@ fn root_of<S: AsRef<str>>(path: S) -> String {
 
 #[allow(clippy::too_many_arguments)]
 fn walk(
+    data_positions: &BTreeMap<String, Vec<String>>,
     element: &Element,
     scope: &mut Scope,
     views: &[&str],
@@ -2814,13 +2973,22 @@ fn walk(
                 );
             }
             for arg in &element.args {
-                check_arg(name, arg, known, is_component, scope, card, sink);
+                check_arg(
+                    data_positions,
+                    name,
+                    arg,
+                    known,
+                    is_component,
+                    scope,
+                    card,
+                    sink,
+                );
             }
         }
     }
 
     for child in &element.children {
-        walk(child, scope, views, components, card, sink);
+        walk(data_positions, child, scope, views, components, card, sink);
     }
 
     if element.name == "for" {
@@ -2830,7 +2998,13 @@ fn walk(
     }
 }
 
+/// Eight parameters because a card-level check needs card-level context:
+/// the catalog entry, the scope, the card, and the data-position map are all
+/// consulted per argument. Splitting them into a struct would move the noise
+/// rather than remove it.
+#[allow(clippy::too_many_arguments)]
 fn check_arg(
+    data_positions: &BTreeMap<String, Vec<String>>,
     ctor: &str,
     arg: &Arg,
     known: Option<catalog::Args>,
@@ -2861,7 +3035,28 @@ fn check_arg(
             // then silently dropped at realization, rendering an em dash.
             if let Some(component) = card.components.iter().find(|c| c.name == ctor) {
                 match component.params.iter().find(|p| p.name == arg.name) {
-                    Some(param) => check_prop(ctor, arg, param, scope, sink),
+                    Some(param) => {
+                        check_prop(ctor, arg, param, scope, sink);
+                        // §4 again, one level out: a literal handed to a prop
+                        // that lands in a data position is the same authored
+                        // fact, just laundered.
+                        if matches!(arg.value, Operand::Str(_) | Operand::Num(_))
+                            && data_positions
+                                .get(ctor)
+                                .is_some_and(|ps| ps.contains(&arg.name))
+                        {
+                            sink.push(
+                                arg.line,
+                                arg.column,
+                                format!(
+                                    "{ctor}.{} reaches a data position and must be bound; \
+                                     a literal passed here is a model-authored fact \
+                                     (profile §4)",
+                                    arg.name
+                                ),
+                            );
+                        }
+                    }
                     None => {
                         let mut names: Vec<&str> =
                             component.params.iter().map(|p| p.name.as_str()).collect();
@@ -3026,6 +3221,76 @@ fn check_arg(
 /// outside a declared enum. Anything else is left alone, because a prop shape
 /// is a contract about the DATA and most positions legitimately accept a path
 /// whose type is not knowable until the host answers.
+/// Which of a component's params end up in a DATA position — an argument the
+/// catalog declares as `Data` or `Path`, i.e. one that renders a fact.
+///
+/// Without this, §4 is enforced only at the literal's immediate call site, and
+/// laundering it through one prop defeats it entirely:
+///
+///     component Bar(n: number) { view TempBar(lo: n, hi: n, min: n, max: n) }
+///     view root Bar(n: 41.2)
+///
+/// Computed to a fixpoint so passing the value through a chain of components is
+/// no better a hiding place than passing it directly.
+fn data_position_params(card: &Card) -> BTreeMap<String, Vec<String>> {
+    let mut tainted: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    for _ in 0..=card.components.len() {
+        let mut changed = false;
+        for component in &card.components {
+            let names: Vec<&str> = component.params.iter().map(|p| p.name.as_str()).collect();
+            let mut found: Vec<String> = Vec::new();
+
+            fn walk(
+                element: &Element,
+                names: &[&str],
+                tainted: &BTreeMap<String, Vec<String>>,
+                out: &mut Vec<String>,
+            ) {
+                let known = catalog::lookup(&element.name);
+                for arg in &element.args {
+                    let Operand::Path(path) = &arg.value else {
+                        continue;
+                    };
+                    let root = root_of(path);
+                    if !names.iter().any(|n| *n == root) {
+                        continue;
+                    }
+                    // Directly in a data position...
+                    let direct = known
+                        .and_then(|a| a.iter().find(|(n, _)| *n == arg.name))
+                        .is_some_and(|(_, k)| {
+                            matches!(k, catalog::ArgKind::Data | catalog::ArgKind::Path)
+                        });
+                    // ...or handed to another component that puts it in one.
+                    let onward = tainted
+                        .get(&element.name)
+                        .is_some_and(|ps| ps.contains(&arg.name));
+                    if (direct || onward) && !out.contains(&root) {
+                        out.push(root);
+                    }
+                }
+                for child in &element.children {
+                    walk(child, names, tainted, out);
+                }
+            }
+
+            walk(&component.body, &names, &tainted, &mut found);
+            let entry = tainted.entry(component.name.clone()).or_default();
+            for name in found {
+                if !entry.contains(&name) {
+                    entry.push(name);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    tainted
+}
+
 fn check_prop(ctor: &str, arg: &Arg, param: &Param, scope: &Scope, sink: &mut Diagnostics) {
     let name = &param.name;
     match (&param.shape, &arg.value) {
@@ -3563,28 +3828,39 @@ impl Realizer<'_> {
     ) {
         // Props bind by name; a prop the caller omits is simply absent, and any
         // path inside the component resolves against this frame first.
+        // Bind by DECLARED SHAPE. The shape was retained at parse and then
+        // discarded here, which cost two bugs: an event prop was looked up as
+        // data, so a state whose name collided with an event hijacked the
+        // routing; and an enum token bound with its leading dot, so every
+        // comparison against it inside the component was false.
         let mut bound = 0usize;
-        for arg in &call.args {
-            if component.params.iter().any(|p| p.name == arg.name) {
-                let value = match &arg.value {
-                    Operand::Path(p) => scope
+        for param in &component.params {
+            let supplied = call.args.iter().find(|a| a.name == param.name);
+            let value = match (supplied, &param.shape) {
+                // An event names itself. It has no value in data, and looking
+                // one up is how the wrong event came to fire.
+                (Some(arg), Shape::Event) => match &arg.value {
+                    Operand::Path(p) => crate::JsonValue::String(p.clone()),
+                    other => literal_of(other),
+                },
+                // A token is a bare member; the dot is lexical marking, not
+                // part of the value.
+                (Some(arg), _) => match &arg.value {
+                    Operand::Token(t) => {
+                        crate::JsonValue::String(t.trim_start_matches('.').to_string())
+                    }
+                    Operand::Path(p) | Operand::Predicate { path: p, .. } => scope
                         .lookup(p)
-                        // An event prop has no value in data; pass the name.
                         .unwrap_or_else(|| crate::JsonValue::String(p.clone())),
-                    Operand::Token(t) => crate::JsonValue::String(t.clone()),
-                    // A literal prop is a value like any other. Letting these
-                    // fall to Null is how `Framed(title: "Details")` rendered an
-                    // em dash: the parser kept the string and the realizer threw
-                    // it away.
-                    Operand::Str(t) => crate::JsonValue::String(t.clone()),
-                    Operand::Num(n) => crate::JsonValue::from(*n),
-                    Operand::Predicate { path: p, .. } => scope
-                        .lookup(p)
-                        .unwrap_or_else(|| crate::JsonValue::String(p.clone())),
-                };
-                scope.frames.push((arg.name.clone(), value));
-                bound += 1;
-            }
+                    other => literal_of(other),
+                },
+                // Omitted: the declared default, or nothing. Binding a frame
+                // either way is what stops lookup falling through to injected
+                // data and letting the host capture an unfilled prop.
+                (None, _) => param.default.clone().unwrap_or(crate::JsonValue::Null),
+            };
+            scope.frames.push((param.name.clone(), value));
+            bound += 1;
         }
         let instance_key = format!("{key}/{}", component.name);
         self.live.push(instance_key.clone());
