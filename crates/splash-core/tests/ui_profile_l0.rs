@@ -2684,3 +2684,104 @@ fn changing_an_initial_changes_the_schema() {
         "an initial is part of the state schema (§5.8)"
     );
 }
+
+// ─── §4 copy provenance ──────────────────────────────────────────────────────
+
+/// §4 requires a rendered literal to be "vocabulary or source-derived". That
+/// was undecidable, not merely unenforced: `parse_locale_map` kept only entries
+/// whose value was a STRING, and `class: vocabulary` is an identifier — so the
+/// provenance was discarded before anything could read it.
+#[test]
+fn provenance_survives_parsing_and_model_copy_is_refused() {
+    let vocabulary = check_ui_l0_named(
+        "vocab",
+        "copy hi { class: vocabulary, en: \"Top Stories\" }\nview root TextTitle(text: copy.hi)",
+    );
+    assert!(vocabulary.valid, "{:#?}", vocabulary.diagnostics);
+
+    let user = check_ui_l0_named(
+        "user",
+        "copy note { class: user-copy, en: \"my note\" }\nview root TextTitle(text: copy.note)",
+    );
+    assert!(
+        user.valid,
+        "the user may write their own text: {:#?}",
+        user.diagnostics
+    );
+
+    let model = check_ui_l0_named(
+        "model",
+        "copy claim { class: model-copy, en: \"Revenue: $41.2M\" }\n\
+         view root TextTitle(text: copy.claim)",
+    );
+    assert!(
+        !model.valid,
+        "model-authored text must not reach the screen"
+    );
+    assert!(
+        model
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("model-copy")),
+        "{:#?}",
+        model.diagnostics
+    );
+}
+
+/// The hyphen in `user-copy` lexes as a minus, and the level classifier read it
+/// as arithmetic — so the two spellings §4 depends on could not appear in a card
+/// at all. The rule was unstatable in its own language.
+#[test]
+fn a_hyphenated_copy_class_is_not_arithmetic() {
+    for class in ["vocabulary", "user-copy"] {
+        let report = check_ui_l0_named(
+            "class",
+            &format!("copy c {{ class: {class}, en: \"x\" }}\nview root TextTitle(text: copy.c)"),
+        );
+        assert_eq!(report.level, Level::L0, "{class} should not classify as L1");
+        assert!(report.valid, "{class}: {:#?}", report.diagnostics);
+    }
+}
+
+#[test]
+fn an_unknown_copy_class_is_rejected() {
+    let report = check_ui_l0_named(
+        "bogus",
+        "copy c { class: whatever, en: \"x\" }\nview root TextTitle(text: copy.c)",
+    );
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("not a copy class")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn an_undeclared_copy_reference_is_rejected() {
+    // Previously `copy` was a known root and any name under it resolved to
+    // nothing, so a typo rendered an em dash.
+    let report = check_ui_l0_named("missing", "view root TextTitle(text: copy.nope)");
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("not declared")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn the_reference_cards_declare_their_copy_provenance() {
+    // All 23 copy declarations across the three cards are `vocabulary`, which
+    // is the discipline the profile assumes and could not previously verify.
+    for (name, source) in [("weather", WEATHER), ("news", NEWS), ("stock", STOCK)] {
+        let report = check_ui_l0_named(name, source);
+        assert!(report.valid, "{name}: {:#?}", report.diagnostics);
+    }
+}

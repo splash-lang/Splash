@@ -658,8 +658,20 @@ fn classify_beyond_l0(tokens: &[Token]) -> Option<(Level, SyntaxDiagnostic)> {
                 "arithmetic and conditional expressions are not in L0: an expression can hide a fabricated fact",
             ));
         }
+        // A copy class is a hyphenated NAME, not a subtraction: `class:
+        // user-copy` lexes as `user`, `-`, `copy`, and reading that as
+        // arithmetic made the two spellings §4 depends on unusable — the
+        // provenance rule could not be written in a card at all.
+        let is_class_name = tokens
+            .get(i.wrapping_sub(3))
+            .is_some_and(|k| k.text == "class")
+            && tokens.get(i.wrapping_sub(1)).is_some_and(|p| {
+                p.kind == Kind::Ident && matches!(p.text.as_str(), "user" | "model")
+            });
+
         // `-` is only rejected between values; a negative literal is fine.
         if t.is_punct("-")
+            && !is_class_name
             && tokens
                 .get(i.wrapping_sub(1))
                 .is_some_and(|p| matches!(p.kind, Kind::Ident | Kind::Num | Kind::Token))
@@ -687,7 +699,7 @@ struct Card {
     /// they resolve from the CARD rather than the injected data. Carrying them
     /// in the data blob duplicated what the card already said, and the two
     /// silently drifted.
-    copies: Vec<(String, Vec<(String, String)>)>,
+    copies: Vec<CopyDecl>,
     components: Vec<Component>,
     views: Vec<View>,
 }
@@ -733,6 +745,35 @@ enum Shape {
     /// schema id nor the closure digest, so live values survived a change that
     /// should have reset them.
     Other,
+}
+
+/// Authored text, with the provenance that decides whether it may be rendered.
+///
+/// The provenance was parsed and thrown away — and worse, `parse_locale_map`
+/// only kept entries whose value was a STRING, so `class: vocabulary` (an
+/// identifier) was dropped before anything could read it. §4's "a literal in a
+/// data position must be vocabulary or source-derived" was therefore not merely
+/// unenforced but undecidable: nothing recorded which kind a string was.
+#[derive(Clone, Debug)]
+struct CopyDecl {
+    name: String,
+    provenance: Provenance,
+    locales: Vec<(String, String)>,
+}
+
+/// Who wrote a piece of text, and therefore whether it can be trusted on screen.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum Provenance {
+    /// Fixed interface language — labels, units, headings. Translatable, and
+    /// carries no claim about the world.
+    #[default]
+    Vocabulary,
+    /// Text the user wrote. Theirs to be wrong about.
+    UserCopy,
+    /// Text the MODEL wrote. May not appear in a rendering position: this is
+    /// the class §4 exists to keep off the screen, because a model-authored
+    /// string is indistinguishable from a fact it invented.
+    ModelCopy,
 }
 
 /// A component's declared input — §5.2.
@@ -992,7 +1033,12 @@ impl<'a> Parser<'a> {
                 "copy" => {
                     self.at += 1;
                     if let Some(n) = self.ident() {
-                        card.copies.push((n, self.parse_locale_map()));
+                        let (provenance, locales) = self.parse_locale_map();
+                        card.copies.push(CopyDecl {
+                            name: n,
+                            provenance,
+                            locales,
+                        });
                     }
                 }
                 "component" => {
@@ -1297,10 +1343,11 @@ impl<'a> Parser<'a> {
     }
 
     /// `{ class: vocabulary, en: "…", zh: "…" }` — the text per locale.
-    fn parse_locale_map(&mut self) -> Vec<(String, String)> {
+    fn parse_locale_map(&mut self) -> (Provenance, Vec<(String, String)>) {
         let mut out = Vec::new();
+        let mut provenance = Provenance::Vocabulary;
         if !self.eat_punct("{") {
-            return out;
+            return (provenance, out);
         }
         let mut guard = 0usize;
         while let Some(t) = self.peek().cloned() {
@@ -1315,7 +1362,28 @@ impl<'a> Parser<'a> {
                     .is_some_and(|n| n.is_punct(":"))
             {
                 if let Some(v) = self.tokens.get(self.at + 2) {
-                    if v.kind == Kind::Str {
+                    // `class:` names a provenance and its value is an
+                    // IDENTIFIER, which the string-only filter below discarded.
+                    if t.text == "class" {
+                        // `-` lexes as punctuation, so `user-copy` arrives as
+                        // the identifier `user`. Match the head rather than
+                        // reassembling: the three classes differ there.
+                        provenance = match v.text.as_str() {
+                            "user" => Provenance::UserCopy,
+                            "model" => Provenance::ModelCopy,
+                            "vocabulary" => Provenance::Vocabulary,
+                            other => {
+                                self.sink.at(
+                                    v,
+                                    format!(
+                                        "{other:?} is not a copy class; L0 has \
+                                         `vocabulary`, `user-copy` and `model-copy`"
+                                    ),
+                                );
+                                Provenance::Vocabulary
+                            }
+                        };
+                    } else if v.kind == Kind::Str {
                         out.push((t.text.clone(), v.text.clone()));
                     }
                 }
@@ -1323,7 +1391,7 @@ impl<'a> Parser<'a> {
             self.at += 1;
         }
         self.expect_punct("}");
-        out
+        (provenance, out)
     }
 
     /// `event name { path: total-form, … }`
@@ -2570,6 +2638,8 @@ struct Scope {
     roots: Vec<String>,
     /// Roots that name a source. Only these carry a `$state` lifecycle.
     source_roots: Vec<String>,
+    /// Declared copy, so a rendering position can refuse model-authored text.
+    copies: Vec<CopyDecl>,
     events: Vec<String>,
     /// Card state, tracked separately so reading it from a component is a
     /// specific diagnostic rather than "unknown name".
@@ -2590,6 +2660,7 @@ impl Scope {
             // while accepting `env.$state`, which names no source and has no
             // lifecycle to report.
             source_roots: card.sources.iter().map(|s| s.name.clone()).collect(),
+            copies: card.copies.clone(),
             events,
             forbidden_state: Vec::new(),
         }
@@ -2615,7 +2686,8 @@ impl Scope {
         );
         Self {
             roots,
-            source_roots: card.sources.iter().map(|s| root_of(&s.name)).collect(),
+            source_roots: card.sources.iter().map(|s| s.name.clone()).collect(),
+            copies: card.copies.clone(),
             events,
             forbidden_state: card.states.iter().map(|s| root_of(&s.path)).collect(),
         }
@@ -2998,6 +3070,27 @@ fn check_path(path: &str, scope: &Scope, line: usize, column: usize, sink: &mut 
         return;
     }
 
+    // `copy.x` where `x` is model-authored. §4's whole point: a model-written
+    // string on screen is indistinguishable from a fact the model invented, so
+    // the class exists to be refused rather than to be recorded.
+    if let Some(name) = path.strip_prefix("copy.") {
+        if let Some(decl) = scope.copies.iter().find(|c| c.name == name) {
+            if decl.provenance == Provenance::ModelCopy {
+                sink.push(
+                    line,
+                    column,
+                    format!(
+                        "copy.{name} is `model-copy` and may not be rendered; only \
+                         `vocabulary` and `user-copy` may (profile §4)"
+                    ),
+                );
+            }
+        } else {
+            sink.push(line, column, format!("copy.{name} is not declared"));
+        }
+        return;
+    }
+
     // A `[inner]` segment holds a path of its own. Checking it here is what
     // makes `stories[typo].title` a diagnostic rather than a silent em dash.
     for segment in path.split('.') {
@@ -3241,7 +3334,7 @@ fn realize_inner(
 struct ValueScope<'a> {
     frames: Vec<(String, crate::JsonValue)>,
     data: &'a crate::JsonValue,
-    copies: &'a [(String, Vec<(String, String)>)],
+    copies: &'a [CopyDecl],
 }
 
 impl ValueScope<'_> {
@@ -3279,7 +3372,7 @@ impl ValueScope<'_> {
         // render an em dash because the device is in en.
         if root == "copy" {
             let name = segments.next()?;
-            let entry = self.copies.iter().find(|(n, _)| n == name)?;
+            let entry = self.copies.iter().find(|c| c.name == name)?;
             let lang = self
                 .data
                 .get("env")
@@ -3288,11 +3381,11 @@ impl ValueScope<'_> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("en");
             let text = entry
-                .1
+                .locales
                 .iter()
                 .find(|(k, _)| k == lang)
-                .or_else(|| entry.1.iter().find(|(k, _)| k == "en"))
-                .or_else(|| entry.1.iter().find(|(k, _)| k != "class"))?;
+                .or_else(|| entry.locales.iter().find(|(k, _)| k == "en"))
+                .or_else(|| entry.locales.first())?;
             return Some(crate::JsonValue::String(text.1.clone()));
         }
 
