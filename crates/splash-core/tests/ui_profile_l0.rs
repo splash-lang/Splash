@@ -3478,7 +3478,10 @@ fn duplicate_loop_keys_are_reported_and_do_not_share_state() {
     });
     let report = realize(CARD, &data, RealizeLimits::default());
     assert!(
-        report.diagnostics.iter().any(|d| d.message.contains("duplicate")),
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("duplicate")),
         "a duplicate key must be reported: {:#?}",
         report.diagnostics
     );

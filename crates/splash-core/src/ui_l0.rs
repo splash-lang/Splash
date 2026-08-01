@@ -2934,6 +2934,23 @@ fn walk(
     match element.name.as_str() {
         "" | "slot" | "into" => {}
         "for" => {
+            // The key expression names the loop's own binder. Its first segment
+            // was discarded unconditionally, so `key typo.id` behaved exactly
+            // like `key item.id` — and §5.1's claim that changing a key moves
+            // identity was false, because the name was never read.
+            if let (Some(binder), Some(key)) = (element.binders.first(), &element.key_path) {
+                let root = root_of(key);
+                if root != *binder {
+                    sink.push(
+                        element.line,
+                        element.column,
+                        format!(
+                            "the key names {root:?}, but this loop binds {binder:?} — a key \
+                             must be a path into the item being iterated (profile §5.1)"
+                        ),
+                    );
+                }
+            }
             for binder in &element.binders {
                 scope.roots.push(binder.clone());
             }
@@ -3976,6 +3993,11 @@ impl Realizer<'_> {
             return;
         };
 
+        // §5.7: duplicate keys are an error at realization. Untracked, two items
+        // with the same key produced the same instance key — one state cell
+        // shared by two rows, so tapping either toggled both.
+        let mut seen_keys: Vec<String> = Vec::new();
+
         for (index, item) in items.iter().enumerate() {
             if index >= self.limits.max_collection {
                 self.truncated = true;
@@ -3996,6 +4018,25 @@ impl Realizer<'_> {
                     Some(json_to_key(&current))
                 })
                 .unwrap_or_else(|| index.to_string());
+
+            // Report the collision, then disambiguate so the two instances do
+            // not share a cell. Rendering both with distinct identity is safer
+            // than dropping one: a missing row is harder to notice than a
+            // diagnostic.
+            let item_key = if seen_keys.contains(&item_key) {
+                self.sink.push(
+                    element.line,
+                    element.column,
+                    format!(
+                        "duplicate key {item_key:?} in this loop; keys must be unique or two \
+                         instances share one state cell (profile §5.7)"
+                    ),
+                );
+                format!("{item_key}#{index}")
+            } else {
+                seen_keys.push(item_key.clone());
+                item_key
+            };
 
             let mut bound = 0usize;
             if let Some(binder) = element.binders.first() {
