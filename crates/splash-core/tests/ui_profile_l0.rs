@@ -2458,3 +2458,121 @@ fn depth_is_counted_not_inferred_from_key_length() {
     find(&root, "Rule", &mut rules);
     assert_eq!(rules.len(), 2, "both rows should realize");
 }
+
+// ─── §5.2 component props carry their declared shape ────────────────────────
+//
+// The shape was parsed and discarded, which cost three separate defects. They
+// looked unrelated in the review and shared one cause.
+
+/// An argument the component does not declare was accepted and then silently
+/// dropped at realization, so `Framed(titel: "x")` rendered an em dash and
+/// looked deliberate.
+#[test]
+fn an_undeclared_prop_is_rejected() {
+    let report = check_ui_l0_named(
+        "typo",
+        "component F(title: text) { view Panel { TextRow(text: title) } }\n\
+         view root F(titel: \"x\")",
+    );
+    assert!(!report.valid);
+    let message = &report.diagnostics[0].message;
+    assert!(
+        message.contains("no prop") && message.contains("title"),
+        "the message should name the props that exist: {message}"
+    );
+}
+
+/// `set(out)` where `out` is an event prop was accepted, because no param's
+/// shape was known so none could be excluded from the readable set.
+#[test]
+fn an_event_prop_cannot_be_read_by_set() {
+    let report = check_ui_l0_named(
+        "setevent",
+        "component F(out: event) { state n { shape: number, initial: 0 } \
+         event e { n: set(out) } view Panel { Row(on_tap: e) { Rule() } } }\n\
+         event go { }\nview root F(out: go)",
+    );
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("is an event, not a value")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+/// Every param used to be added to the component's event names, so a `text`
+/// prop could be handed to `on_tap` — and a runtime string that happened to
+/// equal a declared event would route it. Event routing became data-selected.
+#[test]
+fn a_value_prop_cannot_be_used_as_an_event() {
+    let report = check_ui_l0_named(
+        "asevent",
+        "component F(label: text) { view Panel { Row(on_tap: label) { Rule() } } }\n\
+         view root F(label: \"x\")",
+    );
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("not a declared event")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn a_token_outside_an_enum_prop_is_rejected() {
+    // Now possible because the prop's members survive parsing.
+    let report = check_ui_l0_named(
+        "enumprop",
+        "component F(unit: enum[c, f]) { view Panel { TextValue(value: unit) } }\n\
+         view root F(unit: .kelvin)",
+    );
+    assert!(!report.valid);
+    assert!(
+        report.diagnostics[0].message.contains(".c, .f"),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn a_correct_call_site_is_still_accepted() {
+    let report = check_ui_l0_named(
+        "ok",
+        "component F(title: text, unit: enum[c, f], on_go: event) { \
+           view Panel { Row(on_tap: on_go) { TextRow(text: title) TextValue(value: unit) } } }\n\
+         event go { }\nview root F(title: \"x\", unit: .c, on_go: go)",
+    );
+    assert!(report.valid, "{:#?}", report.diagnostics);
+}
+
+/// Retyping between `text` and `number` moved neither the schema id nor the
+/// closure digest, because both parsed to the same unclassified shape — so a
+/// live string survived into number-shaped state, and a host pinning the digest
+/// saw no change.
+#[test]
+fn retyping_between_text_and_number_is_visible() {
+    let base = "component F(x: text) { state s { shape: text, initial: \"\" } \
+                view Panel { TextRow(text: s) } }\nview root F(x: \"a\")";
+
+    let retyped_state = base
+        .replace("shape: text", "shape: number")
+        .replace("initial: \"\"", "initial: 0");
+    assert_ne!(
+        check_ui_l0_named("p", base).closure,
+        check_ui_l0_named("p", &retyped_state).closure,
+        "retyping state between text and number must move the digest"
+    );
+
+    let retyped_param = base.replace("F(x: text)", "F(x: number)");
+    assert_ne!(
+        check_ui_l0_named("p", base).closure,
+        check_ui_l0_named("p", &retyped_param).closure,
+        "retyping a prop must move the digest"
+    );
+}

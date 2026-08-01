@@ -592,14 +592,15 @@ The digest deliberately ignores declaration order, so reformatting is not a vers
 digest that moved on a cosmetic edit would make pinning useless in the way that matters: hosts
 would see it move constantly, and learn to ignore it.
 
-**Known limits, stated so the digest is not trusted past them.** Parameter *shapes* are not
-covered, because the parser retains parameters only as names — so `x: number` → `x: text` is
-invisible. `text` and `number` state shapes both parse as an unclassified shape, so retyping
-between them does not move the digest either. It hashes every declared component rather than
-the closure reachable from the root view, so an unused definition causes a false repin. And it
-is 64-bit FNV-1a, which is a change *detector* and not an adversarial boundary: it is fit for
-noticing that a definition moved, and unfit for resisting a chosen collision. Pinning is also
-report material — nothing in the runtime yet stores or compares it.
+**Known limits, stated so the digest is not trusted past them.** It hashes every declared
+component rather than the closure reachable from the root view, so an unused definition causes
+a false repin. And it is 64-bit FNV-1a, which is a change *detector* and not an adversarial
+boundary: it is fit for noticing that a definition moved, and unfit for resisting a chosen
+collision. Pinning is also report material — nothing in the runtime yet stores or compares it.
+
+Parameter and state *shapes* are covered as of the change that made prop shapes survive
+parsing; before that `x: number` → `x: text` was invisible to both the digest and §5.8's
+schema id, so a live string could survive into number-shaped state.
 
 Three token tests are not sufficient and an earlier draft that used them was both incomplete
 and self-contradictory. Level must be an effect judgment over the closure.

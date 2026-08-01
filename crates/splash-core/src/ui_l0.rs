@@ -258,7 +258,7 @@ fn definition_digest(component: &Component) -> u64 {
     let mut acc = String::new();
     acc.push_str(&component.name);
     for p in &component.params {
-        acc.push_str(p);
+        acc.push_str(&format!("{}:{:?}", p.name, p.shape));
         acc.push(',');
     }
     for st in &component.states {
@@ -684,9 +684,35 @@ pub enum SourceArg {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Shape {
+    Text,
+    Number,
     Bool,
     Enum(Vec<String>),
+    /// A structured value a source returns — §5.2, a component prop shape.
+    Record,
+    /// An iterable a `for` walks.
+    Collection,
+    /// An event passed in, so a component can report outward (§5.4).
+    Event,
+    /// A shape the declaration did not name.
+    ///
+    /// `Text` and `Number` used to land here too, which made them
+    /// indistinguishable: retyping a state between them changed neither the
+    /// schema id nor the closure digest, so live values survived a change that
+    /// should have reset them.
     Other,
+}
+
+/// A component's declared input — §5.2.
+///
+/// The shape was parsed and dropped, which cost three separate defects: an
+/// unknown argument at a call site could not be told from a known one, an event
+/// prop could not be told from a value, and every param had to be treated as a
+/// possible event name because none could be ruled out.
+#[derive(Clone, Debug)]
+struct Param {
+    name: String,
+    shape: Shape,
 }
 
 #[derive(Debug)]
@@ -759,7 +785,7 @@ enum SetSource {
 #[derive(Debug)]
 struct Component {
     name: String,
-    params: Vec<String>,
+    params: Vec<Param>,
     states: Vec<StateDecl>,
     events: Vec<EventDecl>,
     body: Element,
@@ -1151,6 +1177,21 @@ impl<'a> Parser<'a> {
                 if t.is_kw("bool") {
                     shape = Shape::Bool;
                 }
+                if t.is_kw("text") {
+                    shape = Shape::Text;
+                }
+                if t.is_kw("number") {
+                    shape = Shape::Number;
+                }
+                if t.is_kw("record") {
+                    shape = Shape::Record;
+                }
+                if t.is_kw("collection") {
+                    shape = Shape::Collection;
+                }
+                if t.is_kw("event") {
+                    shape = Shape::Event;
+                }
                 // `initial: <literal>` — a token, string or number.
                 if t.is_kw("initial") && self.tokens.get(scan + 1).is_some_and(|n| n.is_punct(":"))
                 {
@@ -1420,7 +1461,36 @@ impl<'a> Parser<'a> {
                             .get(self.at + 1)
                             .is_some_and(|n| n.is_punct(":"))
                     {
-                        params.push(t.text.clone());
+                        // The declared shape follows the colon. `enum[a, b]`
+                        // carries its members, which is what lets a token
+                        // argument be checked against the prop it fills.
+                        let shape = match self.tokens.get(self.at + 2) {
+                            Some(k) if k.text == "text" => Shape::Text,
+                            Some(k) if k.text == "number" => Shape::Number,
+                            Some(k) if k.text == "bool" => Shape::Bool,
+                            Some(k) if k.text == "record" => Shape::Record,
+                            Some(k) if k.text == "collection" => Shape::Collection,
+                            Some(k) if k.text == "event" => Shape::Event,
+                            Some(k) if k.text == "enum" => {
+                                let mut members = Vec::new();
+                                let mut at = self.at + 4; // past `enum` and `[`
+                                while let Some(m) = self.tokens.get(at) {
+                                    if m.is_punct("]") {
+                                        break;
+                                    }
+                                    if m.kind == Kind::Ident {
+                                        members.push(m.text.clone());
+                                    }
+                                    at += 1;
+                                }
+                                Shape::Enum(members)
+                            }
+                            _ => Shape::Other,
+                        };
+                        params.push(Param {
+                            name: t.text.clone(),
+                            shape,
+                        });
                     }
                 }
                 self.at += 1;
@@ -2132,9 +2202,26 @@ fn validate_transitions(card: &Card, sink: &mut Diagnostics) {
     for component in &card.components {
         let mut readable: Vec<String> = card.sources.iter().map(|s| root_of(&s.name)).collect();
         readable.push("copy".into());
-        readable.extend(component.params.iter().cloned());
+        // An EVENT prop is not readable — `set(out)` where `out` is an event
+        // was accepted, because a param's shape was unknown so none could be
+        // excluded. Now only value-shaped props are readable, and event-shaped
+        // ones join the event names below.
+        readable.extend(
+            component
+                .params
+                .iter()
+                .filter(|p| !matches!(p.shape, Shape::Event))
+                .map(|p| p.name.clone()),
+        );
         readable.extend(component.states.iter().map(|s| root_of(&s.path)));
-        let events: Vec<String> = component.events.iter().map(|e| e.name.clone()).collect();
+        let mut events: Vec<String> = component.events.iter().map(|e| e.name.clone()).collect();
+        events.extend(
+            component
+                .params
+                .iter()
+                .filter(|p| matches!(p.shape, Shape::Event))
+                .map(|p| p.name.clone()),
+        );
         check_event_batch(
             &component.events,
             &component.states,
@@ -2408,11 +2495,20 @@ impl Scope {
         let mut roots: Vec<String> = Vec::new();
         roots.extend(card.sources.iter().map(|s| root_of(&s.name)));
         roots.push("copy".into());
-        roots.extend(component.params.iter().cloned());
+        roots.extend(component.params.iter().map(|p| p.name.clone()));
         roots.extend(component.states.iter().map(|s| root_of(&s.path)));
         let mut events: Vec<String> = component.events.iter().map(|e| e.name.clone()).collect();
-        // Events arrive as props too — §5.4, outputs are event props.
-        events.extend(component.params.iter().cloned());
+        // Events arrive as props too — §5.4, outputs are event props. Only the
+        // ones DECLARED as events: every param used to be added here, so a
+        // `text` prop could be handed to `on_tap` and a runtime string that
+        // happened to match an event name would route it.
+        events.extend(
+            component
+                .params
+                .iter()
+                .filter(|p| matches!(p.shape, Shape::Event))
+                .map(|p| p.name.clone()),
+        );
         Self {
             roots,
             source_roots: card.sources.iter().map(|s| root_of(&s.name)).collect(),
@@ -2570,7 +2666,36 @@ fn check_arg(
                 return;
             }
         },
-        None if is_component => None,
+        None if is_component => {
+            // A component's props are declared by the CARD, not the catalog —
+            // but they ARE declared, so an argument the component does not
+            // accept is a typo, not a pass-through. It used to be accepted and
+            // then silently dropped at realization, rendering an em dash.
+            if let Some(component) = card.components.iter().find(|c| c.name == ctor) {
+                match component.params.iter().find(|p| p.name == arg.name) {
+                    Some(param) => check_prop(ctor, arg, param, scope, sink),
+                    None => {
+                        let mut names: Vec<&str> =
+                            component.params.iter().map(|p| p.name.as_str()).collect();
+                        names.sort();
+                        sink.push(
+                            arg.line,
+                            arg.column,
+                            format!(
+                                "{ctor} has no prop {:?}; it declares: {}",
+                                arg.name,
+                                if names.is_empty() {
+                                    "(none)".to_string()
+                                } else {
+                                    names.join(", ")
+                                }
+                            ),
+                        );
+                    }
+                }
+            }
+            None
+        }
         None => return,
     };
 
@@ -2693,6 +2818,64 @@ fn check_arg(
     }
 
     let _ = card;
+}
+
+/// Check an argument against the prop it fills — §5.2.
+///
+/// Only the cases a card can actually get wrong and that the shape decides:
+/// an event where a value belongs, a value where an event belongs, and a token
+/// outside a declared enum. Anything else is left alone, because a prop shape
+/// is a contract about the DATA and most positions legitimately accept a path
+/// whose type is not knowable until the host answers.
+fn check_prop(ctor: &str, arg: &Arg, param: &Param, scope: &Scope, sink: &mut Diagnostics) {
+    let name = &param.name;
+    match (&param.shape, &arg.value) {
+        // An event prop must receive an event, and nothing else may.
+        (Shape::Event, Operand::Path(p)) if !scope.events.iter().any(|e| e == p) => {
+            sink.push(
+                arg.line,
+                arg.column,
+                format!("{ctor}.{name} takes an event; {p:?} is not a declared event"),
+            );
+        }
+        (Shape::Event, Operand::Str(_) | Operand::Num(_) | Operand::Token(_)) => {
+            sink.push(
+                arg.line,
+                arg.column,
+                format!("{ctor}.{name} takes an event, not a literal"),
+            );
+        }
+        (shape, Operand::Path(p))
+            if !matches!(shape, Shape::Event) && scope.events.iter().any(|e| e == p) =>
+        {
+            sink.push(
+                arg.line,
+                arg.column,
+                format!(
+                    "{ctor}.{name} takes a value, but {p:?} is an event — declare the prop \
+                     as `{name}: event` to pass one (profile §5.4)"
+                ),
+            );
+        }
+        (Shape::Enum(members), Operand::Token(t)) => {
+            let bare = t.trim_start_matches('.');
+            if !members.iter().any(|m| m == bare) {
+                sink.push(
+                    arg.line,
+                    arg.column,
+                    format!(
+                        "{t:?} is not a member of {ctor}.{name}; it accepts {}",
+                        members
+                            .iter()
+                            .map(|m| format!(".{m}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                );
+            }
+        }
+        _ => {}
+    }
 }
 
 fn check_path(path: &str, scope: &Scope, line: usize, column: usize, sink: &mut Diagnostics) {
@@ -3158,7 +3341,7 @@ impl Realizer<'_> {
         // path inside the component resolves against this frame first.
         let mut bound = 0usize;
         for arg in &call.args {
-            if component.params.contains(&arg.name) {
+            if component.params.iter().any(|p| p.name == arg.name) {
                 let value = match &arg.value {
                     Operand::Path(p) => scope
                         .lookup(p)
@@ -3931,7 +4114,9 @@ fn initial_for(shape: &Shape) -> crate::JsonValue {
             .first()
             .map(|m| crate::JsonValue::String(m.clone()))
             .unwrap_or(crate::JsonValue::Null),
-        Shape::Other => crate::JsonValue::Null,
+        Shape::Text => crate::JsonValue::String(String::new()),
+        Shape::Number => crate::JsonValue::from(0.0),
+        Shape::Record | Shape::Collection | Shape::Event | Shape::Other => crate::JsonValue::Null,
     }
 }
 
@@ -4255,7 +4440,7 @@ pub fn record_dependencies(source: &str) -> Vec<RecordDeps> {
     for component in &card.components {
         let (mut reads, pulls) = scan_element(&component.body);
         // A prop is supplied by the caller, so it is not a dependency of its own.
-        reads.retain(|r| !component.params.contains(r));
+        reads.retain(|r| !component.params.iter().any(|p| p.name == *r));
         // Local state is a dependency: writing it must re-realize this instance.
         for state in &component.states {
             reads.push(root_of(&state.path));
@@ -4352,7 +4537,7 @@ pub fn patch_points(source: &str, changed: &[&str]) -> Vec<String> {
     }
     for component in &card.components {
         let (mut reads, _) = scan_element(&component.body);
-        reads.retain(|r| !component.params.contains(r));
+        reads.retain(|r| !component.params.iter().any(|p| p.name == *r));
         for state in &component.states {
             reads.push(root_of(&state.path));
         }
