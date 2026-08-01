@@ -3357,8 +3357,16 @@ fn a_dotted_source_dependency_is_ordered_correctly() {
          view root Rule()",
     );
     let order: Vec<&str> = plan.requests.iter().map(|r| r.name.as_str()).collect();
-    let locale = order.iter().position(|n| *n == "env.locale");
-    let scene = order.iter().position(|n| *n == "scene");
+    // Unwrap both: `None < Some(_)` is true in Rust, so comparing the Options
+    // directly would let an ABSENT prerequisite satisfy the ordering assertion.
+    let locale = order
+        .iter()
+        .position(|n| *n == "env.locale")
+        .expect("env.locale must be planned");
+    let scene = order
+        .iter()
+        .position(|n| *n == "scene")
+        .expect("scene must be planned");
     assert!(
         locale < scene,
         "a source must be fetched before the one that reads it: {order:?}"
@@ -3401,7 +3409,25 @@ fn changing_an_initial_resets_live_component_state() {
     let root = first.root.unwrap();
     let mut rows = Vec::new();
     find(&root, "Row", &mut rows);
-    splash_core::ui_l0::dispatch(BEFORE, &mut store, &rows[0].key.clone(), "bump");
+    let applied = splash_core::ui_l0::dispatch(BEFORE, &mut store, &rows[0].key.clone(), "bump");
+    assert!(
+        applied,
+        "the event must actually apply, or this proves nothing"
+    );
+
+    // Prove the caption is PRESENT before the edit. Without this, a dispatch
+    // regression alone satisfies the assertion below and masks the schema
+    // regression the test is named for.
+    let live =
+        splash_core::ui_l0::realize_with_state(BEFORE, &data, &store, RealizeLimits::default());
+    let live_root = live.root.unwrap();
+    let mut before_caps = Vec::new();
+    find(&live_root, "TextCaption", &mut before_caps);
+    assert_eq!(
+        before_caps.len(),
+        1,
+        "state must be live before the schema change"
+    );
 
     let after = BEFORE.replace("initial: 0", "initial: 7");
     let out =

@@ -1,7 +1,7 @@
 # Splash UI Profile — Level 0
 
 **Status:** **implemented.** Normative producer contract for generated UI source at Level 0.
-Parser, validator, realizer and instance store live in `splash-core::ui_l0`; 254 tests, three
+Parser, validator, realizer and instance store live in `splash-core::ui_l0`; 317 tests, three
 reference cards, and a card rendered on a OnePlus 6T through an unmodified host.
 **Relationship to [Grammar v0.2](grammar.md):** a *sibling* canonical profile, not a subset of
 the workflow language. `check_syntax` rejects UI source and `eval_vm_compatibility` must not
@@ -48,7 +48,7 @@ alone**; §6 states the five conditions that make it hold, and traversal bounds 
 ## 2. Grammar
 
 ```ebnf
-source        = header , { declaration } ;
+source        = [ header ] , { declaration } ;   (* header optional — see §7 *)
 
 header        = "#" , "ledger" , ident , "@" , semver , { meta-line } ;
 meta-line     = "#" , ident , ":" , value ;          (* level, model, profile *)
@@ -80,7 +80,7 @@ argument      = ident , ":" , operand ;
 operand       = path | literal | predicate ;         (* NO expressions *)
 
 predicate     = path , [ comparator , ( path | literal | token ) ] ;
-comparator    = "==" | "!=" | "<" | "<=" | ">" | ">=" ;
+comparator    = "==" | "!=" | "<=" | ">=" ;      (* lone < and > are not parsed *)
 
 path          = root , { "." , ident | "." , integer | "[" , path , "]" }
                      , [ "." , "$state" ] ;          (* source lifecycle, §5.9 *)
@@ -487,7 +487,8 @@ Realization reports every instance key it produced. A host passes them to `prune
 pass; without it the store grows for the life of the app, and a key that reappears inherits a
 stale value.
 
-**Duplicate keys are an error at realization**, surfaced as a diagnostic — never coalesced.
+**Duplicate keys are reported at realization, and the colliding instances are given distinct
+identity rather than sharing one cell. Duplicate keys are an error**, surfaced as a diagnostic — never coalesced.
 Silent coalescing would make two rows share one state cell, which is the failure mode keys
 exist to prevent. A missing key on an iteration is a grammar error.
 
@@ -649,8 +650,8 @@ a false repin. And it is 64-bit FNV-1a, which is a change *detector* and not an 
 boundary: it is fit for noticing that a definition moved, and unfit for resisting a chosen
 collision. Pinning is also report material — nothing in the runtime yet stores or compares it.
 
-It also omits a loop's `key` expression, whether an element is a view reference, parameter
-defaults, and the bodies of views a component references — so a card can change what it renders
+It also omits a loop's `key` expression, whether an element is a view reference, and the bodies
+of views a component references — so a card can change what it renders
 without the digest moving. Parameter and state *shapes* are covered as of the change that made
 prop shapes survive parsing; before that `x: number` → `x: text` was invisible to both the digest and §5.8's
 schema id, so a live string could survive into number-shaped state.
