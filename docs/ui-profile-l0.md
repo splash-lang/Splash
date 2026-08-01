@@ -1,7 +1,7 @@
 # Splash UI Profile — Level 0
 
 **Status:** **implemented.** Normative producer contract for generated UI source at Level 0.
-Parser, validator, realizer and instance store live in `splash-core::ui_l0`; 48 tests, three
+Parser, validator, realizer and instance store live in `splash-core::ui_l0`; 254 tests, three
 reference cards, and a card rendered on a OnePlus 6T through an unmodified host.
 **Relationship to [Grammar v0.2](grammar.md):** a *sibling* canonical profile, not a subset of
 the workflow language. `check_syntax` rejects UI source and `eval_vm_compatibility` must not
@@ -89,13 +89,15 @@ root          = ident ;
 transition-block = "{" , transition , { "," , transition } , "}" ;
 transition    = path , ":" , total-form ;
 total-form    = "set" , "(" , ( literal | token | path | "$value" ) , ")"
+                          (* literal = string | number | "true" | "false" *)
               | "toggle"                              (* boolean state only *)
               | "cycle" , "(" , token , { "," , token } , ")"
               | "clear" ;                             (* restore declared initial *)
 
 shape-spec    = "shape" , ":" , shape , [ "," , "initial" , ":" , ( literal | path ) ]
                               , [ "," , "keep" , ":" , "true" ] ;
-shape         = "text" | "number" | "bool" | "enum" , "[" , ident , { "," , ident } , "]" ;
+shape         = "text" | "number" | "bool" | "enum" , "[" , ident , { "," , ident } , "]"
+              | "record" | "collection" | "event" ;   (* prop shapes, §5.2 *)
 provenance    = "vocabulary" | "user-copy" | "model-copy" ;
 ```
 
@@ -294,6 +296,19 @@ instances each containing an unkeyed `Toggle` must not share one state cell.
 component type and keys both affect preservation. L0 binds to a declared path so that
 identity survives a ledger edit that inserts an element above.
 
+**"Version" here means the STATE SCHEMA version** (§5.8), not the component's whole definition.
+Using the definition digest would contradict §5.8 directly: a view-only edit would change
+identity and reset state, which is precisely what §5.8 promises it does not do. The two are
+different instruments — the schema id decides whether live state still fits, and the closure
+digest (§7) tells a host that a definition was replaced at all.
+
+**What path-based identity does and does not survive.** Insertion of a differently named
+sibling is stable, because siblings are numbered within each element name. Reordering two
+same-name siblings, or inserting another instance of the same component above, still moves the
+ordinals — so state follows the ordinal rather than the instance. Fully edit-stable identity
+needs a persistent site id in the source or edit provenance from the ledger; neither exists
+yet, and the numbering is an improvement on tree position rather than a solution.
+
 ### 5.2 Props
 
 ```ebnf
@@ -399,6 +414,12 @@ runtime:
 state start { shape: date, initial: today, max: end }
 ```
 
+**That example is illustrative, not grammatical.** `date` is not one of §2's shapes, `today`
+is not a literal form, and `max:` is not part of `shape-spec` — it sketches where such an
+invariant would belong if the shape vocabulary grew, and nothing in the profile accepts it
+today. It is retained because the *limit* it describes is real: total forms cannot compare, so
+a cross-field invariant has nowhere to live at L0.
+
 If that is insufficient, the card is L1 — and should say so rather than smuggling a
 comparison into a transition.
 
@@ -488,11 +509,21 @@ is the worst of the three outcomes.
 state is not fetched and has no pending or failed. Both are rejected rather than resolving to
 nothing.
 
-The host reports the lifecycle; the card never computes it. When the host reports nothing, a
-source with a value is `.ready` and one without is `.pending` — enough for a host that does not
-track status, without inventing the distinction that only the host can actually make. Note that
-`.stale` and `.failed` are exactly that distinction: neither is derivable from the data, which
-is why a card cannot be left to infer them.
+The host reports the lifecycle; the card never computes it.
+
+**The fallback, and what it assumes.** When the host reports no `$status`, a source with a
+value is treated as `.ready` and one without as `.pending`. That is an inference, and this
+section has just argued that absence cannot carry it — so it is sound *only* under an explicit
+host contract: **a source key is present if and only if it resolved successfully and is
+current.** A host that caches a stale value without reporting status will have it read as
+`.ready`; one that represents a successful empty result by omitting the key will have it read
+as `.pending`.
+
+The fallback therefore exists for hosts that do not track status at all, and any host that can
+distinguish these cases must report `$status` rather than rely on it. `.stale` and `.failed`
+are not derivable from data by construction, which is the whole reason status reporting exists;
+the fallback does not change that, it only declines to guess for the two cases that are
+derivable under the invariant above.
 
 **Cadence and freshness budget belong to the capability, not the card.** A card names what it
 needs; how often `sys.weather` is worth re-fetching is a property of weather, and duplicating it
@@ -516,15 +547,22 @@ With all five, an L0 realization terminates. **Without them the grammar does not
 why "L0 is decidable" is a claim about authority and grammar membership, not about
 termination.
 
-Condition 4 is guaranteed **structurally rather than by a check**. All four total forms
-(§3) name a state, a transition target is validated against declared state, and `set`'s operand
-must be a readable name — so there is no position in the grammar where an event can be named as
-something to *do*. A cascade is unrepresentable, not merely rejected.
+Condition 4 holds **because of the transition enum and its exhaustive dispatcher**, not because
+of the syntax. `Form` has exactly four variants — `set`, `toggle`, `cycle`, `clear` — and the
+dispatcher matches all four; none has a branch that raises an event. A transition target is
+additionally validated against declared state, so an event cannot be named as a write target
+either.
 
-That is a stronger guarantee than a validator, and correspondingly easier to lose: any future
-form that could raise an event would silently move termination from structural to unchecked. It
-is pinned by a test that enumerates the syntaxes a cascade could take — `emit e`, `e()`,
-`n: set(1) then e`, a transition targeting an event — and asserts each is refused.
+An earlier version of this section claimed the stronger property that "no total form can name
+an event", which was not true: component prop *types* are discarded, so `set(out)` is accepted
+where `out` was declared as an event prop. That does not cascade — `set` reads a value and
+`Form` has no raising branch — but the guarantee rests on the dispatcher rather than on the
+grammar refusing to spell it. **Any new `Form` variant must be checked against this
+condition**, and a form that reads a path must exclude event-typed ones explicitly.
+
+A test enumerates the syntaxes a cascade could take — `emit e`, `e()`, `n: set(1) then e`, a
+transition targeting an event — and asserts each is refused. That test is a tripwire, not the
+proof.
 
 ---
 
@@ -544,15 +582,24 @@ rejected until the level is explicitly raised; escalation is never silent. **Com
 versions must be pinned**, or an L0 card can be moved to L2 by a definition it references
 being replaced.
 
-The check therefore returns a **closure digest**: every component the card depends on, paired
-with a hash of its definition — params, state, events and view body — sorted by name. A host
-stores this beside the approved level. A digest that moved means the level was derived from a
-definition that no longer exists and must be re-derived before the card is accepted, rather
-than inherited from the record it no longer matches.
+The check therefore returns a **closure digest**: every component the card declares, paired
+with a hash of its definition — param names, state (path, shape, initial, keep), events and
+view body — sorted by name. A host stores this beside the approved level. A digest that moved
+means the level was derived from a definition that no longer exists and must be re-derived
+before the card is accepted, rather than inherited from the record it no longer matches.
 
 The digest deliberately ignores declaration order, so reformatting is not a version change. A
 digest that moved on a cosmetic edit would make pinning useless in the way that matters: hosts
 would see it move constantly, and learn to ignore it.
+
+**Known limits, stated so the digest is not trusted past them.** Parameter *shapes* are not
+covered, because the parser retains parameters only as names — so `x: number` → `x: text` is
+invisible. `text` and `number` state shapes both parse as an unclassified shape, so retyping
+between them does not move the digest either. It hashes every declared component rather than
+the closure reachable from the root view, so an unused definition causes a false repin. And it
+is 64-bit FNV-1a, which is a change *detector* and not an adversarial boundary: it is fit for
+noticing that a definition moved, and unfit for resisting a chosen collision. Pinning is also
+report material — nothing in the runtime yet stores or compares it.
 
 Three token tests are not sufficient and an earlier draft that used them was both incomplete
 and self-contradictory. Level must be an effect judgment over the closure.
@@ -575,7 +622,7 @@ construct and keep the widest.
 | ~~4~~ | ~~A bounded `format()`~~ — **settled**: `format:` is a declared token and the runtime applies it. A card that wrote `"$"` or `"41.2M"` itself would be authoring a fact, and currency, grouping and compaction are locale-dependent besides |
 | ~~5~~ | ~~Named slots~~ — **settled in §5.5.** `slot name` in the component, `into name { … }` at the call site, anonymous slot unchanged as the default. An `into` naming a slot that does not exist is rejected rather than silently dropping its children |
 | ~~6~~ | ~~An explicit state migration~~ — **settled in §5.8.** `keep: true` opts a cell out of the schema-change reset, and only while that field's own shape is unchanged |
-| ~~7~~ | ~~The closed token sets per constructor argument~~ — **settled**: `docs/ui-l0-constructors.toml` is the normative catalog, and a test asserts the Rust catalog and the TOML agree in both directions |
+| ~~7~~ | ~~The closed token sets per constructor argument~~ — **settled**: `docs/ui-l0-constructors.toml` is the normative catalog, and tests assert the two agree in both directions — constructor names and shared token sets, and for source capabilities the arguments too |
 
 All seven are now settled. What replaces them is not a shorter list of questions but a
 different kind of work: the profile is specified and implemented, and the remaining gaps are
