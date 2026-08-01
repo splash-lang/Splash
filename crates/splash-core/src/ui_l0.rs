@@ -159,6 +159,30 @@ pub const MAX_UI_L0_DIAGNOSTICS: usize = 64;
 /// Maximum declarations retained from one card.
 pub const MAX_UI_L0_DECLARATIONS: usize = 1_024;
 
+/// Check a card written on the **Splash surface** against the L0 profile.
+///
+/// Projection alone is not checking. `project_declarations` recognises shapes;
+/// this runs the same `validate()` the bespoke surface runs, so §5.2's prop
+/// rules, §4's no-facts rule, §6's termination conditions and every other check
+/// apply identically. Without it a prop's declared shape is *retained and never
+/// consulted* — the mirror of the "specified but not retained" defect this
+/// surface exists to avoid repeating.
+///
+/// The carrier is checked separately by `check_vm_compatibility`: that says the
+/// VM could run it, this says L0 admits it, and neither subsumes the other.
+pub fn check_ui_l0_splash(source: &str) -> UiL0Report {
+    let projection = splash_surface::project_declarations(source);
+    let mut sink = Diagnostics::default();
+    for d in &projection.diagnostics {
+        sink.push(d.line, d.column, d.message.clone());
+    }
+    let card = projection.into_card();
+    validate(&card, &mut sink);
+    let mut report = sink.into_report(Level::L0);
+    report.closure = component_closure(&card);
+    report
+}
+
 /// Parse the BESPOKE surface into the same report shape the Splash surface
 /// produces, so the two can be compared without either knowing about the other.
 ///
@@ -2542,6 +2566,22 @@ fn validate_transitions(card: &Card, sink: &mut Diagnostics) {
             &card.copies,
             sink,
         );
+    }
+}
+
+/// A shape's canonical spelling — what a card writes. Distinct from
+/// `shape_name`, which is prose for a diagnostic: a test comparing shapes should
+/// not be coupled to how an error message reads.
+fn shape_spelling(shape: &Shape) -> &'static str {
+    match shape {
+        Shape::Text => "text",
+        Shape::Number => "number",
+        Shape::Bool => "bool",
+        Shape::Enum(_) => "enum",
+        Shape::Record => "record",
+        Shape::Collection => "collection",
+        Shape::Event => "event",
+        Shape::Other => "?",
     }
 }
 
@@ -5530,6 +5570,19 @@ pub mod splash_surface {
             }
         }
 
+        /// The projected declarations as a `Card`, so the shared validator can
+        /// run over them.
+        pub(super) fn into_card(self) -> super::Card {
+            super::Card {
+                sources: self.sources,
+                states: self.states,
+                events: self.events,
+                copies: self.copies,
+                views: self.views,
+                components: self.components,
+            }
+        }
+
         pub fn is_clean(&self) -> bool {
             self.diagnostics.is_empty()
         }
@@ -5561,6 +5614,19 @@ pub mod splash_surface {
                 .iter()
                 .find(|v| v.name == name)
                 .map(|v| super::shape_of(&v.body))
+        }
+        /// A component's props with their declared shapes, in order.
+        pub fn prop_shapes(&self, name: &str) -> Vec<(String, String)> {
+            self.components
+                .iter()
+                .find(|c| c.name == name)
+                .map(|c| {
+                    c.params
+                        .iter()
+                        .map(|p| (p.name.clone(), super::shape_spelling(&p.shape).to_string()))
+                        .collect()
+                })
+                .unwrap_or_default()
         }
         pub fn component_shape(&self, name: &str) -> Option<String> {
             self.components
@@ -5929,15 +5995,63 @@ pub mod splash_surface {
                 self.reject(format!("`fn {name}` needs a body"));
                 return None;
             }
+            // `props({...})` is the ONE statement admitted before the return.
+            // §5.2's checks — event-vs-value, enum membership, defaults, the
+            // readable/event scope split — all consult a prop's declared shape,
+            // and a Splash `fn` parameter carries none. Declaring it beats
+            // inferring it from a name: `online_count` starts with `on`.
+            let declared = if self.peek_ident("props") {
+                self.at += 1;
+                Some(self.props())
+            } else {
+                None
+            };
+
             if !self.eat_ident("return") {
                 self.reject(format!(
-                    "`fn {name}` must be a single `return <element>`; L0 admits no statements \
-                     in a view (profile §2)"
+                    "`fn {name}` must be a single `return <element>`, optionally preceded by \
+                     `props(…)`; L0 admits no other statement in a view (profile §2)"
                 ));
                 return None;
             }
             let body = self.element()?;
             let _ = self.eat_punct("}");
+
+            // Reconcile. The bespoke surface cannot have this check, because
+            // there the parameter list IS the declaration; here they are
+            // separate, so redundancy that drifts must become redundancy that
+            // is checked.
+            if !params.is_empty() {
+                match declared {
+                    None => self.reject(format!(
+                        "`fn {name}` takes parameters but declares no `props(…)`; a prop with \
+                         no shape cannot be checked against profile §5.2"
+                    )),
+                    Some(shapes) => {
+                        for p in &params {
+                            if !shapes.iter().any(|(n, _)| *n == p.name) {
+                                self.reject(format!(
+                                    "`{name}` declares no shape for parameter {:?}",
+                                    p.name
+                                ));
+                            }
+                        }
+                        for (n, _) in &shapes {
+                            if !params.iter().any(|p| p.name == *n) {
+                                self.reject(format!(
+                                    "`{name}` declares a shape for {n:?}, which is not one of \
+                                     its parameters"
+                                ));
+                            }
+                        }
+                        for p in &mut params {
+                            if let Some((_, shape)) = shapes.iter().find(|(n, _)| *n == p.name) {
+                                p.shape = shape.clone();
+                            }
+                        }
+                    }
+                }
+            }
 
             let capitalised = name.chars().next().is_some_and(|c| c.is_uppercase());
             if capitalised {
@@ -5955,6 +6069,56 @@ pub mod splash_surface {
             } else {
                 Some(Declared::AsView(View { name, body }))
             }
+        }
+
+        fn peek_ident(&self, want: &str) -> bool {
+            self.t
+                .get(self.at)
+                .is_some_and(|t| t.kind == super::Kind::Ident && t.text == want)
+        }
+
+        /// `props({story: "record", on_open: "event"})`
+        fn props(&mut self) -> Vec<(String, Shape)> {
+            let mut out = Vec::new();
+            if !self.eat_punct("(") || !self.eat_punct("{") {
+                self.reject("props takes an object: props({name: \"shape\", …})".into());
+                return out;
+            }
+            while !self.eat_punct("}") {
+                if self.at >= self.t.len() {
+                    break;
+                }
+                let Some(name) = self.ident() else {
+                    self.at += 1;
+                    continue;
+                };
+                if !self.eat_punct(":") {
+                    continue;
+                }
+                let shape = match self.string().as_deref() {
+                    Some("text") => Shape::Text,
+                    Some("number") => Shape::Number,
+                    Some("bool") => Shape::Bool,
+                    Some("record") => Shape::Record,
+                    Some("collection") => Shape::Collection,
+                    Some("event") => Shape::Event,
+                    Some(other) => {
+                        self.reject(format!(
+                            "{other:?} is not an L0 shape; L0 has text, number, bool, enum, \
+                             record, collection and event"
+                        ));
+                        Shape::Other
+                    }
+                    None => {
+                        self.reject(format!("prop {name:?} declares no shape"));
+                        Shape::Other
+                    }
+                };
+                out.push((name, shape));
+                let _ = self.eat_punct(",");
+            }
+            let _ = self.eat_punct(")");
+            out
         }
 
         /// An element: `Ctor({args}, [children])`, with `{args}` and

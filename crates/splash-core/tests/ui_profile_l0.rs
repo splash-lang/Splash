@@ -3911,6 +3911,7 @@ let selected = state("text", "")
 let open     = event({selected: set_payload()})
 
 fn StoryRow(story, position, on_open) {
+  props({story: "record", position: "number", on_open: "event"})
   return Col([
     Row({align: ".center", on_tap: on_open, value: story.id}, [
       TextRow({text: position, width: ".rank"}),
@@ -3993,4 +3994,117 @@ view root Surface(pad: .page) {
         bespoke.component_shape("StoryRow"),
         "the component projects differently on the two surfaces"
     );
+}
+
+/// §5.2 depends on a prop's declared shape — event-vs-value confusion, enum
+/// membership, defaults, and the readable/event scope split all consult it. A
+/// Splash `fn` parameter carries no type, so the surface needs a declaration:
+/// meaning is declared here, never inferred from a name.
+#[test]
+fn props_declare_their_shapes_on_the_splash_surface() {
+    let report = project_declarations(
+        r#"
+fn StoryRow(story, position, on_open) {
+  props({story: "record", position: "number", on_open: "event"})
+  return Col([ TextRow({text: story.title}) ])
+}
+"#,
+    );
+    assert!(report.is_clean(), "{:#?}", report.diagnostics);
+    assert_eq!(
+        report.prop_shapes("StoryRow"),
+        vec![
+            ("story".to_string(), "record".to_string()),
+            ("position".to_string(), "number".to_string()),
+            ("on_open".to_string(), "event".to_string()),
+        ],
+        "each prop keeps the shape it declared"
+    );
+}
+
+/// The check the bespoke surface cannot have: there the parameter list IS the
+/// declaration, so the two cannot disagree. Here they are separate, so a
+/// mismatch must be caught — redundancy that is checked is a different thing
+/// from redundancy that drifts.
+#[test]
+fn props_must_match_the_parameters_they_describe() {
+    for (source, why) in [
+        (
+            r#"fn F(a, b) { props({a: "text"}) return Rule() }"#,
+            "a parameter with no declared shape",
+        ),
+        (
+            r#"fn F(a) { props({a: "text", b: "number"}) return Rule() }"#,
+            "a declared shape for no parameter",
+        ),
+    ] {
+        let report = project_declarations(source);
+        assert!(!report.is_clean(), "{why} must be refused: {source}");
+    }
+}
+
+#[test]
+fn a_component_without_props_is_refused_when_it_takes_parameters() {
+    // Silence is not a declaration. A component with untyped parameters cannot
+    // be checked against §5.2 at all, so it is refused rather than admitted
+    // with unknown shapes — the same fail-closed rule as `copy` without a class.
+    let report = project_declarations(r#"fn F(a) { return TextRow({text: a}) }"#);
+    assert!(!report.is_clean());
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("props")),
+        "{:#?}",
+        report.diagnostics
+    );
+
+    // A component with no parameters needs none.
+    let none = project_declarations(r#"fn F() { return Rule() }"#);
+    assert!(none.is_clean(), "{:#?}", none.diagnostics);
+}
+
+/// Projection is not checking. `project_declarations` recognises shapes; the
+/// SAME `validate()` must then run, or a declared prop shape is retained and
+/// never consulted — the mirror of "specified but not retained".
+///
+/// Caught because a deliberately wrong shape passed 180 tests: declaring
+/// `on_open: "text"` and handing it to `on_tap` is exactly what §5.2 refuses,
+/// and nothing was looking.
+#[test]
+fn the_splash_surface_runs_the_same_checks() {
+    let wrong = splash_core::ui_l0::check_ui_l0_splash(
+        r#"
+fn F(on_open) {
+  props({on_open: "text"})
+  return Row({on_tap: on_open}, [ Rule() ])
+}
+"#,
+    );
+    assert!(
+        !wrong.valid,
+        "a text prop handed to on_tap must be refused (§5.2)"
+    );
+
+    let right = splash_core::ui_l0::check_ui_l0_splash(
+        r#"
+let go = event({n: clear()})
+let n  = state("number", 0)
+fn F(on_open) {
+  props({on_open: "event"})
+  return Row({on_tap: on_open}, [ Rule() ])
+}
+fn root() { return Surface({pad: ".page"}, [ F({on_open: go}) ]) }
+"#,
+    );
+    assert!(right.valid, "{:#?}", right.diagnostics);
+}
+
+/// §4 travels to this surface too, unchanged.
+#[test]
+fn the_splash_surface_refuses_a_literal_in_a_data_position() {
+    let report = splash_core::ui_l0::check_ui_l0_splash(
+        r#"fn root() { return TempBar({lo: 5, hi: 9, min: 0, max: 10}) }"#,
+    );
+    assert!(!report.valid, "an authored number must not reach TempBar");
 }
