@@ -3567,3 +3567,48 @@ fn padding_cannot_hide_a_cycle_from_the_acyclicity_check() {
             .collect::<Vec<_>>()
     );
 }
+
+/// A header containing ONLY duplicate `model:` lines never set `saw_any`, so
+/// `parse_header` returned None and the contradiction vanished with it.
+#[test]
+fn a_model_only_duplicate_header_is_still_caught() {
+    let report = check_ui_l0_named("dupmodel", "# model: first\n# model: second\nview root Rule()");
+    assert!(!report.valid, "a card names one model");
+    assert!(
+        report.diagnostics.iter().any(|d| d.message.contains("model twice")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+/// A parameter default was accepted regardless of the shape declared beside it,
+/// and the spec's own `enum[c, f] = c` spelling was not parsed at all.
+#[test]
+fn a_parameter_default_must_fit_its_declared_shape() {
+    for source in [
+        "component F(n: number = \"oops\") { view TextRow(text: n) }\nview root F()",
+        "component G(m: enum[a, b] = .missing) { view TextRow(text: m) }\nview root G()",
+        "component H(b: bool = 3) { view Col { when b { Rule() } } }\nview root H()",
+    ] {
+        let report = check_ui_l0_named("baddefault", source);
+        assert!(!report.valid, "should be rejected: {source}");
+    }
+}
+
+#[test]
+fn a_bare_enum_member_is_a_valid_default() {
+    // §5.2's own example spells it without the dot. It parsed as nothing, so
+    // the documented form silently produced no default at all.
+    let report = check_ui_l0_named(
+        "bare",
+        "component F(unit: enum[c, f] = c) { view TextValue(value: unit) }\nview root F()",
+    );
+    assert!(report.valid, "{:#?}", report.diagnostics);
+
+    let out = realize(
+        "component F(unit: enum[c, f] = c) { view TextRow(text: unit) }\nview root F()",
+        &serde_json::json!({}),
+        RealizeLimits::default(),
+    );
+    assert_eq!(texts(&out.root.unwrap()), vec!["c"], "the default must bind");
+}
