@@ -95,8 +95,18 @@ pub fn parse_header(source: &str) -> Option<CardHeader> {
                 Some((n, v)) => (n.trim().to_string(), Some(v.trim().to_string())),
                 None => (decl.trim().to_string(), None),
             };
-            header.ledger = Some(name);
-            header.version = version;
+            // A card has ONE identity. Last-wins let a record declare two.
+            match (&header.ledger, &header.version) {
+                (Some(first), v) if *first != name || *v != version => {
+                    header.contradictions.push(format!(
+                        "the header declares the ledger twice, as {first:?} and {name:?}"
+                    ));
+                }
+                _ => {
+                    header.ledger = Some(name);
+                    header.version = version;
+                }
+            }
         } else if let Some((key, value)) = rest.split_once(':') {
             let value = value.trim().to_string();
             match key.trim() {
@@ -122,7 +132,14 @@ pub fn parse_header(source: &str) -> Option<CardHeader> {
                         _ => header.profile = Some(value),
                     }
                 }
-                "model" => header.model = Some(value),
+                "model" => match &header.model {
+                    Some(first) if *first != value => {
+                        header.contradictions.push(format!(
+                            "the header declares the model twice, as {first:?} and {value:?}"
+                        ));
+                    }
+                    _ => header.model = Some(value),
+                },
                 _ => {}
             }
         }
@@ -2819,7 +2836,10 @@ struct Scope {
 impl Scope {
     fn card(card: &Card) -> Self {
         let mut roots: Vec<String> = Vec::new();
-        roots.extend(card.sources.iter().map(|s| root_of(&s.name)));
+        // The FULL declared name. Storing the root meant `source env.locale`
+        // authorised `env.theme.secret` — an undeclared dependency the card
+        // then renders, which §4 says is a defect by construction.
+        roots.extend(card.sources.iter().map(|s| s.name.clone()));
         roots.extend(card.states.iter().map(|s| root_of(&s.path)));
         roots.push("copy".into());
         let events = card.events.iter().map(|e| e.name.clone()).collect();
@@ -2838,7 +2858,7 @@ impl Scope {
 
     fn component(card: &Card, component: &Component) -> Self {
         let mut roots: Vec<String> = Vec::new();
-        roots.extend(card.sources.iter().map(|s| root_of(&s.name)));
+        roots.extend(card.sources.iter().map(|s| s.name.clone()));
         roots.push("copy".into());
         roots.extend(component.params.iter().map(|p| p.name.clone()));
         roots.extend(component.states.iter().map(|s| root_of(&s.path)));
@@ -2863,8 +2883,18 @@ impl Scope {
         }
     }
 
-    fn knows(&self, root: &str) -> bool {
-        self.roots.iter().any(|r| r == root)
+    /// Whether `path` is covered by a declared name.
+    ///
+    /// A declared name matches its own segments only: `env.locale` answers
+    /// `env.locale.lang` and does NOT answer `env.theme.secret`. Comparing
+    /// roots made every sibling of a dotted source readable.
+    fn knows(&self, path: &str) -> bool {
+        self.roots.iter().any(|r| {
+            path == r
+                || path
+                    .strip_prefix(r.as_str())
+                    .is_some_and(|rest| rest.starts_with('.'))
+        })
     }
 }
 
@@ -3399,7 +3429,8 @@ fn check_path(path: &str, scope: &Scope, line: usize, column: usize, sink: &mut 
         return;
     }
 
-    if scope.knows(&root) {
+    // The whole path, so a declared name can be matched by its own segments.
+    if scope.knows(path) {
         return;
     }
     if scope.forbidden_state.contains(&root) {
@@ -4841,10 +4872,20 @@ pub fn source_plan(source: &str) -> SourcePlan {
                 .iter()
                 .filter_map(|(_, arg)| match arg {
                     SourceArg::Path(p) => {
-                        let root = root_of(p);
-                        // Only another SOURCE is a fetch dependency. A path into
-                        // card state is available before any fetch begins.
-                        declared.iter().find(|d| **d == root).map(|_| root)
+                        // Match a declared name by its own segments, longest
+                        // first: `env.locale.lang` depends on `env.locale`.
+                        // Reducing to the root compared `env` against the full
+                        // name and recorded no edge at all, so the dependent
+                        // was planned before the thing it reads.
+                        let mut hits: Vec<&&str> = declared
+                            .iter()
+                            .filter(|d| {
+                                *p == ***d
+                                    || p.strip_prefix(**d).is_some_and(|r| r.starts_with('.'))
+                            })
+                            .collect();
+                        hits.sort_by_key(|d| std::cmp::Reverse(d.len()));
+                        hits.first().map(|d| (**d).to_string())
                     }
                     _ => None,
                 })

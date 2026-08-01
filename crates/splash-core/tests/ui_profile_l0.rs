@@ -3319,3 +3319,99 @@ fn the_resource_bounds_hold() {
         report.diagnostics
     );
 }
+
+/// #9: `source_roots` was fixed to hold full names, but ordinary `Scope.roots`
+/// still held the ROOT — so declaring one source authorised reading everything
+/// beside it. The card then renders an undeclared dependency, which is exactly
+/// what §4's "anything reachable without a declared source is a defect by
+/// construction" says cannot happen.
+#[test]
+fn a_dotted_source_does_not_authorise_its_whole_root() {
+    let report = check_ui_l0_named(
+        "sibling",
+        "source env.locale sys.locale()\nview root TextRow(text: env.theme.secret)",
+    );
+    assert!(
+        !report.valid,
+        "declaring env.locale must not grant env.theme"
+    );
+
+    // The declared one still works.
+    assert!(
+        check_ui_l0_named(
+            "ok",
+            "source env.locale sys.locale()\nview root TextRow(text: env.locale.lang)"
+        )
+        .valid
+    );
+}
+
+/// #10: a dotted source's dependency edge was lost, because the argument was
+/// reduced to its root and compared against the full declared name. The plan
+/// then emitted the dependent BEFORE the thing it depends on.
+#[test]
+fn a_dotted_source_dependency_is_ordered_correctly() {
+    let plan = splash_core::ui_l0::source_plan(
+        "source env.locale sys.locale()\n\
+         source scene sys.photo(query: env.locale.lang)\n\
+         view root Rule()",
+    );
+    let order: Vec<&str> = plan.requests.iter().map(|r| r.name.as_str()).collect();
+    let locale = order.iter().position(|n| *n == "env.locale");
+    let scene = order.iter().position(|n| *n == "scene");
+    assert!(
+        locale < scene,
+        "a source must be fetched before the one that reads it: {order:?}"
+    );
+    let scene_req = plan.requests.iter().find(|r| r.name == "scene").unwrap();
+    assert!(
+        scene_req.depends_on.iter().any(|d| d == "env.locale"),
+        "the edge must be recorded: {:?}",
+        scene_req.depends_on
+    );
+}
+
+/// #11: only `level` and `profile` were checked for contradictory duplicates.
+/// A card could declare two different ledger identities and the last one won.
+#[test]
+fn a_contradictory_duplicate_ledger_is_rejected() {
+    let report = check_ui_l0_named(
+        "twoledgers",
+        "# ledger real@1.0.0\n# ledger impostor@9.9.9\nview root Rule()",
+    );
+    assert!(!report.valid, "a card has one identity");
+}
+
+/// #13: the regression test for §5.8's schema id compared `report.closure`,
+/// which the definition digest already made sensitive to initials — so it
+/// passed with the schema fix reverted. It must exercise the store.
+#[test]
+fn changing_an_initial_resets_live_component_state() {
+    const BEFORE: &str = "source items sys.movers()\n\
+        component Rowy(item: record) { state n { shape: number, initial: 0 } \
+          event bump { n: set(1) } \
+          view Col { Row(on_tap: bump) { TextRow(text: item.name) } \
+                     when n == 1 { TextCaption(text: item.name) } } }\n\
+        view root Panel { for it in items key it.id { Rowy(item: it) } }";
+
+    let data = serde_json::json!({"items": [{"id": "a", "name": "A"}]});
+    let mut store = splash_core::ui_l0::InstanceStore::default();
+    let first =
+        splash_core::ui_l0::realize_with_state(BEFORE, &data, &store, RealizeLimits::default());
+    let root = first.root.unwrap();
+    let mut rows = Vec::new();
+    find(&root, "Row", &mut rows);
+    splash_core::ui_l0::dispatch(BEFORE, &mut store, &rows[0].key.clone(), "bump");
+
+    let after = BEFORE.replace("initial: 0", "initial: 7");
+    let out =
+        splash_core::ui_l0::realize_with_state(&after, &data, &store, RealizeLimits::default());
+    let out_root = out.root.unwrap();
+    let mut caps = Vec::new();
+    find(&out_root, "TextCaption", &mut caps);
+    assert_eq!(
+        caps.len(),
+        0,
+        "a changed initial is a schema change (§5.8), so live state must reset"
+    );
+}

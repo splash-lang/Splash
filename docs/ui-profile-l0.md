@@ -333,10 +333,15 @@ different instruments — the schema id decides whether live state still fits, a
 digest (§7) tells a host that a definition was replaced at all.
 
 **What path-based identity does and does not survive.** Insertion of a differently named
-sibling is stable, because siblings are numbered within each element name. Everything else that
-changes the path changes identity: reordering two same-name siblings, inserting another
-instance of the same component above, and any change to an enclosing guard, loop, slot, view
-reference or loop key. Fully edit-stable identity needs a persistent site id in the source or
+sibling is stable, because siblings are numbered within each element name. Identity moves when
+the PATH moves: reordering two same-name siblings, inserting another instance of the same
+component above, adding or removing an enclosing guard, loop, slot or view reference, and
+changing a loop's key expression.
+
+Only the element name and its ordinal enter a segment, so editing a guard's *condition* —
+`when a` to `when b`, both true — leaves the path untouched and the state survives. An earlier
+version of this paragraph said any change to an enclosing guard moved identity; that is wrong,
+and wrong in the direction that matters, since it would have justified not looking. Fully edit-stable identity needs a persistent site id in the source or
 edit provenance from the ledger; neither exists yet, and the numbering is an improvement on
 tree position rather than a solution.
 
@@ -590,11 +595,12 @@ variant must be checked against this condition by hand, and one that reads a pat
 event-typed paths explicitly.
 
 An earlier version of this section claimed the stronger property that "no total form can name
-an event", which was not true: component prop *types* are discarded, so `set(out)` is accepted
-where `out` was declared as an event prop. That does not cascade — `set` reads a value and
-`Form` has no raising branch — but the guarantee rests on the dispatcher rather than on the
-grammar refusing to spell it. **Any new `Form` variant must be checked against this
-condition**, and a form that reads a path must exclude event-typed ones explicitly.
+an event". That was false when written, because component prop types were discarded and
+`set(out)` was accepted where `out` was an event prop. It is now true — prop shapes survive
+parsing, and event-shaped props are excluded from the readable set — but it is true by a check
+rather than by the grammar, which is the distinction worth keeping. **Any new `Form` variant
+must be checked against this condition**, and any form that reads a path must exclude
+event-typed ones explicitly, because nothing in the type system will do it for you.
 
 A test enumerates the syntaxes a cascade could take — `emit e`, `e()`, `n: set(1) then e`, a
 transition targeting an event — and asserts each is refused. That test is a tripwire, not the
