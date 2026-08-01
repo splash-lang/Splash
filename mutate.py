@@ -1,152 +1,214 @@
 #!/usr/bin/env python3
 """
-Mutation-test the L0 validator: which of its rules does the suite actually hold?
+Mutation-test the L0 checker: which of its rules does the suite actually hold?
 
-A passing test proves the code does what the test says. It does NOT prove the
-test would notice if the code stopped. Three review rounds on this branch found
-guarantees that were false within hours and one test of mine that could not fail
-at all, so "the suite is green" has repeatedly meant less than it appeared to.
+A passing suite proves the code does what the tests say. It does not prove a
+test would notice if the code stopped. Four review rounds on this branch found
+guarantees that were false within hours and two tests of mine that could not
+fail, so "the suite is green" has repeatedly meant less than it looked like.
 
-This answers the harder question mechanically. For each diagnostic the validator
-can emit — each one being some rule the profile claims — suppress it, run the
-suite, and see whether anything goes red.
+This answers the harder question mechanically: disable one rule, run the suite,
+see whether anything goes red.
 
-    SURVIVED  nothing failed. That rule is unprotected: it could regress
-              silently, exactly like the `initial` fix whose regression test
-              turned out to check the wrong artifact.
-    caught    at least one test failed. The rule is genuinely held.
+    ./mutate.py              # every rule
+    ./mutate.py <substring>  # only rules whose id matches
+    ./mutate.py --list       # show the rule table without running
 
-Suppression happens in Diagnostics::push rather than at each call site, so the
-mutation is uniform and cannot accidentally change control flow.
+WHAT THIS REPLACED, AND WHY. The first version mutated a diagnostic's TEXT by
+filtering it inside Diagnostics::push, and reported "42 rules, 0 unprotected".
+That number was not sound, for five reasons a reviewer had to point out:
 
-    ./mutate.py            # every rule
-    ./mutate.py <substr>   # only rules whose message matches
+  - Rules that also set `valid` or the level directly were unaffected by a text
+    filter, so they reported unprotected while being perfectly well held.
+  - Its five documented exceptions matched ZERO of the strings it generated, so
+    relabelling them as "verified by hand" was cosmetic.
+  - It found messages by keyword, and missed the six rules that matter most —
+    the capability allowlist, provenance, laundering, recursion.
+  - One substring could suppress several rules, so a test for any one of them
+    flattered all of them.
+  - With no baseline run, a compile error counted as a rule being caught.
+
+So each rule below names a BEHAVIOUR and an edit that disables it, the edit must
+apply at exactly one site, and a mutation that fails to build is reported as
+unusable rather than counted as held. A stale patch string is loud, not silent:
+that is the property the previous version lacked.
 """
 
-import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
-SRC = Path(__file__).parent / "crates/splash-core/src/ui_l0.rs"
+ROOT = Path(__file__).parent
+SRC = ROOT / "crates/splash-core/src/ui_l0.rs"
 
-# Rules this harness CANNOT test, verified by hand instead. Suppressing a
-# message only disables a rule when the message IS the enforcement; where a rule
-# also sets the level or `valid` directly, the mutation is a no-op and the rule
-# reports as unprotected while being perfectly well held.
-#
-#   let / while / arithmetic  enforced by the LEVEL a card is assigned, which
-#                             `every_construct_outside_l0_raises_the_level`
-#                             asserts directly.
-#   header duplicates         check_header writes report.diagnostics itself
-#                             rather than going through Diagnostics::push, so
-#                             the hook never sees it. Verified by disabling
-#                             `report.valid = false` and watching
-#                             `a_contradictory_duplicate_header_field_is_rejected`
-#                             go red.
-#
-# Isolating that second one changed the test: the original used `# level: L2`
-# then `# level: L0`, and the retained L2 tripped the level-vs-derived check —
-# so the card was refused by a DIFFERENT rule and the test passed with the
-# contradiction check removed entirely. That is the failure this harness exists
-# to find, and it found it in a test written the same day.
-KNOWN_ARTIFACTS = [
-    "`let` is not in L0",
-    "`while` is not in L0",
-    "arithmetic is not in L0",
-    "the header declares level twice",
-    "the header declares profile twice",
+
+@dataclass(frozen=True)
+class Rule:
+    """One enforcement, and an edit that disables it."""
+
+    ident: str
+    claim: str
+    find: str
+    replace: str
+
+
+RULES = [
+    # ── capability confinement (§1, §4) ──────────────────────────────────────
+    Rule("source-allowlist", "a card may only name a catalogued capability",
+         "let Some(accepted) = catalog::source(&source.helper) else {",
+         "let Some(accepted) = catalog::source(&source.helper).or(Some(&[][..])) else {"),
+    Rule("source-arg-paths", "a source argument's path must be declared",
+         "None => check_path(path, scope, source.line, 1, sink),",
+         "None => { let _ = (path, scope); }"),
+
+    # ── the no-facts rule (§4) ───────────────────────────────────────────────
+    Rule("data-laundering", "a literal may not reach a data position through a prop",
+         "if matches!(arg.value, Operand::Str(_) | Operand::Num(_))",
+         "if false"),
+    Rule("model-copy-render", "model-authored text may not be rendered",
+         "if decl.provenance == Provenance::ModelCopy {",
+         "if false {"),
+    Rule("model-copy-transition", "model-authored text may not be written into state",
+         "Some(decl) if decl.provenance == Provenance::ModelCopy => {",
+         "Some(decl) if false => {"),
+
+    # ── termination (§6) ─────────────────────────────────────────────────────
+    Rule("acyclic", "the declaration graph is acyclic",
+         "if next == name.as_str() {",
+         "if false {"),
+    Rule("depth-realize", "realization depth is bounded",
+         "if self.nodes >= self.limits.max_nodes || self.depth >= self.limits.max_depth {",
+         "if self.nodes >= self.limits.max_nodes {"),
+
+    # ── identity (§5.1, §5.7) ────────────────────────────────────────────────
+    Rule("duplicate-keys", "duplicate loop keys are reported and disambiguated",
+         "let item_key = if seen_keys.contains(&item_key) {",
+         "let item_key = if false {"),
+    Rule("key-names-binder", "a loop key names the loop's binder",
+         "if root != *binder {",
+         "if false {"),
+    # Reverts to POSITIONAL numbering — a shared counter across siblings — which
+    # is what the fix replaced. Dropping only the name prefix does not revert
+    # anything, because the counter is already per-name.
+    Rule("sibling-ordinals", "identity survives an insertion above",
+         """    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    children
+        .iter()
+        .map(|child| {
+            let n = seen.entry(child.name.as_str()).or_insert(0);
+            let segment = format!("{}#{}", child.name, *n);
+            *n += 1;
+            (segment, child)
+        })
+        .collect()""",
+         """    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    let _ = &mut seen;
+    children
+        .iter()
+        .enumerate()
+        .map(|(i, child)| (format!("{i}"), child))
+        .collect()"""),
+
+    # ── transitions (§3) ─────────────────────────────────────────────────────
+    Rule("payload-shape", "a payload must fit the state it is written to",
+         "Some(v) if value_fits_shape(&state.shape, v) => v.clone(),",
+         "Some(v) => v.clone(),"),
+    Rule("initial-fits", "a declared initial fits its shape",
+         "let fits = value_fits_shape(&state.shape, initial);",
+         "let fits = true;"),
+    Rule("schema-initials", "a changed initial resets live state",
+         '"{}:{:?}:{:?}:{:?}",\n                s.path, s.shape, s.initial, s.initial_path',
+         '"{}:{:?}",\n                s.path, s.shape'),
+
+    # ── component contracts (§5.2) ───────────────────────────────────────────
+    Rule("card-state-private", "a component may not read card state",
+         "if scope.forbidden_state.contains(&root) {",
+         "if false {"),
+
+    # ── level and header (§7) ────────────────────────────────────────────────
+    Rule("header-level", "a declared level must match the derived one",
+         "if !matches {",
+         "if false {"),
+    Rule("header-duplicates", "a header may not contradict itself",
+         "for message in &header.contradictions {",
+         "for message in std::iter::empty::<&String>() {"),
 ]
 
-# The hook: a line inside Diagnostics::push that drops the targeted message.
-ANCHOR = """    fn push(&mut self, line: usize, column: usize, message: String) {
-"""
-INJECT = '        if message.contains(%s) { return; }\n'
 
-
-def messages():
-    """Every diagnostic literal, found by WHERE IT IS USED rather than by keyword.
-
-    A keyword list silently missed rules as new ones were added — "declares no
-    `shape`" and "reaches a data position" were both invisible, so the harness
-    reported full coverage while not testing them at all. That is the same
-    failure the harness exists to catch, one level up.
-    """
-    src = SRC.read_text()
-    found = set()
-    # Scan forward from each diagnostic call and take the string literals in it.
-    for m in re.finditer(r"(?:sink\.push|sink\.at|self\.sink\.at|self\.sink\.push)\s*\(", src):
-        window = src[m.end(): m.end() + 900]
-        depth, cut = 1, len(window)
-        for i, ch in enumerate(window):
-            if ch == "(":
-                depth += 1
-            elif ch == ")":
-                depth -= 1
-                if depth == 0:
-                    cut = i
-                    break
-        for lit in re.findall(r'"((?:[^"\\\n]|\\.){10,})"', window[:cut]):
-            found.add(lit)
-
-    # Match on the longest LITERAL run — the text between format placeholders.
-    out = {}
-    for t in found:
-        runs = [r.strip() for r in re.split(r"\{[^}]*\}", t)]
-        longest = max(runs, key=len) if runs else ""
-        if len(longest) >= 12:
-            out.setdefault(longest, t)
-    return sorted(out.items())
-
-
-def run_tests():
-    """True if the suite passes."""
+def suite():
+    """(built, passed). built=False means the mutation did not compile."""
     r = subprocess.run(
         ["cargo", "test", "-q", "-p", "splash-core", "--test", "ui_profile_l0"],
-        cwd=SRC.parents[3], capture_output=True, text=True,
+        cwd=ROOT, capture_output=True, text=True,
     )
-    return r.returncode == 0
+    out = r.stdout + r.stderr
+    built = "error[E" not in out and "could not compile" not in out
+    return built, r.returncode == 0
 
 
 def main():
-    only = sys.argv[1] if len(sys.argv) > 1 else None
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    only = args[0] if args else None
+    rules = [r for r in RULES if not only or only in r.ident]
+
+    if "--list" in sys.argv:
+        for r in rules:
+            print(f"  {r.ident:<24} {r.claim}")
+        return 0
+
     original = SRC.read_text()
-    assert ANCHOR in original, "Diagnostics::push signature moved"
 
-    targets = [(p, f) for p, f in messages() if not only or only in f]
-    print(f"{len(targets)} rules to check\n")
+    # Baseline. Without it a pre-existing failure reads as every rule being
+    # held — the most flattering possible way to be wrong.
+    print("baseline… ", end="", flush=True)
+    built, passed = suite()
+    if not (built and passed):
+        print("FAILED — fix the suite first; mutation results would be meaningless")
+        return 2
+    print("green\n")
 
-    survived, caught, broken = [], [], []
+    held, unprotected, unusable = [], [], []
     try:
-        for i, (prefix, full) in enumerate(targets, 1):
-            literal = '"%s"' % prefix.replace("\\", "\\\\").replace('"', '\\"')
-            SRC.write_text(original.replace(ANCHOR, ANCHOR + INJECT % literal, 1))
-            ok = run_tests()
-            label = full[:66]
-            artifact = any(a in full for a in KNOWN_ARTIFACTS)
-            if ok and artifact:
-                caught.append(label)
-                print(f"  [{i:2}/{len(targets)}] held*     {label}")
-            elif ok:
-                survived.append(label)
-                print(f"  [{i:2}/{len(targets)}] SURVIVED  {label}")
+        for i, rule in enumerate(rules, 1):
+            hits = original.count(rule.find)
+            if hits != 1:
+                unusable.append((rule.ident, f"patch matches {hits} sites, expected 1"))
+                print(f"  [{i:2}/{len(rules)}] STALE     {rule.ident} ({hits} matches)")
+                continue
+
+            SRC.write_text(original.replace(rule.find, rule.replace, 1))
+            built, passed = suite()
+            SRC.write_text(original)
+
+            if not built:
+                unusable.append((rule.ident, "mutation did not compile"))
+                print(f"  [{i:2}/{len(rules)}] NO-BUILD  {rule.ident}")
+            elif passed:
+                unprotected.append(rule)
+                print(f"  [{i:2}/{len(rules)}] SURVIVED  {rule.ident} — {rule.claim}")
             else:
-                caught.append(label)
-                print(f"  [{i:2}/{len(targets)}] caught    {label}")
+                held.append(rule)
+                print(f"  [{i:2}/{len(rules)}] held      {rule.ident}")
     finally:
         SRC.write_text(original)
 
-    print(f"\n{'=' * 72}")
-    print(f"held by a test: {len(caught)}     UNPROTECTED: {len(survived)}")
-    print("(* held by a level or validity assertion this harness cannot reach;"
-          " see KNOWN_ARTIFACTS)")
-    if survived:
+    print(f"\n{'=' * 74}")
+    print(f"held: {len(held)}    UNPROTECTED: {len(unprotected)}    unusable: {len(unusable)}")
+    print(f"\nThis covers {len(RULES)} named rules. It is NOT a coverage percentage:\n"
+          "a rule absent from the table is untested by this harness and unmentioned\n"
+          "by its output, which is how the previous version came to claim full\n"
+          "coverage while missing the six rules that mattered most.")
+    if unprotected:
         print("\nRules no test would notice regressing:\n")
-        for s in survived:
-            print(f"  - {s}")
-    if broken:
-        print(f"\ncompile failures (mutation invalid): {len(broken)}")
-    return 1 if survived else 0
+        for r in unprotected:
+            print(f"  - {r.ident}: {r.claim}")
+    if unusable:
+        print("\nMutations that could not be applied. These are NOT held — they are\n"
+              "untested, and a stale patch string is the likeliest reason:\n")
+        for ident, why in unusable:
+            print(f"  - {ident}: {why}")
+    return 1 if (unprotected or unusable) else 0
 
 
 if __name__ == "__main__":

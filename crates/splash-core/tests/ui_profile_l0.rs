@@ -3747,3 +3747,38 @@ fn model_copy_cannot_reach_the_screen_by_any_route() {
               view root F(t: copy.label)";
     assert!(check_ui_l0_named("vocab", ok).valid);
 }
+
+/// §6, condition 5 caps nesting depth AND node count, and they are different
+/// bounds. The existing deep-source test builds a tree that trips the node cap
+/// on the way down, so removing the depth check entirely left it green — the
+/// rebuilt mutation harness caught that.
+///
+/// This isolates depth: a tree deeper than `max_depth` but far short of
+/// `max_nodes`, so only the depth bound can stop it.
+#[test]
+fn realization_depth_is_bounded_independently_of_node_count() {
+    // Between the two bounds: under the parser's 128-deep limit so it parses,
+    // over the realizer's default 64 so only the realization bound can stop it.
+    let depth = 100;
+    let source = format!(
+        "view root {}Rule(){}",
+        "Col { ".repeat(depth),
+        " }".repeat(depth)
+    );
+    let limits = RealizeLimits {
+        max_nodes: 100_000, // far above what this tree needs
+        max_depth: 64,
+        max_collection: 512,
+    };
+    let report = realize(&source, &serde_json::json!({}), limits);
+    assert!(
+        report.truncated,
+        "a tree deeper than max_depth must truncate even when node count is fine \
+         ({} nodes realized)",
+        report.nodes
+    );
+    assert!(
+        report.nodes < 100_000,
+        "and it must stop well short of the node cap, or this proves nothing"
+    );
+}
