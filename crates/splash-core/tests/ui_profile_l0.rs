@@ -3508,3 +3508,35 @@ fn a_loop_key_must_name_the_loop_binder() {
     );
     assert!(!report.valid, "`typo` is not the binder `it`");
 }
+
+/// `validate_sources` checked the helper name and its argument NAMES, never the
+/// paths those arguments carry. So a card could reference anything and the
+/// value went to the host inside a well-formed request — which is precisely
+/// the undeclared dependency §4 says is "a defect by construction".
+#[test]
+fn a_source_argument_path_must_be_declared() {
+    let report = check_ui_l0_named(
+        "leak-arg",
+        "source photo sys.photo(query: secrets.token)\nview root Rule()",
+    );
+    assert!(!report.valid, "`secrets` is not declared");
+
+    // The plan must not carry it either, for a caller that skips checking.
+    let plan = splash_core::ui_l0::source_plan(
+        "source photo sys.photo(query: secrets.token)\nview root Rule()",
+    );
+    assert!(
+        !plan.diagnostics.is_empty(),
+        "the plan must report it rather than hand the host an undeclared path"
+    );
+
+    // A declared one still works.
+    assert!(
+        check_ui_l0_named(
+            "ok",
+            "state city { shape: text, initial: \"\" }\n\
+             source place sys.geocode(name: city)\nview root Rule()"
+        )
+        .valid
+    );
+}
