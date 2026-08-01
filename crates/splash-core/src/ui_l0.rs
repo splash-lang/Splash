@@ -2807,6 +2807,18 @@ fn check_component_acyclicity(card: &Card, sink: &mut Diagnostics) {
         edges.push((view.name.clone(), refs, 1));
     }
 
+    // Keep only edges that name a NODE of this graph. `collect_constructors`
+    // yields every catalog constructor, so an unfiltered edge list is
+    // proportional to the card's size rather than to its component graph — and
+    // the traversal budget could then be exhausted by padding before the walk
+    // reached a real cycle. Filtering makes the budget a backstop rather than
+    // the thing that decides the answer.
+    let node_names: Vec<String> = edges.iter().map(|(n, _, _)| n.clone()).collect();
+    for (_, refs, _) in edges.iter_mut() {
+        refs.retain(|r| node_names.contains(r));
+        refs.dedup();
+    }
+
     let referenced = |name: &str| -> Option<&Vec<String>> {
         edges.iter().find(|(n, _, _)| n == name).map(|(_, r, _)| r)
     };
@@ -3317,7 +3329,19 @@ fn check_arg(
 fn data_position_params(card: &Card) -> BTreeMap<String, Vec<String>> {
     let mut tainted: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
-    for _ in 0..=card.components.len() {
+    // Bound by the number of PARAM HOPS a value can take, not by the component
+    // count. A single component whose params chain a -> b -> c -> data needs
+    // three rounds, which `N + 1` with N = 1 does not allow — and the loop must
+    // still terminate if the graph turns out to be cyclic, since this runs
+    // before acyclicity is proven.
+    let rounds = card.components.len()
+        + card
+            .components
+            .iter()
+            .map(|c| c.params.len())
+            .sum::<usize>()
+        + 2;
+    for _ in 0..rounds {
         let mut changed = false;
         for component in &card.components {
             let names: Vec<&str> = component.params.iter().map(|p| p.name.as_str()).collect();
