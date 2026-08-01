@@ -3,10 +3,21 @@
 **Status:** proposed. Nothing here is implemented.
 
 `UPSTREAM.md` permits a behavioural change to the vendored VM "only when [it]
-implements a published Splash language contract". This is that contract, written
-so the VM patch has something to be checked against. It is deliberately narrow:
-it publishes the smallest state mechanism that lets an interaction be handled
-locally, and defers everything that can be deferred.
+implements a published Splash language contract". This is that contract. It is
+deliberately narrow: it publishes the smallest state mechanism that lets an
+interaction be handled locally, and defers everything that can be deferred.
+
+**This contract has more than one implementer.** Splash's vendored VM
+(`vendor/makepad/platform/script`, pinned to upstream `4f9ce7a8`) and the VM that
+ships on device in octos-one (`makepad/platform/script`) are independent
+lineages — neither contains the other's history. That is a deliberate position,
+not an accident awaiting a merge, and it has one consequence that governs
+everything below: **a contract is only as real as the conformance that holds its
+implementations together.** §9 is therefore not an appendix. It is the part
+that makes the rest true.
+
+Nothing in §2–§6 names a VM, a crate or a language. If a sentence here can only
+be satisfied by one implementation, that sentence is a defect.
 
 ---
 
@@ -204,7 +215,76 @@ keeps every interaction that genuinely needs new content.
 
 ---
 
-## 9. What would make this contract wrong
+## 9. Conformance
+
+Two independent implementations agree only if something checks that they do.
+Prose does not check. The mechanism is a **corpus of cases, in a form both
+implementations execute**, and a rule that a case is normative rather than
+illustrative.
+
+### 10.1 Shape of a case
+
+A case is a program, an ordered list of events, and the expected cell values
+after each. It says nothing about rendering, because rendering is where the
+implementations legitimately differ:
+
+```toml
+[[case]]
+id      = "toggle-is-per-instance"
+program = """
+  state open: bool = false
+  View { l0_key: "row[a]" Button{ on_click: || state.toggle(open) } }
+  View { l0_key: "row[b]" Button{ on_click: || state.toggle(open) } }
+"""
+events  = [ { key = "row[a]", click = 0 } ]
+expect  = [ { key = "row[a]", name = "open", value = true  },
+            { key = "row[b]", name = "open", value = false } ]
+```
+
+That single case is the whole point of the contract: without per-instance
+scoping, `row[b]` reads `true` and the case fails. A case that both
+implementations pass before the feature exists is not a conformance case.
+
+### 10.2 What the corpus must cover
+
+Every normative statement in §2–§6, and specifically the ones most likely to
+drift because they are easy to implement *almost* right:
+
+- a write updates only its own scope (§3)
+- an absent key means one global scope, i.e. today's behaviour (§3)
+- two instances presenting the same key is an error, not a merge (§3.1)
+- `set` refuses a value that does not fit the declared shape (§2.3)
+- a cell dies with its instance (§5)
+- re-seeding discards every cell (§5)
+- `{{state.q}}` and `agent.notify` behave identically to before (§6)
+
+That last one deserves its own emphasis. **The most valuable cases are the ones
+asserting nothing changed.** A state mechanism that quietly alters interpolation
+or the host callback breaks every existing card, and neither implementation
+would notice from cases that only exercise the new feature.
+
+### 10.3 Where the corpus lives
+
+In this repository, beside the contract, because the contract is the shared
+artifact. Each implementation vendors or fetches it and runs it in its own test
+suite. A case is added here first and fails in both implementations until each
+lands the behaviour — which makes divergence visible as a failing case rather
+than as a device-only bug six weeks later.
+
+### 10.4 What conformance does not buy
+
+It checks behaviour the corpus names. It cannot check behaviour nobody thought
+to write down, and a case absent from the corpus is untested *and* unmentioned —
+the same failure the L0 mutation harness had, where selecting rules by keyword
+silently missed the six that mattered most.
+
+So the corpus must be treated as the specification's tests, not as a smoke
+screen: when an implementation finds a behaviour the contract does not settle,
+the fix is a new case here, not a local decision there.
+
+---
+
+## 10. What would make this contract wrong
 
 Written down so it can be checked rather than defended:
 
@@ -214,3 +294,7 @@ Written down so it can be checked rather than defended:
   §3 is wrong and the VM needs its own identity model.
 - If redraw-on-write is insufficient to make an interaction feel local, §4 is
   wrong and reactivity is not separable after all.
+- If a conformance case cannot be written for a normative statement in §2–§6,
+  that statement is not testable and should be cut or restated until it is.
+- If the two implementations pass the corpus and still behave differently in a
+  way a card can observe, the corpus is incomplete and §9.2 is missing a case.
