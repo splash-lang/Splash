@@ -5359,3 +5359,500 @@ fn collect_reads(element: &Element, reads: &mut Vec<String>, pulls: &mut Vec<Str
         }
     }
 }
+
+// ─────────────────────────────────────────────────── the Splash-surface projector ──
+
+/// Recognise an L0 card written in **Splash's own grammar** and project it into
+/// the same `Card` the bespoke surface produces.
+///
+/// Why a second surface at all: L0 currently has its own lexer and parser and
+/// imports one type from the rest of the crate, so "a Splash profile" describes
+/// a philosophy rather than an implementation. A card written as Splash is one
+/// language across the whole stack — card, theme kit, DSL, VM — and `splash-lsp`
+/// already exists for it.
+///
+/// **This is a positive recogniser, not a denylist.** Every shape below is
+/// admitted by name; anything else is refused. That is the difference between a
+/// surface that happens to reject bad input today and one that rejects it by
+/// construction, and it is the condition under which a general-purpose carrier
+/// grammar can host a restricted language at all.
+///
+/// The carrier is verified separately: `check_ui_l0_splash` runs
+/// `check_vm_compatibility` first, so a card must be real Splash *and* project
+/// cleanly. Neither check subsumes the other — the first says the VM could run
+/// it, the second says L0 will admit it.
+pub mod splash_surface {
+    use super::{
+        lex, CopyDecl, Diagnostics, EventDecl, Provenance, Shape, SourceArg, SourceDecl, StateDecl,
+        Token,
+    };
+
+    /// What a `let` binding was recognised as.
+    enum Recognised {
+        Source(SourceDecl),
+        State(StateDecl),
+        Event(EventDecl),
+        Copy(CopyDecl),
+    }
+
+    /// Project declarations out of Splash-shaped source.
+    ///
+    /// Returns the declarations it recognised and diagnostics for every `let`
+    /// it could not. A `let` bound to anything outside the four forms is an
+    /// error rather than an ignored statement: silently skipping it is how a
+    /// card declares a source the runtime never fetches.
+    pub fn project_declarations(source: &str) -> ProjectionReport {
+        let mut sink = Diagnostics::default();
+        let Some(tokens) = lex(source, &mut sink) else {
+            return ProjectionReport {
+                sources: Vec::new(),
+                states: Vec::new(),
+                events: Vec::new(),
+                copies: Vec::new(),
+                diagnostics: sink.items,
+            };
+        };
+
+        let mut p = Projector {
+            t: &tokens,
+            at: 0,
+            sink: &mut sink,
+        };
+        let mut sources = Vec::new();
+        let mut states = Vec::new();
+        let mut events = Vec::new();
+        let mut copies = Vec::new();
+
+        while p.at < p.t.len() {
+            if !p.eat_ident("let") {
+                p.at += 1;
+                continue;
+            }
+            match p.let_binding() {
+                Some(Recognised::Source(d)) => sources.push(d),
+                Some(Recognised::State(d)) => states.push(d),
+                Some(Recognised::Event(d)) => events.push(d),
+                Some(Recognised::Copy(d)) => copies.push(d),
+                None => {}
+            }
+        }
+
+        ProjectionReport {
+            sources,
+            states,
+            events,
+            copies,
+            diagnostics: sink.items,
+        }
+    }
+
+    /// What the projector recognised. Names are exposed for tests and tooling;
+    /// the declarations themselves stay crate-private, like the bespoke
+    /// surface's, so the two cannot drift into different public shapes.
+    pub struct ProjectionReport {
+        pub(super) sources: Vec<SourceDecl>,
+        pub(super) states: Vec<StateDecl>,
+        pub(super) events: Vec<EventDecl>,
+        pub(super) copies: Vec<CopyDecl>,
+        pub diagnostics: Vec<super::SyntaxDiagnostic>,
+    }
+
+    impl ProjectionReport {
+        pub fn is_clean(&self) -> bool {
+            self.diagnostics.is_empty()
+        }
+        pub fn source_names(&self) -> Vec<String> {
+            self.sources.iter().map(|d| d.name.clone()).collect()
+        }
+        pub fn source_helpers(&self) -> Vec<String> {
+            self.sources.iter().map(|d| d.helper.clone()).collect()
+        }
+        pub fn state_names(&self) -> Vec<String> {
+            self.states.iter().map(|d| d.path.clone()).collect()
+        }
+        pub fn event_names(&self) -> Vec<String> {
+            self.events.iter().map(|d| d.name.clone()).collect()
+        }
+        pub fn copy_names(&self) -> Vec<String> {
+            self.copies.iter().map(|d| d.name.clone()).collect()
+        }
+    }
+
+    struct Projector<'a> {
+        t: &'a [Token],
+        at: usize,
+        sink: &'a mut Diagnostics,
+    }
+
+    impl Projector<'_> {
+        fn eat_ident(&mut self, want: &str) -> bool {
+            let hit = self
+                .t
+                .get(self.at)
+                .is_some_and(|t| t.kind == super::Kind::Ident && t.text == want);
+            if hit {
+                self.at += 1;
+            }
+            hit
+        }
+
+        fn eat_punct(&mut self, want: &str) -> bool {
+            let hit = self.t.get(self.at).is_some_and(|t| t.is_punct(want));
+            if hit {
+                self.at += 1;
+            }
+            hit
+        }
+
+        fn ident(&mut self) -> Option<String> {
+            let t = self.t.get(self.at)?;
+            (t.kind == super::Kind::Ident).then(|| {
+                self.at += 1;
+                t.text.clone()
+            })
+        }
+
+        fn string(&mut self) -> Option<String> {
+            let t = self.t.get(self.at)?;
+            (t.kind == super::Kind::Str).then(|| {
+                self.at += 1;
+                t.text.clone()
+            })
+        }
+
+        fn line(&self) -> usize {
+            self.t.get(self.at).map(|t| t.line).unwrap_or(1)
+        }
+
+        fn reject(&mut self, message: String) {
+            let line = self.line();
+            let column = self.t.get(self.at).map(|t| t.column).unwrap_or(1);
+            self.sink.push(line, column, message);
+        }
+
+        /// `let <name> = <recognised-form>(…)`.
+        ///
+        /// The name and `=` are consumed before dispatch, so an unrecognised
+        /// form reports what it saw rather than "unexpected token".
+        fn let_binding(&mut self) -> Option<Recognised> {
+            let line = self.line();
+            let name = self.ident()?;
+            if !self.eat_punct("=") {
+                return None;
+            }
+            let form = match self.ident() {
+                Some(f) => f,
+                None => {
+                    self.reject(format!(
+                        "`let {name}` must bind one of source(…), state(…), event(…) or \
+                         copy(…) — L0 admits no other binding (profile §2)"
+                    ));
+                    return None;
+                }
+            };
+            if !self.eat_punct("(") {
+                self.reject(format!("expected `(` after {form:?}"));
+                return None;
+            }
+            match form.as_str() {
+                "source" => self.source(name, line).map(Recognised::Source),
+                "state" => self.state(name, line).map(Recognised::State),
+                "event" => self.event(name).map(Recognised::Event),
+                "copy" => self.copy(name).map(Recognised::Copy),
+                other => {
+                    self.reject(format!(
+                        "{other:?} is not an L0 declaration; L0 admits source, state, event \
+                         and copy, and nothing else"
+                    ));
+                    None
+                }
+            }
+        }
+
+        /// `source("sys.news", {count: 1, fields: ["id", "title"]})`
+        fn source(&mut self, name: String, line: usize) -> Option<SourceDecl> {
+            let Some(helper) = self.string() else {
+                self.reject(
+                    "a source names its capability as a string: source(\"sys.news\", {…})".into(),
+                );
+                return None;
+            };
+            let mut args = Vec::new();
+            if self.eat_punct(",") && self.eat_punct("{") {
+                while !self.eat_punct("}") {
+                    if self.at >= self.t.len() {
+                        break;
+                    }
+                    let Some(key) = self.ident() else {
+                        self.at += 1;
+                        continue;
+                    };
+                    if !self.eat_punct(":") {
+                        continue;
+                    }
+                    if let Some(value) = self.source_arg() {
+                        args.push((key, value));
+                    }
+                    let _ = self.eat_punct(",");
+                }
+            }
+            let _ = self.eat_punct(")");
+            Some(SourceDecl {
+                name,
+                helper,
+                args,
+                line,
+            })
+        }
+
+        fn source_arg(&mut self) -> Option<SourceArg> {
+            let t = self.t.get(self.at)?.clone();
+            match t.kind {
+                super::Kind::Str => {
+                    self.at += 1;
+                    Some(SourceArg::Text(t.text))
+                }
+                super::Kind::Num => {
+                    self.at += 1;
+                    Some(SourceArg::Number(t.text.parse().unwrap_or(0.0)))
+                }
+                super::Kind::Ident => {
+                    // A dotted path: `st.selected`, `place.lat`.
+                    let mut path = t.text.clone();
+                    self.at += 1;
+                    while self.t.get(self.at).is_some_and(|n| n.is_punct("."))
+                        && self
+                            .t
+                            .get(self.at + 1)
+                            .is_some_and(|n| n.kind == super::Kind::Ident)
+                    {
+                        path.push('.');
+                        path.push_str(&self.t[self.at + 1].text);
+                        self.at += 2;
+                    }
+                    Some(SourceArg::Path(path))
+                }
+                _ if t.is_punct("[") => {
+                    self.at += 1;
+                    let mut fields = Vec::new();
+                    while !self.eat_punct("]") {
+                        if self.at >= self.t.len() {
+                            break;
+                        }
+                        if let Some(f) = self.string().or_else(|| self.ident()) {
+                            fields.push(f);
+                        } else {
+                            self.at += 1;
+                        }
+                        let _ = self.eat_punct(",");
+                    }
+                    Some(SourceArg::List(fields))
+                }
+                _ => {
+                    self.reject(
+                        "a source argument is a string, number, path or list of fields".into(),
+                    );
+                    self.at += 1;
+                    None
+                }
+            }
+        }
+
+        /// `state("text", "")` / `state("enum", ["c", "f"], "c")`
+        fn state(&mut self, path: String, _line: usize) -> Option<StateDecl> {
+            let Some(shape_name) = self.string() else {
+                self.reject("a state names its shape as a string: state(\"text\", \"\")".into());
+                return None;
+            };
+            let mut members = Vec::new();
+            if shape_name == "enum" {
+                let _ = self.eat_punct(",");
+                if self.eat_punct("[") {
+                    while !self.eat_punct("]") {
+                        if self.at >= self.t.len() {
+                            break;
+                        }
+                        if let Some(m) = self.string().or_else(|| self.ident()) {
+                            members.push(m);
+                        } else {
+                            self.at += 1;
+                        }
+                        let _ = self.eat_punct(",");
+                    }
+                }
+            }
+            let shape = match shape_name.as_str() {
+                "text" => Shape::Text,
+                "number" => Shape::Number,
+                "bool" => Shape::Bool,
+                "record" => Shape::Record,
+                "collection" => Shape::Collection,
+                "event" => Shape::Event,
+                "enum" => Shape::Enum(members),
+                other => {
+                    self.reject(format!(
+                        "{other:?} is not an L0 shape; L0 has text, number, bool, enum, \
+                         record, collection and event"
+                    ));
+                    Shape::Other
+                }
+            };
+
+            let _ = self.eat_punct(",");
+            let initial = self.t.get(self.at).cloned().and_then(|t| match t.kind {
+                super::Kind::Str => {
+                    self.at += 1;
+                    Some(crate::JsonValue::String(t.text))
+                }
+                super::Kind::Num => {
+                    self.at += 1;
+                    t.text.parse::<f64>().ok().map(crate::JsonValue::from)
+                }
+                super::Kind::Ident if t.text == "true" || t.text == "false" => {
+                    self.at += 1;
+                    Some(crate::JsonValue::Bool(t.text == "true"))
+                }
+                _ => None,
+            });
+            let _ = self.eat_punct(")");
+            Some(StateDecl {
+                path,
+                shape,
+                initial,
+                initial_path: None,
+                keep: false,
+            })
+        }
+
+        /// `event({selected: set_payload()})` — a batch of total forms.
+        fn event(&mut self, name: String) -> Option<EventDecl> {
+            let mut transitions = Vec::new();
+            if self.eat_punct("{") {
+                while !self.eat_punct("}") {
+                    if self.at >= self.t.len() {
+                        break;
+                    }
+                    let line = self.line();
+                    let column = self.t.get(self.at).map(|t| t.column).unwrap_or(1);
+                    let Some(target) = self.ident() else {
+                        self.at += 1;
+                        continue;
+                    };
+                    if !self.eat_punct(":") {
+                        continue;
+                    }
+                    let Some(form_name) = self.ident() else {
+                        self.reject("a transition names a total form".into());
+                        continue;
+                    };
+                    let _ = self.eat_punct("(");
+                    let (form, tokens) = match form_name.as_str() {
+                        "toggle" => (super::Form::Toggle, Vec::new()),
+                        "clear" => (super::Form::Clear, Vec::new()),
+                        "set_payload" => (super::Form::Set(super::SetSource::Payload), Vec::new()),
+                        "set" => {
+                            let src = match self.t.get(self.at).cloned() {
+                                Some(t) if t.kind == super::Kind::Str => {
+                                    self.at += 1;
+                                    super::SetSource::Text(t.text)
+                                }
+                                Some(t) if t.kind == super::Kind::Num => {
+                                    self.at += 1;
+                                    super::SetSource::Num(t.text.parse().unwrap_or(0.0))
+                                }
+                                Some(t) if t.kind == super::Kind::Ident => {
+                                    self.at += 1;
+                                    super::SetSource::Path(t.text)
+                                }
+                                _ => super::SetSource::Payload,
+                            };
+                            (super::Form::Set(src), Vec::new())
+                        }
+                        "cycle" => {
+                            let mut members = Vec::new();
+                            while !self.t.get(self.at).is_some_and(|t| t.is_punct(")")) {
+                                if self.at >= self.t.len() {
+                                    break;
+                                }
+                                if let Some(m) = self.string().or_else(|| self.ident()) {
+                                    members.push(m);
+                                } else {
+                                    self.at += 1;
+                                }
+                                let _ = self.eat_punct(",");
+                            }
+                            (super::Form::Cycle, members)
+                        }
+                        other => {
+                            self.reject(format!(
+                                "{other:?} is not a total form; L0 admits set, set_payload, \
+                                 toggle, cycle and clear (profile §3)"
+                            ));
+                            (super::Form::NotTotal(other.to_string()), Vec::new())
+                        }
+                    };
+                    let _ = self.eat_punct(")");
+                    let _ = self.eat_punct(",");
+                    transitions.push(super::Transition {
+                        target,
+                        form,
+                        tokens,
+                        line,
+                        column,
+                    });
+                }
+            }
+            let _ = self.eat_punct(")");
+            Some(EventDecl { name, transitions })
+        }
+
+        /// `copy("vocabulary", {en: "pts", zh: "分"})`
+        fn copy(&mut self, name: String) -> Option<CopyDecl> {
+            let provenance = match self.string().as_deref() {
+                Some("vocabulary") => Provenance::Vocabulary,
+                Some("user-copy") => Provenance::UserCopy,
+                Some("model-copy") => Provenance::ModelCopy,
+                Some(other) => {
+                    self.reject(format!(
+                        "{other:?} is not a copy class; L0 has vocabulary, user-copy and \
+                         model-copy (profile §4)"
+                    ));
+                    Provenance::ModelCopy
+                }
+                None => {
+                    // Absent provenance is NOT vocabulary — §4 fails closed.
+                    self.reject(format!(
+                        "copy {name:?} declares no class; L0 needs one of vocabulary, \
+                         user-copy or model-copy (profile §4)"
+                    ));
+                    Provenance::ModelCopy
+                }
+            };
+            let mut locales = Vec::new();
+            if self.eat_punct(",") && self.eat_punct("{") {
+                while !self.eat_punct("}") {
+                    if self.at >= self.t.len() {
+                        break;
+                    }
+                    let Some(lang) = self.ident() else {
+                        self.at += 1;
+                        continue;
+                    };
+                    if !self.eat_punct(":") {
+                        continue;
+                    }
+                    if let Some(text) = self.string() {
+                        locales.push((lang, text));
+                    }
+                    let _ = self.eat_punct(",");
+                }
+            }
+            let _ = self.eat_punct(")");
+            Some(CopyDecl {
+                name,
+                provenance,
+                locales,
+            })
+        }
+    }
+}

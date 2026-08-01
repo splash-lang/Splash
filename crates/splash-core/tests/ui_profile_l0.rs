@@ -3808,3 +3808,97 @@ fn realization_depth_is_bounded_independently_of_node_count() {
         "and it must stop well short of the node cap, or this proves nothing"
     );
 }
+
+// ─── the Splash-surface projector ────────────────────────────────────────────
+//
+// L0 has its own lexer and parser and imports one type from the rest of the
+// crate, so "a Splash profile" has described a philosophy rather than an
+// implementation. These tests cover the second surface: a card written in
+// Splash's own grammar, projected into the same declarations.
+
+use splash_core::ui_l0::splash_surface::project_declarations;
+
+const AS_SPLASH: &str = r#"
+let lead     = source("sys.news", {count: 1, fields: ["id", "title", "author"]})
+let feed     = source("sys.news", {count: 7, offset: 1, fields: ["id", "title"]})
+let article  = source("sys.news_item", {id: st.selected, fields: ["title"]})
+let selected = state("text", "")
+let open_story = event({selected: set_payload()})
+let back       = event({selected: clear()})
+let c_pts      = copy("vocabulary", {en: "pts", zh: "分"})
+"#;
+
+#[test]
+fn a_card_written_as_splash_projects_its_declarations() {
+    let report = project_declarations(AS_SPLASH);
+    assert!(report.is_clean(), "{:#?}", report.diagnostics);
+
+    assert_eq!(report.source_names(), vec!["lead", "feed", "article"]);
+    assert_eq!(
+        report.source_helpers(),
+        vec!["sys.news", "sys.news", "sys.news_item"]
+    );
+    assert_eq!(report.state_names(), vec!["selected"]);
+    assert_eq!(report.event_names(), vec!["open_story", "back"]);
+    assert_eq!(report.copy_names(), vec!["c_pts"]);
+}
+
+/// The carrier and the profile are separate checks and neither subsumes the
+/// other: the first says the VM could run it, the second says L0 will admit it.
+#[test]
+fn the_splash_surface_is_also_valid_splash() {
+    let report = splash_core::check_vm_compatibility(AS_SPLASH).expect("checker runs");
+    assert!(
+        report.diagnostics.is_empty(),
+        "the surface must be real Splash: {:#?}",
+        report.diagnostics
+    );
+}
+
+/// A positive recogniser, not a denylist: a `let` bound to anything outside the
+/// four declaration forms is refused rather than skipped. Skipping is how a card
+/// declares a source the runtime never fetches.
+#[test]
+fn an_unrecognised_binding_is_refused() {
+    for (source, why) in [
+        ("let x = compute(1, 2)", "an arbitrary call"),
+        ("let x = 41.2", "a bare literal"),
+        ("let x = sys.news(1)", "a helper called directly"),
+    ] {
+        let report = project_declarations(source);
+        assert!(
+            !report.is_clean(),
+            "{why} must be refused, not ignored: {source}"
+        );
+    }
+}
+
+#[test]
+fn the_projector_refuses_a_non_total_transition() {
+    let report = project_declarations("let e = event({n: increment()})");
+    assert!(!report.is_clean());
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("not a total form")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+/// §4 fails closed on the Splash surface too — a copy with no class is refused
+/// rather than trusted, which is the defect the bespoke surface shipped with.
+#[test]
+fn the_projector_refuses_copy_without_a_class() {
+    let report = project_declarations(r#"let c = copy({en: "Revenue: $41.2M"})"#);
+    assert!(!report.is_clean());
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("class")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
