@@ -2583,18 +2583,44 @@ fn retyping_between_text_and_number_is_visible() {
 fn a_contradictory_duplicate_header_field_is_rejected() {
     // Last-wins meant a card could declare what it needed and then declare the
     // truth after it: `# level: L2` followed by `# level: L0` was accepted.
+    //
+    // The FIRST value must be one that passes on its own, or this test proves
+    // nothing. An earlier version used `L2` then `L0`: the retained `L2` failed
+    // the level-vs-derived check, so the card was rejected by a different rule
+    // and the test passed even with the contradiction check disabled entirely.
+    // Mutation testing is what surfaced that.
     let report = check_ui_l0_named(
-        "dup",
-        "# ledger x@1.0.0\n# level: L2\n# level: L0\nview root Rule()",
+        "dup-profile",
+        "# ledger x@1.0.0\n# profile: ui/l0\n# profile: nonsense/v9\nview root Rule()",
     );
-    assert!(!report.valid);
+    assert!(!report.valid, "a contradictory header must be refused");
+    assert_eq!(
+        report.diagnostics.len(),
+        1,
+        "exactly one rule should fire, or this does not isolate it: {:#?}",
+        report.diagnostics
+    );
     assert!(
-        report
+        report.diagnostics[0]
+            .message
+            .contains("declares profile twice"),
+        "{:#?}",
+        report.diagnostics
+    );
+
+    // And the level form, which is the one the defect was found in.
+    let level = check_ui_l0_named(
+        "dup-level",
+        "# ledger x@1.0.0\n# level: L0\n# level: L2\nview root Rule()",
+    );
+    assert!(!level.valid);
+    assert!(
+        level
             .diagnostics
             .iter()
             .any(|d| d.message.contains("declares level twice")),
         "{:#?}",
-        report.diagnostics
+        level.diagnostics
     );
 }
 
@@ -2783,5 +2809,196 @@ fn the_reference_cards_declare_their_copy_provenance() {
     for (name, source) in [("weather", WEATHER), ("news", NEWS), ("stock", STOCK)] {
         let report = check_ui_l0_named(name, source);
         assert!(report.valid, "{name}: {:#?}", report.diagnostics);
+    }
+}
+
+// ─── rules the validator enforces that no test was holding ───────────────────
+//
+// Found by mutation-testing the validator (mutate.py): suppress one diagnostic,
+// run the suite, see whether anything goes red. These nine did not. Each was
+// enforced and unprotected — free to regress silently, which is exactly how the
+// `initial` fix ended up with a regression test that checked the wrong artifact
+// and could not fail.
+
+#[test]
+fn state_must_be_the_last_segment_of_a_path() {
+    let report = check_ui_l0_named(
+        "midstate",
+        "source now sys.weather(lat: 1.0, lon: 2.0)\nview root TextRow(text: now.$state.x)",
+    );
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("last segment")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn cycle_requires_an_enum_state() {
+    let report = check_ui_l0_named(
+        "cyclebool",
+        "state flag { shape: bool, initial: false }\n\
+         event e { flag: cycle(.a, .b) }\nview root Rule()",
+    );
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("needs an enum state")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn a_loop_over_something_that_is_not_a_collection_is_reported() {
+    // A REALIZATION diagnostic, not a validation one: whether a source's value
+    // is an array is the host's answer, not the card's declaration. Writing
+    // this against check_ui_l0 first is how I learned that.
+    let report = realize(
+        "source movers sys.movers()\nview root Panel { for x in movers key x.id { Rule() } }",
+        &serde_json::json!({"movers": 7}),
+        RealizeLimits::default(),
+    );
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("not a collection")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn a_reference_to_an_undeclared_view_is_rejected() {
+    let report = check_ui_l0_named("noview", "view root Panel { missing_view }");
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("is not a declared view")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn set_from_an_unreadable_name_is_rejected() {
+    let report = check_ui_l0_named(
+        "unreadable",
+        "state n { shape: number, initial: 0 }\n\
+         event e { n: set(nowhere.value) }\nview root Rule()",
+    );
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("not a readable name")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn an_into_on_a_component_with_only_an_anonymous_slot_is_rejected() {
+    // The complement of `an_into_naming_an_absent_slot_is_rejected`, which
+    // exercised the branch where the component DOES offer named slots. This is
+    // the other message, and it was unheld.
+    let report = check_ui_l0_named(
+        "onlyanon",
+        "component F() { view Panel { slot } }\n\
+         view root Panel { F() { into header { Rule() } } }",
+    );
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("only an anonymous slot")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn a_token_where_a_path_belongs_is_rejected() {
+    let report = check_ui_l0_named("tokpath", "view root WeatherIcon(cond: .sunny)");
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("takes a bound path")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn a_literal_where_an_event_prop_belongs_is_rejected() {
+    let report = check_ui_l0_named(
+        "litevent",
+        "component F(on_go: event) { view Panel { Row(on_tap: on_go) { Rule() } } }\n\
+         view root F(on_go: \"nope\")",
+    );
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("takes an event, not a literal")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn a_card_without_a_root_view_is_rejected() {
+    let report = check_ui_l0_named("noroot", "view sidebar Panel { Rule() }");
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("view root")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+/// The level-classified rules (`let`, `while`, arithmetic, `fn`, module access)
+/// are held by the LEVEL a card is assigned, not by their diagnostic text — so
+/// suppressing the message changes nothing and mutation testing reports them as
+/// unprotected. Assert on the level itself, which is the thing §7 actually
+/// promises: escalation is never silent.
+#[test]
+fn every_construct_outside_l0_raises_the_level() {
+    for (source, expected, what) in [
+        // L2, not L1: an imperative binding is not a pure expression, so it
+        // sits with the widget commands rather than with arithmetic.
+        ("view root Panel { }\nlet x = 1", Level::L2, "let"),
+        ("view root Panel { }\nwhile true { }", Level::L2, "while"),
+        (
+            "state n { shape: number, initial: 0 }\nview root TextStat(value: n + 1)",
+            Level::L1,
+            "arithmetic",
+        ),
+        ("view root Panel { }\nfn tick() { }", Level::L2, "fn"),
+    ] {
+        let report = check_ui_l0_named("level", source);
+        assert!(!report.valid, "{what} must not be L0-valid");
+        assert_eq!(
+            report.level, expected,
+            "{what} should classify as {expected:?}: {:#?}",
+            report.diagnostics
+        );
     }
 }

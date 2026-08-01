@@ -2245,6 +2245,18 @@ pub mod catalog {
 // ──────────────────────────────────────────────────────────────────── validation ──
 
 fn validate(card: &Card, sink: &mut Diagnostics) {
+    // A card with no `view root` has nothing to render. Realization says so,
+    // but the CHECKER accepted it — and the checker is what a host asks before
+    // storing a record, so an unusable card could be appended and only fail
+    // when someone tried to look at it.
+    if !card.views.iter().any(|v| v.name == "root") {
+        sink.push(
+            1,
+            1,
+            "a card needs a `view root`: it is the entry point a host realizes".into(),
+        );
+    }
+
     // Components must not form a cycle — profile §6, condition 1. Without this
     // an L0 realization need not terminate.
     check_component_acyclicity(card, sink);
