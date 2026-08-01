@@ -3572,10 +3572,16 @@ fn padding_cannot_hide_a_cycle_from_the_acyclicity_check() {
 /// `parse_header` returned None and the contradiction vanished with it.
 #[test]
 fn a_model_only_duplicate_header_is_still_caught() {
-    let report = check_ui_l0_named("dupmodel", "# model: first\n# model: second\nview root Rule()");
+    let report = check_ui_l0_named(
+        "dupmodel",
+        "# model: first\n# model: second\nview root Rule()",
+    );
     assert!(!report.valid, "a card names one model");
     assert!(
-        report.diagnostics.iter().any(|d| d.message.contains("model twice")),
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("model twice")),
         "{:#?}",
         report.diagnostics
     );
@@ -3610,5 +3616,9 @@ fn a_bare_enum_member_is_a_valid_default() {
         &serde_json::json!({}),
         RealizeLimits::default(),
     );
-    assert_eq!(texts(&out.root.unwrap()), vec!["c"], "the default must bind");
+    assert_eq!(
+        texts(&out.root.unwrap()),
+        vec!["c"],
+        "the default must bind"
+    );
 }

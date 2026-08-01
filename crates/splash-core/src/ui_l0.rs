@@ -132,14 +132,19 @@ pub fn parse_header(source: &str) -> Option<CardHeader> {
                         _ => header.profile = Some(value),
                     }
                 }
-                "model" => match &header.model {
-                    Some(first) if *first != value => {
-                        header.contradictions.push(format!(
-                            "the header declares the model twice, as {first:?} and {value:?}"
-                        ));
+                "model" => {
+                    // Presence counts: a header of only `model:` lines used to
+                    // return None, taking any contradiction in it along too.
+                    saw_any = true;
+                    match &header.model {
+                        Some(first) if *first != value => {
+                            header.contradictions.push(format!(
+                                "the header declares the model twice, as {first:?} and {value:?}"
+                            ));
+                        }
+                        _ => header.model = Some(value),
                     }
-                    _ => header.model = Some(value),
-                },
+                }
                 _ => {}
             }
         }
@@ -1664,11 +1669,21 @@ impl<'a> Parser<'a> {
                         let mut default = None;
                         let mut at = self.at + 3;
                         if matches!(shape, Shape::Enum(_)) {
-                            // Skip `[a, b]`.
-                            while self.tokens.get(at).is_some_and(|t| !t.is_punct("]")) {
+                            // Skip `[…]`, BALANCED. Seeking the first `]` put
+                            // the cursor wherever a bracket happened to be.
+                            let mut depth = 0usize;
+                            while let Some(t) = self.tokens.get(at) {
+                                if t.is_punct("[") {
+                                    depth += 1;
+                                } else if t.is_punct("]") {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        at += 1;
+                                        break;
+                                    }
+                                }
                                 at += 1;
                             }
-                            at += 1;
                         }
                         if self.tokens.get(at).is_some_and(|t| t.is_punct("=")) {
                             if let Some(v) = self.tokens.get(at + 1) {
@@ -1682,6 +1697,12 @@ impl<'a> Parser<'a> {
                                     }
                                     Kind::Ident if v.text == "true" || v.text == "false" => {
                                         Some(crate::JsonValue::Bool(v.text == "true"))
+                                    }
+                                    // A bare enum member: `unit: enum[c, f] = c`,
+                                    // which is how §5.2 spells it and which
+                                    // produced no default at all.
+                                    Kind::Ident if matches!(shape, Shape::Enum(_)) => {
+                                        Some(crate::JsonValue::String(v.text.clone()))
                                     }
                                     _ => None,
                                 };
@@ -2423,6 +2444,23 @@ fn validate_transitions(card: &Card, sink: &mut Diagnostics) {
     check_state_initials(&card.states, sink, 1);
     for component in &card.components {
         check_state_initials(&component.states, sink, component.line);
+        for param in &component.params {
+            let Some(default) = &param.default else {
+                continue;
+            };
+            if !value_fits_shape(&param.shape, default) {
+                sink.push(
+                    component.line,
+                    1,
+                    format!(
+                        "{}.{} declares {} but a default of {default}",
+                        component.name,
+                        param.name,
+                        shape_name(&param.shape)
+                    ),
+                );
+            }
+        }
     }
 
     // A path-valued `initial` is a rendering position by proxy: whatever it
@@ -2508,20 +2546,26 @@ fn shape_name(shape: &Shape) -> &'static str {
 /// Profile §2: a declared `initial` must fit the shape it is declared with.
 /// Neither was checked against the other, so `shape: number, initial: "oops"`
 /// mounted a string into a numeric cell before any event ran.
+/// Whether a literal agrees with the shape it was declared alongside. Shared by
+/// state initials and parameter defaults so the two cannot drift.
+fn value_fits_shape(shape: &Shape, value: &crate::JsonValue) -> bool {
+    match (shape, value) {
+        (Shape::Text, crate::JsonValue::String(_)) => true,
+        (Shape::Number, v) => v.is_number(),
+        (Shape::Bool, crate::JsonValue::Bool(_)) => true,
+        (Shape::Enum(members), crate::JsonValue::String(s)) => members.iter().any(|m| m == s),
+        // A shape that names no literal form, or one we could not classify.
+        (Shape::Record | Shape::Collection | Shape::Event | Shape::Other, _) => true,
+        _ => false,
+    }
+}
+
 fn check_state_initials(states: &[StateDecl], sink: &mut Diagnostics, line: usize) {
     for state in states {
         let Some(initial) = &state.initial else {
             continue;
         };
-        let fits = match (&state.shape, initial) {
-            (Shape::Text, crate::JsonValue::String(_)) => true,
-            (Shape::Number, v) => v.is_number(),
-            (Shape::Bool, crate::JsonValue::Bool(_)) => true,
-            (Shape::Enum(members), crate::JsonValue::String(s)) => members.iter().any(|m| m == s),
-            // A shape that names no literal form, or one we could not classify.
-            (Shape::Record | Shape::Collection | Shape::Event | Shape::Other, _) => true,
-            _ => false,
-        };
+        let fits = value_fits_shape(&state.shape, initial);
         if !fits {
             sink.push(
                 line,
