@@ -3460,3 +3460,48 @@ fn deeply_nested_predicates_do_not_overflow_the_stack() {
     let report = check_ui_l0_named("deep-pred", &source);
     assert!(!report.valid);
 }
+
+/// §5.7 says duplicate keys are an error at realization. Nothing tracked them,
+/// so two items with the same id produced IDENTICAL instance keys — one cell
+/// shared by two rows, and tapping either toggled both.
+#[test]
+fn duplicate_loop_keys_are_reported_and_do_not_share_state() {
+    const CARD: &str = "source items sys.movers()\n\
+        component R(it: record) { state n { shape: bool, initial: false } \
+          event f { n: toggle } \
+          view Col { Row(on_tap: f) { TextRow(text: it.name) } \
+                     when n { TextCaption(text: it.name) } } }\n\
+        view root Panel { for i in items key i.id { R(it: i) } }";
+
+    let data = serde_json::json!({
+        "items": [{"id": "same", "name": "A"}, {"id": "same", "name": "B"}]
+    });
+    let report = realize(CARD, &data, RealizeLimits::default());
+    assert!(
+        report.diagnostics.iter().any(|d| d.message.contains("duplicate")),
+        "a duplicate key must be reported: {:#?}",
+        report.diagnostics
+    );
+
+    let root = report.root.unwrap();
+    let mut rows = Vec::new();
+    find(&root, "Row", &mut rows);
+    assert_eq!(rows.len(), 2, "both rows still render");
+    assert_ne!(
+        rows[0].key, rows[1].key,
+        "two instances must not share one state cell"
+    );
+}
+
+/// The key expression itself was never validated: its first segment was
+/// discarded unconditionally, so `key typo.id` behaved exactly like
+/// `key item.id` — which also means changing a key does not reliably move
+/// identity, contrary to §5.1.
+#[test]
+fn a_loop_key_must_name_the_loop_binder() {
+    let report = check_ui_l0_named(
+        "badkey",
+        "source items sys.movers()\nview root Panel { for it in items key typo.id { Rule() } }",
+    );
+    assert!(!report.valid, "`typo` is not the binder `it`");
+}
