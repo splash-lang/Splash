@@ -81,12 +81,12 @@ component ForecastRow(item: record, unit: enum[c, f]) {
          Row(align: .center, on_tap: toggle) {
            TextRow(text: item.dayname, width: .day)
            WeatherIcon(cond: item.cond, size: .row)
+           TextValue(value: item.lo, unit: unit)
            TempBar(lo: item.lo, hi: item.hi, min: week.min_lo, max: week.max_hi)
            TextValue(value: item.hi, unit: unit)
          }
          when expanded {
            Row(gap: 8) {
-             TextCaption(glyph: "↓", value: item.lo, unit: unit)
              TextCaption(text: item.cond)
            }
          }
