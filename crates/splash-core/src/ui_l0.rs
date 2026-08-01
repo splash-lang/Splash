@@ -2721,6 +2721,9 @@ fn check_event_batch(
 /// depended on the host keeping an allowlist that the profile claims to make
 /// unnecessary.
 fn validate_sources(card: &Card, sink: &mut Diagnostics) {
+    // A source may read card state, other sources and copy — the same names a
+    // view may, minus anything a component introduces.
+    let scope = &Scope::card(card);
     for source in &card.sources {
         let Some(accepted) = catalog::source(&source.helper) else {
             let mut known: Vec<&str> = catalog::SOURCES.iter().map(|(n, _)| *n).collect();
@@ -2737,7 +2740,24 @@ fn validate_sources(card: &Card, sink: &mut Diagnostics) {
             );
             continue;
         };
-        for (name, _) in &source.args {
+        for (name, arg) in &source.args {
+            // The VALUE is a binding too. Checking only the argument's name let
+            // a source carry any path to the host — the helper was constrained
+            // and its arguments were not.
+            if let SourceArg::Path(path) = arg {
+                // A source addresses card state with an explicit `state.`
+                // prefix — `sys.geocode(name: state.city)` — which the view
+                // scope does not carry, since a view names its state directly.
+                match path.strip_prefix("state.") {
+                    Some(rest) => {
+                        let root = root_of(rest);
+                        if !card.states.iter().any(|st| root_of(&st.path) == root) {
+                            sink.push(source.line, 1, format!("{root:?} is not a declared state"));
+                        }
+                    }
+                    None => check_path(path, scope, source.line, 1, sink),
+                }
+            }
             if !accepted.contains(&name.as_str()) {
                 sink.push(
                     source.line,
