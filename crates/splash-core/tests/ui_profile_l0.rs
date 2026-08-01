@@ -3646,7 +3646,10 @@ fn a_transition_batch_is_atomic() {
         None,
         &serde_json::json!({"cfg": {}}),
     );
-    assert!(!applied, "a batch that cannot complete must not report success");
+    assert!(
+        !applied,
+        "a batch that cannot complete must not report success"
+    );
     assert_eq!(
         store.get("@card", "a"),
         None,
@@ -3663,7 +3666,8 @@ fn a_payload_must_fit_the_state_it_is_written_to() {
                         view root Row(on_tap: pick, value: \"x\") { Rule() }";
     let mut store = splash_core::ui_l0::InstanceStore::default();
     let payload = serde_json::json!("not a number");
-    let applied = splash_core::ui_l0::dispatch_with(CARD, &mut store, "root", "pick", Some(&payload));
+    let applied =
+        splash_core::ui_l0::dispatch_with(CARD, &mut store, "root", "pick", Some(&payload));
     assert!(!applied, "a payload of the wrong shape must be refused");
     assert_eq!(store.get("@card", "n"), None);
 }

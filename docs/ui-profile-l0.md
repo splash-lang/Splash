@@ -211,7 +211,14 @@ initial would read as a deliberate reset.
 Each is total on its declared shape and terminates in constant time. `units: cycle(c, f)`
 replaces the ternary; `expanded: toggle` replaces the negation.
 
-An event may name several transitions, applied **atomically as one batch**. A single-assignment
+An event may name several transitions, applied **atomically as one batch** — every write is
+staged and the batch commits only if all of them resolve, so a transition that cannot be
+computed leaves the store exactly as it was rather than half-applied.
+
+**A payload is checked at dispatch.** `set($value)` is the one form whose value arrives from
+outside the card, so it is the one the declared shape cannot decide statically; a payload that
+does not fit the target state is refused and the batch does not commit. Every other `set`
+spelling is decided at check time against the declared shape. A single-assignment
 rule would be wrong: production code already fires two state writes from one gesture, and the
 stock reference card's `back` does the same — clearing both `selected` and `range`.
 
@@ -258,7 +265,7 @@ argument is a structural violation, not a judgement call. It is the property tha
 |---|---|
 | A `value` argument (`TextHero`, `TextStat`, `TextValue`, `TextCaption`, `Tile`) | Must be bound. A literal — string, number or token — is refused. `TextHero(value: "34 mph")` is rejected |
 | Any `path`-kind argument (the drawing widgets) | Must be bound. `TempBar(lo: 5)` is rejected |
-| `copy.x` in any rendering position | Refused when `x` is declared `model-copy` |
+| `copy.x`, by any route | Refused when `x` is declared `model-copy` — named in a view, passed as a prop, used as a state initial, or written by a transition. A `copy.x` that is not declared at all is refused too |
 | A **raw string literal** in a `text`, `label` or `glyph` position | **Accepted** |
 
 The last row is a deliberate decision, not an oversight. A raw literal carries no declared
@@ -270,8 +277,9 @@ cards, six are `glyph` symbols (`‹ ↑ ↓ ≈`) that are closed presentation 
 language, and translating them is meaningless.
 
 So the guarantee this section provides is narrower than its first paragraph implies. **A
-fabricated number cannot reach a numeric position, and fabricated prose can reach a text
-position.** The first is the failure mode that produced the six shipped bugs this rule exists
+fabricated number cannot reach a numeric position — by any route, including laundered through
+a chain of component props — and fabricated prose can reach a text position, but only as a raw
+literal.** Text that is *declared* model-authored is refused wherever it tries to surface. The first is the failure mode that produced the six shipped bugs this rule exists
 for — an invented `condition`, an invented `wmin`/`wmax` — and it is closed. The second is open
 by choice, and would need retained provenance on every string, not a broader argument category,
 to close.

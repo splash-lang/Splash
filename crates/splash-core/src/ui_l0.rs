@@ -2494,6 +2494,7 @@ fn validate_transitions(card: &Card, sink: &mut Diagnostics) {
         &card.states,
         &card_readable,
         &card_events,
+        &card.copies,
         sink,
     );
     for component in &card.components {
@@ -2524,6 +2525,7 @@ fn validate_transitions(card: &Card, sink: &mut Diagnostics) {
             &component.states,
             &readable,
             &events,
+            &card.copies,
             sink,
         );
     }
@@ -2580,11 +2582,13 @@ fn check_state_initials(states: &[StateDecl], sink: &mut Diagnostics, line: usiz
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_event_batch(
     events: &[EventDecl],
     states: &[StateDecl],
     readable: &[String],
     event_names: &[String],
+    copies: &[CopyDecl],
     sink: &mut Diagnostics,
 ) {
     for event in events {
@@ -2684,6 +2688,30 @@ fn check_event_batch(
                     );
                 }
                 Form::Set(SetSource::Path(path)) => {
+                    // §4 travels with the value: writing model-authored text
+                    // into state renders it just as surely as naming it in a
+                    // view, one step later.
+                    if let Some(name) = path.strip_prefix("copy.") {
+                        match copies.iter().find(|c| c.name == name) {
+                            Some(decl) if decl.provenance == Provenance::ModelCopy => {
+                                sink.push(
+                                    transition.line,
+                                    transition.column,
+                                    format!(
+                                        "copy.{name} is `model-copy` and may not be written \
+                                         into state; only `vocabulary` and `user-copy` may \
+                                         (profile §4)"
+                                    ),
+                                );
+                            }
+                            None => sink.push(
+                                transition.line,
+                                transition.column,
+                                format!("copy.{name} is not declared"),
+                            ),
+                            _ => {}
+                        }
+                    }
                     let root = root_of(path);
                     if event_names.contains(&root) {
                         sink.push(
@@ -4909,22 +4937,40 @@ pub fn dispatch_with_data(
         store.reconcile_schema(component, schema);
     }
 
-    let mut applied = false;
+    // §3: a batch is applied ATOMICALLY. Writing straight to the store as we go
+    // left the earlier writes standing when a later one could not be computed —
+    // a half-applied event, which is the thing atomicity exists to prevent.
+    // Stage every write first, commit only if the whole batch resolves.
+    let mut staged: Vec<(String, crate::JsonValue)> = Vec::new();
+
     for transition in &declared.transitions {
         let Some(state) = states.iter().find(|s| s.path == transition.target) else {
-            continue;
+            return false;
         };
-        let current = store
-            .get(instance_key, &transition.target)
-            .cloned()
-            .or_else(|| state.initial.clone())
+        // The declared initial, path-valued or not. `clear` and a first `cycle`
+        // both fell back to the SHAPE default here, so a card whose initial
+        // comes from the host started in the wrong state.
+        let declared_initial = state
+            .initial
+            .clone()
+            .or_else(|| state.initial_path.as_ref().and_then(|p| data_path(data, p)));
+
+        let current = staged
+            .iter()
+            .rev()
+            .find(|(t, _)| *t == transition.target)
+            .map(|(_, v)| v.clone())
+            .or_else(|| store.get(instance_key, &transition.target).cloned())
+            .or_else(|| declared_initial.clone())
             .unwrap_or_else(|| initial_for(&state.shape));
 
         let next = match (&transition.form, &state.shape) {
             (Form::Toggle, Shape::Bool) => {
                 crate::JsonValue::Bool(!current.as_bool().unwrap_or(false))
             }
-            (Form::Clear, shape) => state.initial.clone().unwrap_or_else(|| initial_for(shape)),
+            (Form::Clear, shape) => declared_initial
+                .clone()
+                .unwrap_or_else(|| initial_for(shape)),
             (Form::Cycle, Shape::Enum(members)) if !members.is_empty() => {
                 let at = current
                     .as_str()
@@ -4934,26 +4980,37 @@ pub fn dispatch_with_data(
             }
             (Form::Set(source), _) => match source {
                 SetSource::Payload => match payload {
-                    Some(v) => v.clone(),
+                    // The one value that arrives from OUTSIDE, so it is the one
+                    // that has to be checked at runtime: every other set form is
+                    // decided against the declared shape at check time.
+                    Some(v) if value_fits_shape(&state.shape, v) => v.clone(),
+                    Some(_) => return false,
                     // No payload is a no-op rather than a silent clear: falling
                     // back to the initial would look like a deliberate reset.
-                    None => continue,
+                    None => return false,
                 },
                 // A path READS. Treating it as the payload meant
                 // `n: set(config.answer)` wrote whatever the tap carried — or
                 // nothing at all when it carried nothing.
                 SetSource::Path(p) => match data_path(data, p) {
-                    Some(v) => v,
-                    None => continue,
+                    Some(v) if value_fits_shape(&state.shape, &v) => v,
+                    // Unresolvable or ill-shaped: the batch cannot complete, and
+                    // §3 says a batch is all or nothing.
+                    _ => return false,
                 },
                 SetSource::Token(t) | SetSource::Text(t) => crate::JsonValue::String(t.clone()),
                 SetSource::Num(n) => crate::JsonValue::from(*n),
                 SetSource::Bool(b) => crate::JsonValue::Bool(*b),
             },
-            _ => continue,
+            _ => return false,
         };
-        store.set(instance_key, &transition.target, next);
-        applied = true;
+        staged.push((transition.target.clone(), next));
+    }
+
+    // Commit.
+    let applied = !staged.is_empty();
+    for (target, value) in staged {
+        store.set(instance_key, &target, value);
     }
     applied
 }
