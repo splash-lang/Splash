@@ -3415,3 +3415,48 @@ fn changing_an_initial_resets_live_component_state() {
         "a changed initial is a schema change (§5.8), so live state must reset"
     );
 }
+
+// ─── codex round four: merge blockers ────────────────────────────────────────
+
+/// A 60 KB card — well under the 256 KiB byte limit — overflowed the parser's
+/// stack and ABORTED the process. `dotted_name` recursed once per nested
+/// dynamic index with only a local guard, and predicate right-hand sides had
+/// the same shape.
+///
+/// This is a crash on untrusted input in the component whose entire purpose is
+/// accepting untrusted input, so a documented limit would not do.
+#[test]
+fn deeply_nested_paths_do_not_overflow_the_stack() {
+    for depth in [2_000, 20_000, 60_000] {
+        let source = format!(
+            "source a sys.movers()\nview root TextRow(text: {}a{})",
+            "a[".repeat(depth),
+            "]".repeat(depth)
+        );
+        assert!(
+            source.len() < 262_144,
+            "the probe must stay under the byte limit, or it proves nothing"
+        );
+        // Reaching the assertion at all is the test: an overflow aborts the
+        // whole binary rather than failing this case.
+        let report = check_ui_l0_named("deep-path", &source);
+        assert!(
+            !report.valid,
+            "nesting past the bound must be refused, not accepted"
+        );
+    }
+}
+
+/// The same shape on the other recursive path: a predicate's right-hand side.
+#[test]
+fn deeply_nested_predicates_do_not_overflow_the_stack() {
+    let depth = 20_000;
+    let source = format!(
+        "state n {{ shape: number, initial: 0 }}\nview root Col {{ when n == {}n{} {{ Rule() }} }}",
+        "n[".repeat(depth),
+        "]".repeat(depth)
+    );
+    assert!(source.len() < 262_144);
+    let report = check_ui_l0_named("deep-pred", &source);
+    assert!(!report.valid);
+}
