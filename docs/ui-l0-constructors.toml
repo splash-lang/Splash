@@ -55,9 +55,14 @@ cols = { kind = "number" }
 [Rule]
 
 # ─── text roles ───────────────────────────────────────────────────────────────
-# Seven roles, each carrying weight, size and the complete glyph fallback chain.
-# The chain is why a role is a constructor rather than a `font` argument: a
+# Seven ROLES. A role says what a piece of text is FOR; the active theme decides
+# what it looks like (profile §1.1). `TextHero` is "the one number this card
+# exists to show", not white-at-62pt — a different theme answers the same role
+# differently, and a card written today should survive that.
+#
+# A role is a constructor rather than a `font` argument for the same reason: a
 # model-authored font_family once dropped CJK coverage and rendered 上海 as tofu.
+# Naming the role lets the theme carry the whole glyph fallback chain.
 
 [TextHero]
 text   = { kind = "text" }

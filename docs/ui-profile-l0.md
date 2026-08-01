@@ -26,6 +26,47 @@ wrong in an interesting direction: **L0 has no expression form, so there is noth
 evaluate.** Realization is a pure walk over the parsed tree with data substituted. The
 reference implementation contains no reference to the VM whatsoever.
 
+### 1.1 A card names roles, not appearance
+
+**L0 decides what a thing IS. It does not decide what it looks like, and it never names a
+render backend.** `TextHero` means "the one number this card exists to show". It does not mean
+white, or 62pt, or any particular font — those are a *theme's* answer to the role, and a
+different theme answers differently.
+
+Three layers, each knowing one thing:
+
+```
+L0 card        names roles              TextHero, Panel, Chip, TempBar
+   ↓
+theme kit      role → presentation      components/<theme>/*.splash, authored as Splash DSL
+   ↓
+splash-render  DSL → UiNode             evaluated in the VM, renderer-free
+   ↓
+backend        UiNode → native          splash-makepad · Splash-OH · Splash-Android
+```
+
+A card therefore lowers to **semantic invocations of the active theme's component kit**, never
+to a backend's own widget dialect:
+
+```
+card(title)                 not   SolidView{ draw_bg.color: #0a0e14 … }
+filled_button(copy.open)    not   RoundedView{ draw_bg.color: #ffffff12 … }
+```
+
+**Why this is a rule and not a preference.** A card is a ledger record that outlives the
+device it was written on. If a card carries `#0a0e14`, then dark mode, a platform's native
+look, and any later theme are all edits to every card ever written. Roles survive that; hex
+codes do not.
+
+It also keeps the three backends honest. The branch point is `UiNode`; anything that lowers
+past it reaches one platform and silently abandons the other two.
+
+**The implementation does not yet do this.** `splash-core`'s `makepad::lower` emits makepad's
+widget dialect directly, with ten hardcoded colours and a font-size ramp — so it bypasses the
+DSL, the VM, `UiNode` and two backends, and it puts a theme inside the crate whose job is
+deciding whether a card is safe. That is a defect measured against this section, and §9 lists
+it as such.
+
 What that changes:
 
 | | Earlier claim | Actual |
@@ -683,8 +724,12 @@ All seven are now settled. What replaces them is not a shorter list of questions
 different kind of work: the profile is specified and implemented, and the remaining gaps are
 in the surrounding system rather than in the language.
 
-**Known gaps, stated plainly.** `makepad::lower` still lives in `splash-core` and belongs in a
-backend crate. `StockPlot` and `AqiContour` lower without their data arrays. L1 and L2 are
+**Known gaps, stated plainly.** `makepad::lower` violates §1.1 and does so in three ways at
+once: it lowers to a *backend dialect* rather than to the theme's component kit, it decides
+*presentation* (ten hardcoded colours, a font-size ramp) which belongs to a theme, and it
+therefore reaches one backend of three. It also defines a second `UiNode`, duplicating the one
+`splash-render` already produces. The fix is not to move it to a backend crate — it is to
+retarget it at the component kit and delete the colour table. `StockPlot` and `AqiContour` lower without their data arrays. L1 and L2 are
 specified only as "what L0 excludes" — neither is implemented, and the level classifier can
 therefore name them but not check them.
 
