@@ -1796,6 +1796,40 @@ pub mod catalog {
             .find(|(n, _)| *n == name)
             .map(|(_, a)| *a)
     }
+
+    /// The CLOSED set of helpers a `source` may name, with the arguments each
+    /// accepts. Mirrors `[sources.*]` in `docs/ui-l0-constructors.toml`.
+    ///
+    /// Without this the parser accepted any dotted name and `source_plan` handed
+    /// it to the host as the function to resolve, so
+    /// `source leak sys.shell(command: "cat /etc/passwd")` produced a clean,
+    /// well-formed request. Confinement then rested on the host keeping its own
+    /// allowlist — the policy boundary §1 claims L0 removes. A card must not be
+    /// able to NAME a capability it was not granted.
+    pub const SOURCES: &[(&str, &[&str])] = &[
+        ("sys.geocode", &["name"]),
+        (
+            "sys.weather",
+            &["lat", "lon", "days", "fields", "aggregate"],
+        ),
+        ("sys.daylight", &["lat", "lon"]),
+        ("sys.airquality", &["lat", "lon"]),
+        ("sys.moonphase", &["lat", "lon"]),
+        ("sys.photo", &["query"]),
+        ("sys.locale", &[]),
+        ("sys.news", &["count", "offset", "fields"]),
+        ("sys.news_item", &["id", "fields"]),
+        ("sys.movers", &["count", "fields"]),
+        ("sys.quote", &["ticker", "fields"]),
+        (
+            "sys.series",
+            &["ticker", "range", "points", "fields", "aggregate"],
+        ),
+    ];
+
+    pub fn source(name: &str) -> Option<&'static [&'static str]> {
+        SOURCES.iter().find(|(n, _)| *n == name).map(|(_, a)| *a)
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────── validation ──
@@ -1805,6 +1839,7 @@ fn validate(card: &Card, sink: &mut Diagnostics) {
     // an L0 realization need not terminate.
     check_component_acyclicity(card, sink);
     validate_transitions(card, sink);
+    validate_sources(card, sink);
 
     let view_names: Vec<&str> = card.views.iter().map(|v| v.name.as_str()).collect();
     let component_names: Vec<&str> = card.components.iter().map(|c| c.name.as_str()).collect();
@@ -1976,6 +2011,50 @@ fn check_event_batch(
                     ),
                 },
                 _ => {}
+            }
+        }
+    }
+}
+
+/// Profile §4: a `source` may only name a catalogued capability.
+///
+/// This is the difference between "the host refuses to run it" and "the card
+/// cannot ask". `source leak sys.shell(command: "cat /etc/passwd")` previously
+/// parsed clean and reached the host as a well-formed request; confinement then
+/// depended on the host keeping an allowlist that the profile claims to make
+/// unnecessary.
+fn validate_sources(card: &Card, sink: &mut Diagnostics) {
+    for source in &card.sources {
+        let Some(accepted) = catalog::source(&source.helper) else {
+            let mut known: Vec<&str> = catalog::SOURCES.iter().map(|(n, _)| *n).collect();
+            known.sort();
+            sink.push(
+                source.line,
+                1,
+                format!(
+                    "{:?} is not a source capability L0 admits; a card may only name a \
+                     catalogued helper (profile §4). Known: {}",
+                    source.helper,
+                    known.join(", ")
+                ),
+            );
+            continue;
+        };
+        for (name, _) in &source.args {
+            if !accepted.contains(&name.as_str()) {
+                sink.push(
+                    source.line,
+                    1,
+                    format!(
+                        "{:?} does not accept an argument named {name:?}; it accepts: {}",
+                        source.helper,
+                        if accepted.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            accepted.join(", ")
+                        }
+                    ),
+                );
             }
         }
     }
@@ -3619,11 +3698,17 @@ pub fn source_plan(source: &str) -> SourcePlan {
     };
     let card = Parser::new(&tokens, &mut sink).parse_card();
 
+    // The plan is what a host acts on, so the capability check has to happen
+    // HERE too and not only in `check_ui_l0`. A caller that skips checking must
+    // still not be handed `sys.shell` as a function to resolve.
+    validate_sources(&card, &mut sink);
+
     let declared: Vec<&str> = card.sources.iter().map(|s| s.name.as_str()).collect();
 
     let mut pending: Vec<SourceRequest> = card
         .sources
         .iter()
+        .filter(|decl| catalog::source(&decl.helper).is_some())
         .map(|decl| {
             let mut depends_on: Vec<String> = decl
                 .args

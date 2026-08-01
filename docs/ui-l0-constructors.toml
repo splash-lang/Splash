@@ -158,3 +158,57 @@ tokens  = ["money", "signed_money", "signed_pct", "compact", "ratio", "time", "d
 [kinds.width]
 accepts = ["token", "number"]
 tokens  = ["fill", "fit", "day", "rank", "temp"]
+
+# ─── source capabilities ──────────────────────────────────────────────────────
+# The CLOSED set of helpers a `source` may name. Like the constructor catalog
+# above, this is derived from the reference cards rather than invented.
+#
+# Without it, `source_plan` hands an arbitrary dotted name to the host as the
+# function to resolve, and a card can write
+#
+#     source leak sys.shell(command: "cat /etc/passwd")
+#
+# which parses clean and produces a well-formed request. Confinement then rests
+# entirely on the host having its own allowlist — the policy boundary §1 claims
+# L0 removes. A card must not be able to NAME a capability it was not granted,
+# and that is a property the profile can decide rather than delegate.
+#
+# `args` lists the argument names each helper accepts. An argument outside the
+# list is rejected: a helper that silently ignores an unknown argument is how a
+# card asks for something it did not get and renders as though it did.
+
+[sources."sys.geocode"]
+args = ["name"]
+
+[sources."sys.weather"]
+args = ["lat", "lon", "days", "fields", "aggregate"]
+
+[sources."sys.daylight"]
+args = ["lat", "lon"]
+
+[sources."sys.airquality"]
+args = ["lat", "lon"]
+
+[sources."sys.moonphase"]
+args = ["lat", "lon"]
+
+[sources."sys.photo"]
+args = ["query"]
+
+[sources."sys.locale"]
+args = []
+
+[sources."sys.news"]
+args = ["count", "offset", "fields"]
+
+[sources."sys.news_item"]
+args = ["id", "fields"]
+
+[sources."sys.movers"]
+args = ["count", "fields"]
+
+[sources."sys.quote"]
+args = ["ticker", "fields"]
+
+[sources."sys.series"]
+args = ["ticker", "range", "points", "fields", "aggregate"]

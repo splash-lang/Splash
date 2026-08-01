@@ -704,7 +704,7 @@ fn a_missing_binding_lowers_to_a_visible_dash() {
 // ────────────────────────────────────────────────────────────── instance state ──
 
 const TWO_ROWS: &str = r#"
-source items sys.list()
+source items sys.movers()
 component Rowy(item: record) {
   state open { shape: bool, initial: false }
   event flip { open: toggle }
@@ -791,7 +791,7 @@ fn a_schema_change_resets_instance_state() {
 // ─────────────────────────────────────────────────────── declared-but-missing ──
 
 const SETTER: &str = r#"
-source items sys.list()
+source items sys.movers()
 state picked { shape: text, initial: "" }
 event choose { picked: set($value) }
 event home   { picked: clear }
@@ -1093,8 +1093,9 @@ fn the_plan_orders_dependencies_before_dependents() {
 /// would fetch against a value that does not exist yet.
 #[test]
 fn a_dependency_cycle_is_reported_rather_than_resolved() {
-    let plan =
-        source_plan("source a sys.one(x: b.value)\nsource b sys.two(y: a.value)\nview root Panel");
+    let plan = source_plan(
+        "source a sys.geocode(name: b.value)\nsource b sys.photo(query: a.value)\nview root Panel",
+    );
     assert!(
         plan.diagnostics.iter().any(|d| d.message.contains("cycle")),
         "{:#?}",
@@ -1534,7 +1535,7 @@ fn an_event_cannot_trigger_another_event() {
 #[test]
 fn a_keep_cell_survives_a_schema_change() {
     const KEPT: &str = r#"
-source items sys.list()
+source items sys.movers()
 component Rowy(item: record) {
   state open { shape: bool, initial: false, keep: true }
   event flip { open: toggle }
@@ -1578,7 +1579,7 @@ view root Panel { for it in items key it.id { Rowy(item: it) } }
 #[test]
 fn keep_does_not_survive_a_change_to_that_field_itself() {
     const KEPT: &str = r#"
-source items sys.list()
+source items sys.movers()
 component Rowy(item: record) {
   state open { shape: bool, initial: false, keep: true }
   event flip { open: toggle }
@@ -1860,4 +1861,116 @@ fn sibling_instances_of_one_component_keep_separate_state() {
     let mut caps = Vec::new();
     find(&after_root, "TextCaption", &mut caps);
     assert_eq!(caps.len(), 1, "exactly one instance should be expanded");
+}
+
+// ─── §4 source capabilities are a closed set ─────────────────────────────────
+
+/// The finding that motivated this: `source_plan` handed an arbitrary dotted
+/// name to the host as the function to resolve, so a card could NAME a
+/// capability it was never granted and produce a clean, well-formed request.
+/// Confinement then rested on the host keeping its own allowlist — the policy
+/// boundary §1 claims L0 removes.
+#[test]
+fn an_uncatalogued_source_helper_is_rejected() {
+    let report = check_ui_l0_named(
+        "leak",
+        "source leak sys.shell(command: \"cat /etc/passwd\")\nview root Rule()",
+    );
+    assert!(!report.valid, "a card must not be able to name sys.shell");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("not a source capability")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn an_uncatalogued_helper_produces_no_source_request() {
+    // Belt and braces: even if a caller skips checking, the plan must not carry
+    // the request onward to a host that trusts it.
+    let plan = splash_core::ui_l0::source_plan(
+        "source leak sys.shell(command: \"cat /etc/passwd\")\nview root Rule()",
+    );
+    assert!(
+        !plan.requests.iter().any(|r| r.helper == "sys.shell"),
+        "an uncatalogued helper must not reach the host: {:?}",
+        plan.requests.iter().map(|r| &r.helper).collect::<Vec<_>>()
+    );
+    assert!(!plan.diagnostics.is_empty(), "and it must say why");
+}
+
+#[test]
+fn a_catalogued_helper_rejects_an_argument_it_does_not_accept() {
+    // A helper that silently ignores an unknown argument is how a card asks for
+    // something it did not get and renders as though it did.
+    let report = check_ui_l0_named(
+        "badarg",
+        "source w sys.weather(lat: 1.0, lon: 2.0, shell: \"rm -rf /\")\nview root Rule()",
+    );
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("does not accept an argument named")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+/// The catalog in the TOML and the one in Rust must list the same capabilities
+/// with the same arguments — in both directions, and this time actually.
+#[test]
+fn the_source_catalog_matches_the_toml_spec() {
+    const TOML: &str = include_str!("../../../docs/ui-l0-constructors.toml");
+
+    let mut documented: Vec<(String, Vec<String>)> = Vec::new();
+    let mut current: Option<String> = None;
+    for line in TOML.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("[sources.\"") {
+            current = rest.strip_suffix("\"]").map(|s| s.to_string());
+            if let Some(name) = &current {
+                documented.push((name.clone(), Vec::new()));
+            }
+        } else if line.starts_with('[') {
+            current = None;
+        } else if current.is_some() {
+            if let Some(rest) = line.strip_prefix("args = [") {
+                let args: Vec<String> = rest
+                    .trim_end_matches(']')
+                    .split(',')
+                    .map(|a| a.trim().trim_matches('"').to_string())
+                    .filter(|a| !a.is_empty())
+                    .collect();
+                documented.last_mut().unwrap().1 = args;
+            }
+        }
+    }
+
+    assert!(!documented.is_empty(), "the TOML must declare [sources.*]");
+
+    for (name, args) in &documented {
+        let implemented = catalog::source(name)
+            .unwrap_or_else(|| panic!("{name:?} is in the TOML but not in the Rust catalog"));
+        assert_eq!(
+            implemented,
+            args.as_slice(),
+            "arguments for {name:?} disagree between the TOML and Rust"
+        );
+    }
+    for (name, args) in catalog::SOURCES {
+        let (_, doc_args) = documented
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("{name:?} is in the Rust catalog but not in the TOML"));
+        assert_eq!(
+            *args,
+            doc_args.as_slice(),
+            "arguments for {name:?} disagree between Rust and the TOML"
+        );
+    }
 }
