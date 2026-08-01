@@ -1154,13 +1154,22 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if self.peek().is_some_and(|t| t.is_punct("[")) {
+                if self.depth > DEFAULT_MAX_SYNTAX_NESTING {
+                    if let Some(t) = self.peek().cloned() {
+                        self.sink.at(&t, "nesting is too deep".into());
+                    }
+                    return Some(name);
+                }
                 self.at += 1;
+                self.depth += 1;
                 // The index is itself a path and must be RETAINED, not just
                 // recognised: dropping it turned `stories[selected].title` into
                 // `stories.title`, which resolved to nothing and rendered an
                 // em dash. Held as a `[…]` segment so lookup can resolve the
                 // inner path and use its value as the key.
-                if let Some(index) = self.dotted_name() {
+                let index = self.dotted_name();
+                self.depth -= 1;
+                if let Some(index) = index {
                     name.push_str(".[");
                     name.push_str(&index);
                     name.push(']');
@@ -2003,8 +2012,14 @@ impl<'a> Parser<'a> {
                 // A comparison in argument position is a predicate operand.
                 if let Some(op) = self.peek().cloned() {
                     if op.kind == Kind::Cmp {
+                        if self.depth > DEFAULT_MAX_SYNTAX_NESTING {
+                            self.sink.at(&op, "nesting is too deep".into());
+                            return Operand::Path(path);
+                        }
                         self.at += 1;
+                        self.depth += 1;
                         let rhs = self.parse_operand();
+                        self.depth -= 1;
                         return Operand::Predicate {
                             path,
                             cmp: op.text,
