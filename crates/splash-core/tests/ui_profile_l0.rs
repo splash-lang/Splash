@@ -3622,3 +3622,76 @@ fn a_bare_enum_member_is_a_valid_default() {
         "the default must bind"
     );
 }
+
+// ─── phase 3: the three claims the spec makes and did not keep ───────────────
+
+/// §3: "an event names several transitions, applied atomically". They were
+/// applied sequentially straight to the store, so a batch that fails partway
+/// leaves the earlier writes standing — a half-applied event.
+#[test]
+fn a_transition_batch_is_atomic() {
+    const CARD: &str = "state a { shape: number, initial: 0 }\n\
+                        state b { shape: number, initial: 0 }\n\
+                        source cfg sys.movers()\n\
+                        event both { a: set(1), b: set(cfg.missing) }\n\
+                        view root Row(on_tap: both) { Rule() }";
+
+    let mut store = splash_core::ui_l0::InstanceStore::default();
+    // `cfg.missing` does not resolve, so the batch cannot complete.
+    let applied = splash_core::ui_l0::dispatch_with_data(
+        CARD,
+        &mut store,
+        "root",
+        "both",
+        None,
+        &serde_json::json!({"cfg": {}}),
+    );
+    assert!(!applied, "a batch that cannot complete must not report success");
+    assert_eq!(
+        store.get("@card", "a"),
+        None,
+        "the first write must not survive a batch that failed on the second"
+    );
+}
+
+/// §3: `set($value)` performed no shape check at dispatch, so a string payload
+/// entered a number cell — the transition type system stops at the boundary.
+#[test]
+fn a_payload_must_fit_the_state_it_is_written_to() {
+    const CARD: &str = "state n { shape: number, initial: 0 }\n\
+                        event pick { n: set($value) }\n\
+                        view root Row(on_tap: pick, value: \"x\") { Rule() }";
+    let mut store = splash_core::ui_l0::InstanceStore::default();
+    let payload = serde_json::json!("not a number");
+    let applied = splash_core::ui_l0::dispatch_with(CARD, &mut store, "root", "pick", Some(&payload));
+    assert!(!applied, "a payload of the wrong shape must be refused");
+    assert_eq!(store.get("@card", "n"), None);
+}
+
+/// §3: `clear` restores "the declared initial". It ignored a path-valued one and
+/// fell back to the shape default, and `cycle` started from the shape default
+/// too — so a card whose initial comes from the host began in the wrong state.
+#[test]
+fn clear_restores_a_path_valued_initial() {
+    const CARD: &str = "source env.locale sys.locale()\n\
+                        state units { shape: enum[c, f], initial: env.locale.temp_unit }\n\
+                        event reset { units: clear }\n\
+                        event flip { units: cycle(.c, .f) }\n\
+                        view root Row(on_tap: flip) { Rule() }";
+    let data = serde_json::json!({"env": {"locale": {"temp_unit": "f"}}});
+    let mut store = splash_core::ui_l0::InstanceStore::default();
+
+    splash_core::ui_l0::dispatch_with_data(CARD, &mut store, "root", "flip", None, &data);
+    assert_eq!(
+        store.get("@card", "units").and_then(|v| v.as_str()),
+        Some("c"),
+        "cycle must advance from the host-supplied initial `f`, not from the shape default"
+    );
+
+    splash_core::ui_l0::dispatch_with_data(CARD, &mut store, "root", "reset", None, &data);
+    assert_eq!(
+        store.get("@card", "units").and_then(|v| v.as_str()),
+        Some("f"),
+        "clear must restore the declared initial, path-valued or not"
+    );
+}
