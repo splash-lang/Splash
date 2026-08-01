@@ -2300,23 +2300,58 @@ fn validate_sources(card: &Card, sink: &mut Diagnostics) {
     }
 }
 
+/// Profile §6, condition 1: the declaration graph must be acyclic.
+///
+/// This walks COMPONENTS AND VIEWS as one graph. Walking components alone
+/// missed two shapes that both recurse forever at realization:
+///
+///     view a b        view b a          (two views referencing each other)
+///     component A { view v }  view v { A() }   (a component via a view)
+///
+/// Both passed the old check and recursed until the node cap tripped, which is
+/// a resource bound catching a structural error — and only because the caller
+/// happened to set one.
 fn check_component_acyclicity(card: &Card, sink: &mut Diagnostics) {
+    // name -> (what it references, line)
+    let mut edges: Vec<(String, Vec<String>, usize)> = Vec::new();
     for component in &card.components {
-        let mut seen = vec![component.name.as_str()];
-        let mut queue: Vec<&str> = component.instantiates.iter().map(|s| s.as_str()).collect();
+        let mut refs = component.instantiates.clone();
+        let mut views = Vec::new();
+        collect_references(&component.body, &mut views);
+        refs.extend(views);
+        edges.push((component.name.clone(), refs, component.line));
+    }
+    for view in &card.views {
+        let mut refs = Vec::new();
+        collect_constructors(&view.body, &mut refs);
+        let mut views = Vec::new();
+        collect_references(&view.body, &mut views);
+        refs.extend(views);
+        edges.push((view.name.clone(), refs, 1));
+    }
+
+    let referenced = |name: &str| -> Option<&Vec<String>> {
+        edges.iter().find(|(n, _, _)| n == name).map(|(_, r, _)| r)
+    };
+
+    for (name, _, line) in &edges {
+        let mut seen: Vec<&str> = vec![name.as_str()];
+        let mut queue: Vec<&str> = referenced(name)
+            .map(|r| r.iter().map(|s| s.as_str()).collect())
+            .unwrap_or_default();
         let mut steps = 0usize;
         while let Some(next) = queue.pop() {
             steps += 1;
             if steps > MAX_UI_L0_DECLARATIONS {
                 break;
             }
-            if next == component.name {
+            if next == name.as_str() {
                 sink.push(
-                    component.line,
+                    *line,
                     1,
                     format!(
-                        "component {:?} is recursive; L0 requires an acyclic component graph",
-                        component.name
+                        "{name:?} is recursive; L0 requires an acyclic declaration graph \
+                         (profile §6.1)"
                     ),
                 );
                 break;
@@ -2325,10 +2360,20 @@ fn check_component_acyclicity(card: &Card, sink: &mut Diagnostics) {
                 continue;
             }
             seen.push(next);
-            if let Some(c) = card.components.iter().find(|c| c.name == next) {
-                queue.extend(c.instantiates.iter().map(|s| s.as_str()));
+            if let Some(more) = referenced(next) {
+                queue.extend(more.iter().map(|s| s.as_str()));
             }
         }
+    }
+}
+
+/// Names a body SPLICES — `view` references, as distinct from component calls.
+fn collect_references(element: &Element, out: &mut Vec<String>) {
+    if element.is_reference {
+        out.push(element.name.clone());
+    }
+    for child in &element.children {
+        collect_references(child, out);
     }
 }
 
@@ -2849,6 +2894,7 @@ fn realize_inner(
     };
 
     let mut ctx = Realizer {
+        depth: 0,
         card: &card,
         limits,
         nodes: 0,
@@ -2978,6 +3024,9 @@ struct Realizer<'a> {
     card: &'a Card,
     limits: RealizeLimits,
     nodes: usize,
+    /// Actual recursion depth. Previously approximated by the instance key's
+    /// LENGTH, which bounded neither reliably.
+    depth: usize,
     truncated: bool,
     sink: &'a mut Diagnostics,
     /// Where component-local values live. Absent means every instance sees its
@@ -2999,11 +3048,22 @@ impl Realizer<'_> {
         key: &str,
         out: &mut Vec<UiNode>,
     ) {
-        if self.nodes >= self.limits.max_nodes || key.len() > self.limits.max_depth * 32 {
+        if self.nodes >= self.limits.max_nodes || self.depth >= self.limits.max_depth {
             self.truncated = true;
             return;
         }
+        self.depth += 1;
+        self.element_inner(element, scope, key, out);
+        self.depth -= 1;
+    }
 
+    fn element_inner(
+        &mut self,
+        element: &Element,
+        scope: &mut ValueScope,
+        key: &str,
+        out: &mut Vec<UiNode>,
+    ) {
         match element.name.as_str() {
             "" => {}
             "slot" => {

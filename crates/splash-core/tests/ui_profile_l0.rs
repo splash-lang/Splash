@@ -2303,3 +2303,158 @@ fn a_bound_value_is_accepted() {
     );
     assert!(report.valid, "{:#?}", report.diagnostics);
 }
+
+/// The constructor catalog compared NAMES and three token sets, so changing
+/// `TextHero.value` from `number` to `data` in the TOML left it green — and §8
+/// claimed on that basis that the two agreed "in both directions". They must
+/// agree on every ARGUMENT and its kind, which is what the checker actually
+/// consults.
+#[test]
+fn every_constructor_argument_agrees_with_the_toml() {
+    const TOML: &str = include_str!("../../../docs/ui-l0-constructors.toml");
+
+    // [Ctor] followed by `name = { kind = "…" }` lines, until the next header.
+    let mut documented: Vec<(String, Vec<(String, String)>)> = Vec::new();
+    for line in TOML.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            if !name.contains('.') && !name.starts_with("kinds") {
+                documented.push((name.to_string(), Vec::new()));
+            } else {
+                // A [kinds.*] or [sources."…"] section ends the constructor run.
+                documented.push((String::new(), Vec::new()));
+            }
+            continue;
+        }
+        let Some((arg, rest)) = line.split_once('=') else {
+            continue;
+        };
+        let Some(kind) = rest
+            .split("kind = \"")
+            .nth(1)
+            .and_then(|k| k.split('"').next())
+        else {
+            continue;
+        };
+        if let Some((name, args)) = documented.last_mut() {
+            if !name.is_empty() {
+                args.push((arg.trim().to_string(), kind.to_string()));
+            }
+        }
+    }
+    let documented: Vec<_> = documented
+        .into_iter()
+        .filter(|(n, _)| !n.is_empty())
+        .collect();
+    assert!(
+        documented.len() > 15,
+        "parsed {} constructors",
+        documented.len()
+    );
+
+    // The TOML's kind names, mapped onto what the Rust catalog stores.
+    let agrees = |kind: &str, actual: &catalog::ArgKind| -> bool {
+        use catalog::ArgKind::*;
+        match (kind, actual) {
+            ("path", Path) | ("event", Event) | ("any", Any) => true,
+            ("data", Data) | ("number", Number) | ("text", Text) | ("bool", Bool) => true,
+            ("token", Token(_)) => true,
+            ("unit", TokenOrPath(set)) => *set == catalog::UNIT,
+            ("format", Token(set)) => *set == catalog::FORMAT,
+            ("width", TokenOrPath(set)) => *set == catalog::WIDTH,
+            _ => false,
+        }
+    };
+
+    for (ctor, args) in &documented {
+        let implemented = catalog::lookup(ctor)
+            .unwrap_or_else(|| panic!("{ctor:?} is in the TOML but not in the Rust catalog"));
+        for (arg, kind) in args {
+            let (_, actual) = implemented
+                .iter()
+                .find(|(n, _)| n == arg)
+                .unwrap_or_else(|| panic!("{ctor}.{arg} is in the TOML but not in Rust"));
+            assert!(
+                agrees(kind, actual),
+                "{ctor}.{arg}: TOML says {kind:?}, Rust has {actual:?}"
+            );
+        }
+        assert_eq!(
+            implemented.len(),
+            args.len(),
+            "{ctor} has {} arguments in Rust and {} in the TOML",
+            implemented.len(),
+            args.len()
+        );
+    }
+}
+
+// ─── §6.1 the declaration graph, including views ─────────────────────────────
+
+/// Acyclicity walked components only, so two shapes recursed at realization and
+/// were caught — if at all — by the node cap, which is a resource bound
+/// standing in for a structural check.
+#[test]
+fn mutually_recursive_views_are_rejected() {
+    let report = check_ui_l0_named("mutual", "view a b\nview b a\nview root a");
+    assert!(!report.valid, "view a -> b -> a must be rejected");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("recursive")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn a_component_recursing_through_a_view_is_rejected() {
+    let report = check_ui_l0_named(
+        "via-view",
+        "component A() { view Panel { v } }\nview v Panel { A() }\nview root A()",
+    );
+    assert!(!report.valid, "A -> v -> A must be rejected");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("recursive")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn an_acyclic_view_chain_is_still_accepted() {
+    // The check must not reject ordinary splicing, which the cards rely on.
+    let report = check_ui_l0_named(
+        "chain",
+        "view leaf Rule()\nview mid Panel { leaf }\nview root Panel { mid }",
+    );
+    assert!(report.valid, "{:#?}", report.diagnostics);
+}
+
+/// Depth was approximated by the instance key's LENGTH, which bounds neither
+/// direction: a long loop key truncated a shallow tree, and short view names
+/// recursed far past max_depth. It is now an actual recursion counter.
+#[test]
+fn depth_is_counted_not_inferred_from_key_length() {
+    // A shallow tree whose keys are long must NOT truncate.
+    let long_key = "a_very_long_item_identifier_that_makes_instance_keys_lengthy";
+    let source = format!(
+        "source movers sys.movers()\nview root Panel {{ for m in movers key m.{long_key} {{ Rule() }} }}"
+    );
+    let data = serde_json::json!({
+        "movers": [{ long_key: "x".repeat(120) }, { long_key: "y".repeat(120) }]
+    });
+    let report = realize(&source, &data, RealizeLimits::default());
+    assert!(
+        !report.truncated,
+        "a shallow tree must not truncate because its keys are long"
+    );
+    let mut rules = Vec::new();
+    let root = report.root.unwrap();
+    find(&root, "Rule", &mut rules);
+    assert_eq!(rules.len(), 2, "both rows should realize");
+}
