@@ -3902,3 +3902,95 @@ fn the_projector_refuses_copy_without_a_class() {
         report.diagnostics
     );
 }
+
+// ─── views and components on the Splash surface ──────────────────────────────
+
+const VIEWS_AS_SPLASH: &str = r#"
+let feed     = source("sys.news", {count: 7, fields: ["id", "title"]})
+let selected = state("text", "")
+let open     = event({selected: set_payload()})
+
+fn StoryRow(story, position, on_open) {
+  return Col([
+    Row({align: ".center", on_tap: on_open, value: story.id}, [
+      TextRow({text: position, width: ".rank"}),
+      TextRow({text: story.title, width: ".fill"})
+    ]),
+    Rule()
+  ])
+}
+
+fn latest() {
+  return Panel([
+    each(feed, "id", StoryRow)
+  ])
+}
+
+fn root() {
+  return Surface({pad: ".page"}, [
+    when_is(selected, "", latest),
+    when_not(selected, "", latest)
+  ])
+}
+"#;
+
+#[test]
+fn views_and_components_project_from_the_splash_surface() {
+    let report = project_declarations(VIEWS_AS_SPLASH);
+    assert!(report.is_clean(), "{:#?}", report.diagnostics);
+
+    assert_eq!(report.view_names(), vec!["latest", "root"]);
+    assert_eq!(report.component_names(), vec!["StoryRow"]);
+}
+
+/// The gate that decides whether this is a second surface or a second language:
+/// the same card, written both ways, must project to the same TREE. Compared by
+/// shape rather than byte-for-byte, because spans differ whenever the formatting
+/// does — the point codex made about "byte-identical Card" not being a usable
+/// criterion.
+#[test]
+fn both_surfaces_project_the_same_tree() {
+    const BESPOKE: &str = r#"
+source feed sys.news(count: 7, fields: [id, title])
+state selected { shape: text, initial: "" }
+event open { selected: set($value) }
+
+component StoryRow(story: record, position: number, on_open: event) {
+  view Col {
+         Row(align: .center, on_tap: on_open, value: story.id) {
+           TextRow(text: position, width: .rank)
+           TextRow(text: story.title, width: .fill)
+         }
+         Rule()
+       }
+}
+
+view latest Panel {
+              for it, i in feed key it.id {
+                StoryRow(story: it, position: i, on_open: open)
+              }
+            }
+
+view root Surface(pad: .page) {
+            when selected == "" { latest }
+            when selected != "" { latest }
+          }
+"#;
+
+    let splash = project_declarations(VIEWS_AS_SPLASH);
+    assert!(splash.is_clean(), "{:#?}", splash.diagnostics);
+    let bespoke = splash_core::ui_l0::project_bespoke(BESPOKE);
+
+    for name in ["latest", "root"] {
+        assert_eq!(
+            splash.view_shape(name),
+            bespoke.view_shape(name),
+            "view {name:?} projects differently on the two surfaces"
+        );
+    }
+    assert_eq!(
+        splash.component_shape("StoryRow"),
+        bespoke.component_shape("StoryRow"),
+        "the component projects differently on the two surfaces"
+    );
+}

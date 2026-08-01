@@ -159,6 +159,20 @@ pub const MAX_UI_L0_DIAGNOSTICS: usize = 64;
 /// Maximum declarations retained from one card.
 pub const MAX_UI_L0_DECLARATIONS: usize = 1_024;
 
+/// Parse the BESPOKE surface into the same report shape the Splash surface
+/// produces, so the two can be compared without either knowing about the other.
+///
+/// Exists for the equality gate: two surfaces are a second *surface* only while
+/// they project the same tree, and a second *language* the moment they stop.
+pub fn project_bespoke(source: &str) -> splash_surface::ProjectionReport {
+    let mut sink = Diagnostics::default();
+    let card = match lex(source, &mut sink) {
+        Some(tokens) => Parser::new(&tokens, &mut sink).parse_card(),
+        None => Card::default(),
+    };
+    splash_surface::ProjectionReport::from_card(card, sink.items)
+}
+
 /// Check source against the L0 profile.
 pub fn check_ui_l0(source: &str) -> UiL0Report {
     check_ui_l0_named("card.l0", source)
@@ -4795,6 +4809,24 @@ impl InstanceStore {
 
 /// A component's state schema: its declarations, order-independent. Changing a
 /// shape, name or initial changes this; changing the view does not.
+/// A tree as `Kind(child, child)` — structure without spans, so two surfaces can
+/// be compared on the thing that matters rather than byte-for-byte. Codex made
+/// exactly this point about "byte-identical Card": spans differ whenever the
+/// formatting does, so they cannot be part of an equality test between surfaces.
+fn shape_of(e: &Element) -> String {
+    let kids: Vec<String> = e.children.iter().map(shape_of).collect();
+    let head = if e.name.is_empty() {
+        "_"
+    } else {
+        e.name.as_str()
+    };
+    if kids.is_empty() {
+        head.to_string()
+    } else {
+        format!("{head}({})", kids.join(", "))
+    }
+}
+
 fn schema_id(component: &Component) -> u64 {
     let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
     let mut fields: Vec<String> = component
@@ -5383,8 +5415,8 @@ fn collect_reads(element: &Element, reads: &mut Vec<String>, pulls: &mut Vec<Str
 /// it, the second says L0 will admit it.
 pub mod splash_surface {
     use super::{
-        lex, CopyDecl, Diagnostics, EventDecl, Provenance, Shape, SourceArg, SourceDecl, StateDecl,
-        Token,
+        collect_constructors, lex, Arg, Component, CopyDecl, Diagnostics, Element, EventDecl,
+        Operand, Param, Provenance, Shape, SourceArg, SourceDecl, StateDecl, Token, View,
     };
 
     /// What a `let` binding was recognised as.
@@ -5393,6 +5425,11 @@ pub mod splash_surface {
         State(StateDecl),
         Event(EventDecl),
         Copy(CopyDecl),
+    }
+
+    enum Declared {
+        AsView(View),
+        AsComponent(Component),
     }
 
     /// Project declarations out of Splash-shaped source.
@@ -5409,6 +5446,8 @@ pub mod splash_surface {
                 states: Vec::new(),
                 events: Vec::new(),
                 copies: Vec::new(),
+                views: Vec::new(),
+                components: Vec::new(),
                 diagnostics: sink.items,
             };
         };
@@ -5423,18 +5462,32 @@ pub mod splash_surface {
         let mut events = Vec::new();
         let mut copies = Vec::new();
 
+        let mut views = Vec::new();
+        let mut components = Vec::new();
+
         while p.at < p.t.len() {
-            if !p.eat_ident("let") {
-                p.at += 1;
+            if p.eat_ident("let") {
+                match p.let_binding() {
+                    Some(Recognised::Source(d)) => sources.push(d),
+                    Some(Recognised::State(d)) => states.push(d),
+                    Some(Recognised::Event(d)) => events.push(d),
+                    Some(Recognised::Copy(d)) => copies.push(d),
+                    None => {}
+                }
                 continue;
             }
-            match p.let_binding() {
-                Some(Recognised::Source(d)) => sources.push(d),
-                Some(Recognised::State(d)) => states.push(d),
-                Some(Recognised::Event(d)) => events.push(d),
-                Some(Recognised::Copy(d)) => copies.push(d),
-                None => {}
+            if p.eat_ident("fn") {
+                // Capitalised is a component, lowercase a view — the same
+                // convention the bespoke surface already uses (`component
+                // StoryRow`, `view stream`), so a card reads the same either way.
+                match p.function() {
+                    Some(Declared::AsView(v)) => views.push(v),
+                    Some(Declared::AsComponent(c)) => components.push(c),
+                    None => {}
+                }
+                continue;
             }
+            p.at += 1;
         }
 
         ProjectionReport {
@@ -5442,6 +5495,8 @@ pub mod splash_surface {
             states,
             events,
             copies,
+            views,
+            components,
             diagnostics: sink.items,
         }
     }
@@ -5454,10 +5509,27 @@ pub mod splash_surface {
         pub(super) states: Vec<StateDecl>,
         pub(super) events: Vec<EventDecl>,
         pub(super) copies: Vec<CopyDecl>,
+        pub(super) views: Vec<View>,
+        pub(super) components: Vec<Component>,
         pub diagnostics: Vec<super::SyntaxDiagnostic>,
     }
 
     impl ProjectionReport {
+        pub(super) fn from_card(
+            card: super::Card,
+            diagnostics: Vec<super::SyntaxDiagnostic>,
+        ) -> Self {
+            Self {
+                sources: card.sources,
+                states: card.states,
+                events: card.events,
+                copies: card.copies,
+                views: card.views,
+                components: card.components,
+                diagnostics,
+            }
+        }
+
         pub fn is_clean(&self) -> bool {
             self.diagnostics.is_empty()
         }
@@ -5475,6 +5547,26 @@ pub mod splash_surface {
         }
         pub fn copy_names(&self) -> Vec<String> {
             self.copies.iter().map(|d| d.name.clone()).collect()
+        }
+        pub fn view_names(&self) -> Vec<String> {
+            self.views.iter().map(|v| v.name.clone()).collect()
+        }
+        pub fn component_names(&self) -> Vec<String> {
+            self.components.iter().map(|c| c.name.clone()).collect()
+        }
+        /// The projected tree of a view, as `Kind(child, child)`, for tests
+        /// that must compare structure rather than eyeball it.
+        pub fn view_shape(&self, name: &str) -> Option<String> {
+            self.views
+                .iter()
+                .find(|v| v.name == name)
+                .map(|v| super::shape_of(&v.body))
+        }
+        pub fn component_shape(&self, name: &str) -> Option<String> {
+            self.components
+                .iter()
+                .find(|c| c.name == name)
+                .map(|c| super::shape_of(&c.body))
         }
     }
 
@@ -5804,6 +5896,248 @@ pub mod splash_surface {
             }
             let _ = self.eat_punct(")");
             Some(EventDecl { name, transitions })
+        }
+
+        /// `fn name() { return <element> }` — a view, or a component when the
+        /// name is capitalised and it takes parameters.
+        fn function(&mut self) -> Option<Declared> {
+            let line = self.line();
+            let name = self.ident()?;
+            let mut params = Vec::new();
+            if self.eat_punct("(") {
+                while !self.eat_punct(")") {
+                    if self.at >= self.t.len() {
+                        break;
+                    }
+                    if let Some(p) = self.ident() {
+                        // A Splash `fn` parameter carries no type, so the shape
+                        // is unknown here. The bespoke surface declares one, and
+                        // §5.2's checks depend on it — see the note in
+                        // `projection` about what this surface cannot yet say.
+                        params.push(Param {
+                            name: p,
+                            shape: Shape::Other,
+                            default: None,
+                        });
+                    } else {
+                        self.at += 1;
+                    }
+                    let _ = self.eat_punct(",");
+                }
+            }
+            if !self.eat_punct("{") {
+                self.reject(format!("`fn {name}` needs a body"));
+                return None;
+            }
+            if !self.eat_ident("return") {
+                self.reject(format!(
+                    "`fn {name}` must be a single `return <element>`; L0 admits no statements \
+                     in a view (profile §2)"
+                ));
+                return None;
+            }
+            let body = self.element()?;
+            let _ = self.eat_punct("}");
+
+            let capitalised = name.chars().next().is_some_and(|c| c.is_uppercase());
+            if capitalised {
+                let mut instantiates = Vec::new();
+                collect_constructors(&body, &mut instantiates);
+                Some(Declared::AsComponent(Component {
+                    name,
+                    params,
+                    states: Vec::new(),
+                    events: Vec::new(),
+                    body,
+                    line,
+                    instantiates,
+                }))
+            } else {
+                Some(Declared::AsView(View { name, body }))
+            }
+        }
+
+        /// An element: `Ctor({args}, [children])`, with `{args}` and
+        /// `[children]` each optional, plus the three structural forms.
+        fn element(&mut self) -> Option<Element> {
+            let line = self.line();
+            let column = self.t.get(self.at).map(|t| t.column).unwrap_or(1);
+            let name = self.ident()?;
+
+            // Structural forms first — they are recognised by name, so a card
+            // cannot reach them by accident and cannot spell them another way.
+            match name.as_str() {
+                "each" => return self.each(line, column),
+                "when_is" | "when_not" => return self.guard(&name, line, column),
+                _ => {}
+            }
+
+            if !self.eat_punct("(") {
+                // A bare name is a reference to another view.
+                return Some(Element {
+                    name,
+                    line,
+                    column,
+                    is_reference: true,
+                    ..Default::default()
+                });
+            }
+
+            let mut args = Vec::new();
+            let mut children = Vec::new();
+
+            // `{...}` arguments, then `[...]` children, in that order.
+            if self.eat_punct("{") {
+                while !self.eat_punct("}") {
+                    if self.at >= self.t.len() {
+                        break;
+                    }
+                    let aline = self.line();
+                    let acol = self.t.get(self.at).map(|t| t.column).unwrap_or(1);
+                    let Some(key) = self.ident() else {
+                        self.at += 1;
+                        continue;
+                    };
+                    if !self.eat_punct(":") {
+                        continue;
+                    }
+                    if let Some(value) = self.operand() {
+                        args.push(Arg {
+                            name: key,
+                            value,
+                            line: aline,
+                            column: acol,
+                        });
+                    }
+                    let _ = self.eat_punct(",");
+                }
+                let _ = self.eat_punct(",");
+            }
+            if self.eat_punct("[") {
+                while !self.eat_punct("]") {
+                    if self.at >= self.t.len() {
+                        break;
+                    }
+                    match self.element() {
+                        Some(child) => children.push(child),
+                        None => self.at += 1,
+                    }
+                    let _ = self.eat_punct(",");
+                }
+            }
+            let _ = self.eat_punct(")");
+
+            // A capitalised call with no catalogue entry is a component
+            // instantiation; the validator decides which, exactly as it does on
+            // the bespoke surface.
+            Some(Element {
+                name,
+                args,
+                children,
+                line,
+                column,
+                ..Default::default()
+            })
+        }
+
+        /// `each(feed, "id", StoryRow)` — collection, key field, body component.
+        fn each(&mut self, line: usize, column: usize) -> Option<Element> {
+            if !self.eat_punct("(") {
+                return None;
+            }
+            let path = self.dotted()?;
+            let _ = self.eat_punct(",");
+            let Some(key_field) = self.string() else {
+                self.reject("each names its key field as a string: each(xs, \"id\", Row)".into());
+                return None;
+            };
+            let _ = self.eat_punct(",");
+            let body = self.element()?;
+            let _ = self.eat_punct(")");
+
+            // The binder is implicit and named for the body it feeds, so a key
+            // path can be reconstructed the way the bespoke surface writes it.
+            let binder = "it".to_string();
+            Some(Element {
+                name: "for".into(),
+                args: vec![Arg {
+                    name: "collection".into(),
+                    value: Operand::Path(path),
+                    line,
+                    column,
+                }],
+                children: vec![body],
+                binders: vec![binder.clone(), "i".into()],
+                key_path: Some(format!("{binder}.{key_field}")),
+                line,
+                column,
+                ..Default::default()
+            })
+        }
+
+        /// `when_is(path, "value", child)` / `when_not(...)`
+        fn guard(&mut self, form: &str, line: usize, column: usize) -> Option<Element> {
+            if !self.eat_punct("(") {
+                return None;
+            }
+            let path = self.dotted()?;
+            let _ = self.eat_punct(",");
+            let rhs = self.operand();
+            let _ = self.eat_punct(",");
+            let child = self.element()?;
+            let _ = self.eat_punct(")");
+            Some(Element {
+                name: "when".into(),
+                args: vec![Arg {
+                    name: "predicate".into(),
+                    value: Operand::Path(path),
+                    line,
+                    column,
+                }],
+                cmp: Some(if form == "when_is" { "==" } else { "!=" }.into()),
+                rhs,
+                children: vec![child],
+                line,
+                column,
+                ..Default::default()
+            })
+        }
+
+        fn dotted(&mut self) -> Option<String> {
+            let mut path = self.ident()?;
+            while self.t.get(self.at).is_some_and(|n| n.is_punct("."))
+                && self
+                    .t
+                    .get(self.at + 1)
+                    .is_some_and(|n| n.kind == super::Kind::Ident)
+            {
+                path.push('.');
+                path.push_str(&self.t[self.at + 1].text);
+                self.at += 2;
+            }
+            Some(path)
+        }
+
+        /// An argument value. A string beginning with `.` is a TOKEN, keeping
+        /// §2.2's lexical marking on a surface whose carrier has no token form —
+        /// the identity codex flagged as lossy if both spell as plain strings.
+        fn operand(&mut self) -> Option<Operand> {
+            let t = self.t.get(self.at)?.clone();
+            match t.kind {
+                super::Kind::Str => {
+                    self.at += 1;
+                    Some(match t.text.strip_prefix('.') {
+                        Some(bare) => Operand::Token(bare.to_string()),
+                        None => Operand::Str(t.text),
+                    })
+                }
+                super::Kind::Num => {
+                    self.at += 1;
+                    Some(Operand::Num(t.text.parse().unwrap_or(0.0)))
+                }
+                super::Kind::Ident => self.dotted().map(Operand::Path),
+                _ => None,
+            }
         }
 
         /// `copy("vocabulary", {en: "pts", zh: "分"})`
