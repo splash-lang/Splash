@@ -3540,3 +3540,30 @@ fn a_source_argument_path_must_be_declared() {
         .valid
     );
 }
+
+/// The acyclicity walk counted every popped name against one budget, and
+/// `collect_constructors` yields ordinary catalog constructors, not just graph
+/// nodes. So padding a component with enough `Rule()`s exhausts the budget
+/// before the traversal reaches the recursive edge, and the card is reported
+/// acyclic — which means §6's first termination condition is not enforced.
+#[test]
+fn padding_cannot_hide_a_cycle_from_the_acyclicity_check() {
+    let padding = "Rule() ".repeat(600);
+    let source = format!(
+        "component A() {{ view Col {{ A() Panel {{ {padding} }} Panel {{ {padding} }} }} }}\n\
+         view root A()"
+    );
+    let report = check_ui_l0_named("padded", &source);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("recursive")),
+        "a recursive component must be caught however much noise surrounds it: {:#?}",
+        report
+            .diagnostics
+            .iter()
+            .map(|d| &d.message)
+            .collect::<Vec<_>>()
+    );
+}
