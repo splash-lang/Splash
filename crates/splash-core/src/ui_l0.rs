@@ -2848,8 +2848,8 @@ impl Realizer<'_> {
                     // takes the group a call site directed with `into header`.
                     let wanted = element.binders.first().cloned().unwrap_or_default();
                     if let Some((_, children)) = groups.iter().find(|(n, _)| *n == wanted) {
-                        for (i, child) in children.iter().enumerate() {
-                            self.element(child, scope, &format!("{key}/s{i}"), out);
+                        for (segment, child) in sibling_segments(children) {
+                            self.element(child, scope, &format!("{key}/s:{segment}"), out);
                         }
                     }
                     self.slots.push(groups);
@@ -2858,8 +2858,8 @@ impl Realizer<'_> {
             "for" => self.iteration(element, scope, key, out),
             "when" => {
                 if self.guard_holds(element, scope) {
-                    for (i, child) in element.children.iter().enumerate() {
-                        self.element(child, scope, &format!("{key}/w{i}"), out);
+                    for (segment, child) in sibling_segments(&element.children) {
+                        self.element(child, scope, &format!("{key}/w:{segment}"), out);
                     }
                 }
             }
@@ -3052,8 +3052,8 @@ impl Realizer<'_> {
                 bound += 1;
             }
 
-            for (i, child) in element.children.iter().enumerate() {
-                self.element(child, scope, &format!("{key}[{item_key}]/{i}"), out);
+            for (segment, child) in sibling_segments(&element.children) {
+                self.element(child, scope, &format!("{key}[{item_key}]/{segment}"), out);
             }
 
             for _ in 0..bound {
@@ -3152,6 +3152,9 @@ pub mod makepad {
     const BASE: &str = "#0a0e14";
     const SCRIM: &str = "#00000066";
     const PANEL: &str = "#ffffff12";
+    /// A selected chip. Brighter than PANEL so "which one is active" is legible
+    /// at a glance rather than a subtle tint.
+    const ACTIVE: &str = "#ffffff38";
     const HAIRLINE: &str = "#ffffff1a";
     const TEXT: &str = "#ffffff";
     const SOFT: &str = "#ffffffe6";
@@ -3165,6 +3168,29 @@ pub mod makepad {
         let _ = writeln!(out, "// name: l0-card");
         let _ = writeln!(out, "// REALIZED from an L0 ledger — do not edit.");
         element(root, 0, &mut out);
+        out
+    }
+
+    /// The tap binding for a node that declares `on_tap`.
+    ///
+    /// `UiNode` carried the event name and the instance key all along and
+    /// lowering emitted neither, so every Row, Card, Chip and TextHero rendered
+    /// inert: the stock range controls could not reach `dispatch` at all. The
+    /// key is what lets a tap name WHICH instance was hit, which is the whole
+    /// basis of §5.1 identity.
+    fn tap_binding(node: &UiNode) -> String {
+        let Some(NodeValue::Event(event)) = arg(node, "on_tap") else {
+            return String::new();
+        };
+        let mut out = format!(" l0_event: {event:?} l0_key: {:?}", node.key);
+        // `value:` is the payload the event carries — `$value` at the receiving
+        // transition. Without it a tap says "this happened" but not "to what".
+        match arg(node, "value") {
+            Some(NodeValue::Text(t)) => out.push_str(&format!(" l0_value: {t:?}")),
+            Some(NodeValue::Number(n)) => out.push_str(&format!(" l0_value: {:?}", trim_num(*n))),
+            Some(NodeValue::Token(t)) => out.push_str(&format!(" l0_value: {t:?}")),
+            _ => {}
+        }
         out
     }
 
@@ -3347,7 +3373,8 @@ pub mod makepad {
             "Row" => {
                 let _ = writeln!(
                     out,
-                    "{p}View{{ width: Fill height: Fit flow: Right align: Align{{y: 0.5}} spacing: 6"
+                    "{p}View{{ width: Fill height: Fit flow: Right align: Align{{y: 0.5}} spacing: 6{}",
+                    tap_binding(node)
                 );
                 children(node, depth, out);
                 let _ = writeln!(out, "{p}}}");
@@ -3357,7 +3384,8 @@ pub mod makepad {
                     out,
                     "{p}RoundedView{{ width: Fill height: Fit flow: Down new_batch: true \
                      draw_bg.color: {PANEL} draw_bg.border_radius: 14.0 \
-                     margin: Inset{{top: 16}} padding: Inset{{left: 14 right: 14 top: 12 bottom: 12}}"
+                     margin: Inset{{top: 16}} padding: Inset{{left: 14 right: 14 top: 12 bottom: 12}}{}",
+                    tap_binding(node)
                 );
                 children(node, depth, out);
                 let _ = writeln!(out, "{p}}}");
@@ -3453,14 +3481,21 @@ pub mod makepad {
                 let _ = writeln!(out, "{p}StockPlot{{ width: Fill height: 180 }}");
             }
             "Chip" => {
+                // `active` selects the fill. Dropping it made every range chip
+                // render identically, so a card could not show which was
+                // selected — and the golden recorded that as correct.
+                let on = matches!(arg(node, "active"), Some(NodeValue::Bool(true)));
+                let (fill, ink) = if on { (ACTIVE, TEXT) } else { (PANEL, SOFT) };
                 let _ = writeln!(
                     out,
-                    "{p}RoundedView{{ width: Fit height: Fit draw_bg.color: {PANEL} \
-                     draw_bg.border_radius: 12.0 padding: Inset{{left: 10 right: 10 top: 5 bottom: 5}}"
+                    "{p}RoundedView{{ width: Fit height: Fit draw_bg.color: {fill} \
+                     draw_bg.border_radius: 12.0 padding: Inset{{left: 10 right: 10 top: 5 bottom: 5}}\
+                     {}",
+                    tap_binding(node)
                 );
                 let _ = writeln!(
                     out,
-                    "{p}  TextCaption{{ text: {} draw_text.color: {SOFT} }}",
+                    "{p}  TextCaption{{ text: {} draw_text.color: {ink} }}",
                     text_of(arg(node, "text"))
                 );
                 let _ = writeln!(out, "{p}}}");
@@ -3510,7 +3545,8 @@ pub mod makepad {
                 };
                 let _ = writeln!(
                     out,
-                    "{p}{role}{{{width} text: {body} draw_text.color: {colour}{size} }}"
+                    "{p}{role}{{{width} text: {body} draw_text.color: {colour}{size}{} }}",
+                    tap_binding(node)
                 );
             }
             other => {

@@ -2141,3 +2141,61 @@ fn only_dollar_value_names_the_payload() {
         report.diagnostics
     );
 }
+
+// ─── the Makepad backend must carry interaction, not just appearance ─────────
+
+/// `UiNode` carried the event name and instance key all along and lowering
+/// emitted neither, so every tappable node rendered inert — the stock range
+/// controls could not reach `dispatch` at all. The cards looked right and did
+/// nothing, which no golden image could detect.
+#[test]
+fn lowering_emits_the_event_and_the_instance_key() {
+    let data = serde_json::json!({
+        "movers": [{ "ticker": "NVDA", "name": "NVIDIA", "last": 184.2,
+                     "change": 3.1, "pct": 1.7 }],
+        "quote": {}, "series": {}, "selected": "", "range": "m1",
+        "env": { "locale": {} }, "copy": { "movers": "Top Movers" }
+    });
+    let dsl = splash_core::ui_l0::makepad::lower(
+        &realize(STOCK, &data, RealizeLimits::default())
+            .root
+            .unwrap(),
+    );
+    assert!(
+        dsl.contains("l0_event: \"open_quote\""),
+        "a tappable row must carry its event"
+    );
+    assert!(
+        dsl.contains("l0_key:"),
+        "and the key naming WHICH instance was tapped"
+    );
+    assert!(
+        dsl.contains("l0_value: \"NVDA\""),
+        "and the payload, or a tap says what happened but not to what"
+    );
+}
+
+/// `active` selected nothing, so every range chip rendered identically and the
+/// card could not show which was selected.
+#[test]
+fn lowering_distinguishes_an_active_chip() {
+    let source = "state range { shape: enum[d1, w1], initial: .d1 }\n\
+                  view root Col { Chip(text: \"1D\", active: range == .d1) \
+                                  Chip(text: \"1W\", active: range == .w1) }";
+    let dsl = splash_core::ui_l0::makepad::lower(
+        &realize(source, &serde_json::json!({}), RealizeLimits::default())
+            .root
+            .unwrap(),
+    );
+    let fills: Vec<&str> = dsl
+        .lines()
+        .filter(|l| l.contains("RoundedView"))
+        .filter_map(|l| l.split("draw_bg.color: ").nth(1))
+        .filter_map(|l| l.split_whitespace().next())
+        .collect();
+    assert_eq!(fills.len(), 2, "two chips");
+    assert_ne!(
+        fills[0], fills[1],
+        "the selected chip must not look like the unselected one"
+    );
+}
