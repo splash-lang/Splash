@@ -114,10 +114,19 @@ on_tap = { kind = "event" }
 value  = { kind = "any" }
 active = { kind = "bool" }        # a predicate is a bool operand
 
-# ─── drawing widgets ──────────────────────────────────────────────────────────
+# ─── data-visualisation roles ─────────────────────────────────────────────────
 # Every argument is a path. These render live data and hold no authored values —
 # the class of bug that put an invented `condition` and invented `wmin`/`wmax`
 # into shipped cards.
+#
+# These six are BACKEND WIDGETS, not theme compositions (profile §1.1). A
+# gradient bar or a sun arc is a fragment shader parameterised by data, and
+# `splash-render` notes that a DSL node cannot carry shader source — MPSL
+# compiles at build time. So no theme file could contain one, and each backend
+# implements them, exactly as it already does for `Map`.
+#
+# The card still names only a role and its data. Colour, thickness and cap shape
+# remain the backend's, so §1.1 holds here as everywhere else.
 
 [WeatherIcon]
 cond = { kind = "path" }

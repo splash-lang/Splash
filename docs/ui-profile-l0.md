@@ -61,11 +61,45 @@ codes do not.
 It also keeps the three backends honest. The branch point is `UiNode`; anything that lowers
 past it reaches one platform and silently abandons the other two.
 
+**Some roles are a backend widget, not a theme composition.** Six of the catalogue —
+`WeatherIcon`, `TempBar`, `SunArc`, `MoonPhase`, `AqiContour`, `StockPlot` — are small data
+visualisations, and they cannot be authored in the DSL at all. `splash-render` states the
+reason plainly: *a DSL node cannot carry shader source — MPSL compiles at build time — but it
+can select a shader that was compiled.* A gradient bar or a sun arc is a fragment shader
+parameterised by data, not a composition of boxes and text, so there is no theme file that
+could contain one.
+
+They are therefore **backend widgets named semantically**, exactly as `splash-render` already
+treats `Map` — *"a real map is not a platform view here, it is a widget"* — and `Shader`,
+`Sdf`, `Fab` and `Segmented`. This is not an exception carved out for L0; it is the category
+the renderer already has.
+
+§1.1 still holds for them, and holds without apology. A card writes
+
+```
+TempBar(lo: item.lo, hi: item.hi, min: week.min_lo, max: week.max_hi)
+```
+
+which is four bound paths and no presentation whatsoever. What colour the gradient runs, how
+thick the bar is, whether its caps are rounded — every one of those stays the backend's. The
+card names a role. That role simply happens to be one only a shader can fill.
+
+**The cost, stated rather than buried:** every backend must implement all six, or a card using
+one renders blank on that platform. That is a real porting burden, and it is the strongest
+argument against admitting them. It is accepted because the alternative is worse: pre-rendering
+them to images server-side would make a live value into a fact fetched once, which is precisely
+what §4 exists to prevent. A backend that has not implemented a role should fail visibly rather
+than draw nothing.
+
 **The implementation does not yet do this.** `splash-core`'s `makepad::lower` emits makepad's
 widget dialect directly, with ten hardcoded colours and a font-size ramp — so it bypasses the
 DSL, the VM, `UiNode` and two backends, and it puts a theme inside the crate whose job is
 deciding whether a card is safe. That is a defect measured against this section, and §9 lists
 it as such.
+
+The retarget it implies is therefore a clean split rather than a judgement call: **16 roles
+lower to the theme's component kit, 6 lower to a backend widget node, and `Photo` is already an
+image.**
 
 What that changes:
 

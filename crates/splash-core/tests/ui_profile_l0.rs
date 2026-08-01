@@ -4108,3 +4108,84 @@ fn the_splash_surface_refuses_a_literal_in_a_data_position() {
     );
     assert!(!report.valid, "an authored number must not reach TempBar");
 }
+
+// ─── §1.1: a card lowers to roles, never to a backend's colours ──────────────
+
+/// The split §1.1 settles: 16 roles are satisfied by the theme's component kit,
+/// 6 are backend widgets because a fragment shader cannot be authored in the
+/// DSL, and `Photo` is an image. Pinned as a test so the retarget has a target
+/// and so the two groups cannot quietly merge.
+#[test]
+fn every_role_is_classified_for_lowering() {
+    const BACKEND_WIDGETS: &[&str] = &[
+        "WeatherIcon",
+        "TempBar",
+        "SunArc",
+        "MoonPhase",
+        "AqiContour",
+        "StockPlot",
+    ];
+    const IMAGE: &[&str] = &["Photo"];
+
+    let all: Vec<&str> = catalog::CONSTRUCTORS.iter().map(|(n, _)| *n).collect();
+    let themed: Vec<&str> = all
+        .iter()
+        .copied()
+        .filter(|n| !BACKEND_WIDGETS.contains(n) && !IMAGE.contains(n))
+        .collect();
+
+    assert_eq!(
+        themed.len() + BACKEND_WIDGETS.len() + IMAGE.len(),
+        all.len(),
+        "every catalogued role must fall in exactly one group"
+    );
+    assert_eq!(
+        BACKEND_WIDGETS.len(),
+        6,
+        "the shader-backed set is closed; adding one is a porting cost on every backend"
+    );
+
+    // A backend widget takes only bound paths. That is what keeps §1.1 true for
+    // them: the card supplies data, the backend supplies every pixel.
+    for name in BACKEND_WIDGETS {
+        let args = catalog::lookup(name).unwrap_or_else(|| panic!("{name} is not catalogued"));
+        for (arg, kind) in args {
+            assert!(
+                matches!(
+                    kind,
+                    catalog::ArgKind::Path | catalog::ArgKind::Token(_) | catalog::ArgKind::Data
+                ),
+                "{name}.{arg} must be bound data or a token, not authored presentation"
+            );
+        }
+    }
+}
+
+/// §1.1's actual prohibition, as a test rather than a paragraph: a card must
+/// have no way to state a colour, a size in pixels, or a font.
+#[test]
+fn no_role_accepts_presentation() {
+    for (ctor, args) in catalog::CONSTRUCTORS {
+        for (arg, _) in *args {
+            assert!(
+                !matches!(
+                    *arg,
+                    "color"
+                        | "colour"
+                        | "bg"
+                        | "fill"
+                        | "font"
+                        | "font_size"
+                        | "weight"
+                        | "radius"
+                        | "elevation"
+                        | "shadow"
+                        | "padding"
+                        | "margin"
+                ),
+                "{ctor}.{arg} is presentation; §1.1 says a card names roles and the theme \
+                 decides appearance"
+            );
+        }
+    }
+}
