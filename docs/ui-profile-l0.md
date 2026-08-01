@@ -296,18 +296,25 @@ instances each containing an unkeyed `Toggle` must not share one state cell.
 component type and keys both affect preservation. L0 binds to a declared path so that
 identity survives a ledger edit that inserts an element above.
 
-**"Version" here means the STATE SCHEMA version** (§5.8), not the component's whole definition.
+**Neither the card namespace nor the version is currently a key segment.** Keys begin at the
+root view and append component names; the schema id is held in a separate map keyed by component
+name. So the tuple above describes the intended identity, and the implementation covers the
+instantiation site and enclosing loop keys only. One consequence worth knowing: two cards
+sharing one store can collide, because card state lives under a single fixed key.
+
+**"Version" means the STATE SCHEMA version** (§5.8), not the component's whole definition.
 Using the definition digest would contradict §5.8 directly: a view-only edit would change
 identity and reset state, which is precisely what §5.8 promises it does not do. The two are
 different instruments — the schema id decides whether live state still fits, and the closure
 digest (§7) tells a host that a definition was replaced at all.
 
 **What path-based identity does and does not survive.** Insertion of a differently named
-sibling is stable, because siblings are numbered within each element name. Reordering two
-same-name siblings, or inserting another instance of the same component above, still moves the
-ordinals — so state follows the ordinal rather than the instance. Fully edit-stable identity
-needs a persistent site id in the source or edit provenance from the ledger; neither exists
-yet, and the numbering is an improvement on tree position rather than a solution.
+sibling is stable, because siblings are numbered within each element name. Everything else that
+changes the path changes identity: reordering two same-name siblings, inserting another
+instance of the same component above, and any change to an enclosing guard, loop, slot, view
+reference or loop key. Fully edit-stable identity needs a persistent site id in the source or
+edit provenance from the ledger; neither exists yet, and the numbering is an improvement on
+tree position rather than a solution.
 
 ### 5.2 Props
 
@@ -547,11 +554,16 @@ With all five, an L0 realization terminates. **Without them the grammar does not
 why "L0 is decidable" is a claim about authority and grammar membership, not about
 termination.
 
-Condition 4 holds **because of the transition enum and its exhaustive dispatcher**, not because
-of the syntax. `Form` has exactly four variants — `set`, `toggle`, `cycle`, `clear` — and the
-dispatcher matches all four; none has a branch that raises an event. A transition target is
-additionally validated against declared state, so an event cannot be named as a write target
-either.
+Condition 4 holds **because no admitted transition form raises an event** — `set`, `toggle`,
+`cycle` and `clear` all write a state cell and nothing else, and a transition target is
+validated against declared state, so an event cannot be named as a write target either.
+
+Stating that more carefully than an earlier draft did: `Form` carries a fifth variant,
+`NotTotal`, for anything outside those four, and the dispatcher ends in a catch-all rather than
+matching exhaustively. **So the compiler would not force a review if a variant were added.**
+The property is true of the forms that exist; it is not structurally protected. Any new `Form`
+variant must be checked against this condition by hand, and one that reads a path must exclude
+event-typed paths explicitly.
 
 An earlier version of this section claimed the stronger property that "no total form can name
 an event", which was not true: component prop *types* are discarded, so `set(out)` is accepted
@@ -588,9 +600,10 @@ view body — sorted by name. A host stores this beside the approved level. A di
 means the level was derived from a definition that no longer exists and must be re-derived
 before the card is accepted, rather than inherited from the record it no longer matches.
 
-The digest deliberately ignores declaration order, so reformatting is not a version change. A
-digest that moved on a cosmetic edit would make pinning useless in the way that matters: hosts
-would see it move constantly, and learn to ignore it.
+The digest sorts **components**, so reordering declarations at the top level is not a version
+change — a digest that moved on a cosmetic edit would make pinning useless in the way that
+matters, since hosts would see it move constantly and learn to ignore it. Order *within* a
+component is hashed, so moving a param, state or event does register as a change.
 
 **Known limits, stated so the digest is not trusted past them.** It hashes every declared
 component rather than the closure reachable from the root view, so an unused definition causes
@@ -598,8 +611,10 @@ a false repin. And it is 64-bit FNV-1a, which is a change *detector* and not an 
 boundary: it is fit for noticing that a definition moved, and unfit for resisting a chosen
 collision. Pinning is also report material — nothing in the runtime yet stores or compares it.
 
-Parameter and state *shapes* are covered as of the change that made prop shapes survive
-parsing; before that `x: number` → `x: text` was invisible to both the digest and §5.8's
+It also omits a loop's `key` expression, whether an element is a view reference, parameter
+defaults, and the bodies of views a component references — so a card can change what it renders
+without the digest moving. Parameter and state *shapes* are covered as of the change that made
+prop shapes survive parsing; before that `x: number` → `x: text` was invisible to both the digest and §5.8's
 schema id, so a live string could survive into number-shaped state.
 
 Three token tests are not sufficient and an earlier draft that used them was both incomplete

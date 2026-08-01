@@ -2576,3 +2576,111 @@ fn retyping_between_text_and_number_is_visible() {
         "retyping a prop must move the digest"
     );
 }
+
+// ─── second codex round ──────────────────────────────────────────────────────
+
+#[test]
+fn a_contradictory_duplicate_header_field_is_rejected() {
+    // Last-wins meant a card could declare what it needed and then declare the
+    // truth after it: `# level: L2` followed by `# level: L0` was accepted.
+    let report = check_ui_l0_named(
+        "dup",
+        "# ledger x@1.0.0\n# level: L2\n# level: L0\nview root Rule()",
+    );
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("declares level twice")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn a_token_in_a_data_position_is_rejected() {
+    // `Data` rejected strings and numbers and let tokens through.
+    let report = check_ui_l0_named("tok", "view root TextHero(value: .money)");
+    assert!(!report.valid);
+    assert!(
+        report.diagnostics[0].message.contains("token"),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+/// `set` wrote whatever it was given regardless of what the state could hold.
+#[test]
+fn set_must_fit_the_target_shape() {
+    for (source, expect) in [
+        (
+            "state ok { shape: bool, initial: false }\nevent e { ok: set(1) }\nview root Rule()",
+            "writes a number",
+        ),
+        (
+            "state m { shape: enum[a, b], initial: .a }\nevent e { m: set(true) }\nview root Rule()",
+            "writes a bool",
+        ),
+        (
+            "state n { shape: number, initial: 0 }\nevent e { n: set(\"x\") }\nview root Rule()",
+            "writes text",
+        ),
+        (
+            "state m { shape: enum[a, b], initial: .a }\nevent e { m: set(.c) }\nview root Rule()",
+            "not a member",
+        ),
+    ] {
+        let report = check_ui_l0_named("shape", source);
+        assert!(!report.valid, "should be rejected: {source}");
+        assert!(
+            report.diagnostics.iter().any(|d| d.message.contains(expect)),
+            "expected {expect:?}: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+/// A dotted source name registered only its ROOT, so the lifecycle of
+/// `source env.locale` could not be asked for, while `env.$state` — which names
+/// no source at all — was accepted.
+#[test]
+fn a_dotted_source_reports_its_own_lifecycle() {
+    let source = "source env.locale sys.locale()\n\
+                  view root Col { when env.locale.$state == .ready { TextRow(text: \"READY\") } \
+                                  when env.locale.$state == .pending { TextRow(text: \"WAIT\") } }";
+    assert!(check_ui_l0_named("dotted", source).valid);
+
+    let ready = realize(
+        source,
+        &serde_json::json!({"env": {"locale": {"lang": "en"}}}),
+        RealizeLimits::default(),
+    );
+    assert_eq!(texts(&ready.root.unwrap()), vec!["READY"]);
+
+    let pending = realize(source, &serde_json::json!({}), RealizeLimits::default());
+    assert_eq!(texts(&pending.root.unwrap()), vec!["WAIT"]);
+
+    let bogus = check_ui_l0_named(
+        "aggregate",
+        "source env.locale sys.locale()\nview root Col { when env.$state == .ready { Rule() } }",
+    );
+    assert!(
+        !bogus.valid,
+        "`env` names no source, so it has no lifecycle to report"
+    );
+}
+
+/// §5.8 says the schema id covers "names, shapes and initials". It hashed only
+/// path and shape, so changing an initial did not reset live state.
+#[test]
+fn changing_an_initial_changes_the_schema() {
+    let base = "component F() { state s { shape: number, initial: 0 } \
+                view Panel { TextRow(text: s) } }\nview root F()";
+    let changed = base.replace("initial: 0", "initial: 7");
+    assert_ne!(
+        check_ui_l0_named("p", base).closure,
+        check_ui_l0_named("p", &changed).closure,
+        "an initial is part of the state schema (§5.8)"
+    );
+}

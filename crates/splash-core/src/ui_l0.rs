@@ -70,6 +70,10 @@ pub struct CardHeader {
     pub level: Option<String>,
     pub profile: Option<String>,
     pub model: Option<String>,
+    /// Fields declared more than once with different values. Last-wins made
+    /// `# level: L2` followed by `# level: L0` accepted, so a card could
+    /// declare whatever it needed and then declare the truth after it.
+    pub contradictions: Vec<String>,
 }
 
 /// Read the header from the leading `#` lines, which the lexer discards.
@@ -98,11 +102,25 @@ pub fn parse_header(source: &str) -> Option<CardHeader> {
             match key.trim() {
                 "level" => {
                     saw_any = true;
-                    header.level = Some(value);
+                    match &header.level {
+                        Some(first) if *first != value => {
+                            header.contradictions.push(format!(
+                                "the header declares level twice, as {first:?} and {value:?}"
+                            ));
+                        }
+                        _ => header.level = Some(value),
+                    }
                 }
                 "profile" => {
                     saw_any = true;
-                    header.profile = Some(value);
+                    match &header.profile {
+                        Some(first) if *first != value => {
+                            header.contradictions.push(format!(
+                                "the header declares profile twice, as {first:?} and {value:?}"
+                            ));
+                        }
+                        _ => header.profile = Some(value),
+                    }
                 }
                 "model" => header.model = Some(value),
                 _ => {}
@@ -150,7 +168,12 @@ pub fn check_ui_l0_named(_name: &str, source: &str) -> UiL0Report {
     // finish, and a level diagnostic is far more useful than "unexpected token".
     if let Some((level, diag)) = classify_beyond_l0(&tokens) {
         sink.push(diag.line, diag.column, diag.message);
-        return sink.into_report(level);
+        let mut report = sink.into_report(level);
+        report.header = header.clone();
+        // Compare here too: this is the path a card that UNDER-declares its
+        // level takes, and it was the one path that skipped the comparison.
+        check_header(&header, level, &mut report);
+        return report;
     }
 
     let mut parser = Parser::new(&tokens, &mut sink);
@@ -172,6 +195,15 @@ pub fn check_ui_l0_named(_name: &str, source: &str) -> UiL0Report {
 /// decorative — which is what it was.
 fn check_header(header: &Option<CardHeader>, derived: Level, report: &mut UiL0Report) {
     let Some(header) = header else { return };
+
+    for message in &header.contradictions {
+        report.valid = false;
+        report.diagnostics.push(SyntaxDiagnostic {
+            line: 1,
+            column: 1,
+            message: message.clone(),
+        });
+    }
 
     if let Some(declared) = &header.level {
         let matches = match declared.trim() {
@@ -2232,6 +2264,20 @@ fn validate_transitions(card: &Card, sink: &mut Diagnostics) {
     }
 }
 
+/// A shape's name, for diagnostics.
+fn shape_name(shape: &Shape) -> &'static str {
+    match shape {
+        Shape::Text => "text",
+        Shape::Number => "a number",
+        Shape::Bool => "bool",
+        Shape::Enum(_) => "an enum",
+        Shape::Record => "a record",
+        Shape::Collection => "a collection",
+        Shape::Event => "an event",
+        Shape::Other => "of an unnamed shape",
+    }
+}
+
 fn check_event_batch(
     events: &[EventDecl],
     states: &[StateDecl],
@@ -2269,6 +2315,60 @@ fn check_event_batch(
                         transition.target
                     ),
                 ),
+                Form::Set(SetSource::Num(_)) if !matches!(state.shape, Shape::Number | Shape::Other) => {
+                    sink.push(
+                        transition.line,
+                        transition.column,
+                        format!(
+                            "`set` writes a number, but {:?} is {}",
+                            transition.target,
+                            shape_name(&state.shape)
+                        ),
+                    );
+                }
+                Form::Set(SetSource::Bool(_)) if !matches!(state.shape, Shape::Bool | Shape::Other) => {
+                    sink.push(
+                        transition.line,
+                        transition.column,
+                        format!(
+                            "`set` writes a bool, but {:?} is {}",
+                            transition.target,
+                            shape_name(&state.shape)
+                        ),
+                    );
+                }
+                Form::Set(SetSource::Token(t)) => {
+                    if let Shape::Enum(members) = &state.shape {
+                        if !members.iter().any(|m| m == t) {
+                            sink.push(
+                                transition.line,
+                                transition.column,
+                                format!(
+                                    ".{t} is not a member of {:?}'s enum; it accepts {}",
+                                    transition.target,
+                                    members
+                                        .iter()
+                                        .map(|m| format!(".{m}"))
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ),
+                            );
+                        }
+                    }
+                }
+                Form::Set(SetSource::Text(_))
+                    if !matches!(state.shape, Shape::Text | Shape::Other) =>
+                {
+                    sink.push(
+                        transition.line,
+                        transition.column,
+                        format!(
+                            "`set` writes text, but {:?} is {}",
+                            transition.target,
+                            shape_name(&state.shape)
+                        ),
+                    );
+                }
                 Form::Set(SetSource::Path(path)) => {
                     let root = root_of(path);
                     if event_names.contains(&root) {
@@ -2485,7 +2585,11 @@ impl Scope {
         let events = card.events.iter().map(|e| e.name.clone()).collect();
         Self {
             roots,
-            source_roots: card.sources.iter().map(|s| root_of(&s.name)).collect(),
+            // The FULL declared name, not its root. `source env.locale` answers to
+            // `env.locale.$state`; comparing against the root alone rejected that
+            // while accepting `env.$state`, which names no source and has no
+            // lifecycle to report.
+            source_roots: card.sources.iter().map(|s| s.name.clone()).collect(),
             events,
             forbidden_state: Vec::new(),
         }
@@ -2740,6 +2844,17 @@ fn check_arg(
             );
         }
         // A data position renders a fact and must be bound, not authored.
+        (Operand::Token(t), Some(Data)) => {
+            sink.push(
+                arg.line,
+                arg.column,
+                format!(
+                    "{ctor}.{} renders a value and must be bound; {t:?} is a token \
+                     (profile §4)",
+                    arg.name
+                ),
+            );
+        }
         (Operand::Str(_) | Operand::Num(_), Some(Data)) => {
             let shown = match &arg.value {
                 Operand::Num(n) => format!("{n}"),
@@ -3137,6 +3252,10 @@ impl ValueScope<'_> {
         // `<source>.$state` is the lifecycle the runtime reported. It is data
         // like any other, so a guard can branch on it without an expression.
         if let Some(source) = path.strip_suffix(".$state") {
+            // A dotted source name navigates the data, so `env.locale` looks
+            // under {env: {locale: …}} rather than for a key spelled
+            // "env.locale" — which is nowhere.
+            let resolved = data_path(self.data, source);
             let status = self
                 .data
                 .get("$status")
@@ -3145,7 +3264,7 @@ impl ValueScope<'_> {
                 .unwrap_or_else(|| {
                     // No report means: resolved if there is a value, pending if
                     // not. A host that tracks status explicitly overrides this.
-                    if self.data.get(source).is_some() {
+                    if resolved.is_some() {
                         "ready"
                     } else {
                         "pending"
@@ -4097,7 +4216,12 @@ fn schema_id(component: &Component) -> u64 {
     let mut fields: Vec<String> = component
         .states
         .iter()
-        .map(|s| format!("{}:{:?}", s.path, s.shape))
+        .map(|s| {
+            format!(
+                "{}:{:?}:{:?}:{:?}",
+                s.path, s.shape, s.initial, s.initial_path
+            )
+        })
         .collect();
     fields.sort();
     for byte in fields.join(",").bytes() {
