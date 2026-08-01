@@ -3695,3 +3695,51 @@ fn clear_restores_a_path_valued_initial() {
         "clear must restore the declared initial, path-valued or not"
     );
 }
+
+/// §4 refuses model-authored text in a rendering position. It was enforced only
+/// where an element named `copy.x` directly, so any indirection defeated it.
+/// These are the routes: through a component prop, through a prop default, and
+/// through a transition that writes it into state.
+#[test]
+fn model_copy_cannot_reach_the_screen_by_any_route() {
+    const DECL: &str = "copy claim { class: model-copy, en: \"Revenue: $41.2M\" }\n";
+
+    for (route, source) in [
+        (
+            "directly",
+            format!("{DECL}view root TextTitle(text: copy.claim)"),
+        ),
+        (
+            "through a prop",
+            format!(
+                "{DECL}component F(t: text) {{ view TextTitle(text: t) }}\n\
+                 view root F(t: copy.claim)"
+            ),
+        ),
+        (
+            "through a state initial",
+            format!(
+                "{DECL}component F() {{ state s {{ shape: text, initial: copy.claim }} \
+                 view TextTitle(text: s) }}\nview root F()"
+            ),
+        ),
+        (
+            "through a transition",
+            format!(
+                "{DECL}state s {{ shape: text, initial: \"\" }}\n\
+                 event e {{ s: set(copy.claim) }}\nview root Row(on_tap: e) {{ Rule() }}"
+            ),
+        ),
+    ] {
+        assert!(
+            !check_ui_l0_named("route", &source).valid,
+            "model-copy must not reach the screen {route}"
+        );
+    }
+
+    // Vocabulary still travels every one of those routes.
+    let ok = "copy label { class: vocabulary, en: \"Top Stories\" }\n\
+              component F(t: text) { view TextTitle(text: t) }\n\
+              view root F(t: copy.label)";
+    assert!(check_ui_l0_named("vocab", ok).valid);
+}
