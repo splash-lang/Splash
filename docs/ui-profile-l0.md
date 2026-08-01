@@ -252,6 +252,30 @@ at L0 precisely because `view` is a typed tree — a `model-copy` literal bound 
 argument is a structural violation, not a judgement call. It is the property that makes
 `"34 mph"` concatenated onto a live value unrepresentable rather than merely discouraged.
 
+**What is actually enforced, and what is not.** Both halves matter, and only one is complete:
+
+| Position | Rule |
+|---|---|
+| A `value` argument (`TextHero`, `TextStat`, `TextValue`, `TextCaption`, `Tile`) | Must be bound. A literal — string, number or token — is refused. `TextHero(value: "34 mph")` is rejected |
+| Any `path`-kind argument (the drawing widgets) | Must be bound. `TempBar(lo: 5)` is rejected |
+| `copy.x` in any rendering position | Refused when `x` is declared `model-copy` |
+| A **raw string literal** in a `text`, `label` or `glyph` position | **Accepted** |
+
+The last row is a deliberate decision, not an oversight. A raw literal carries no declared
+provenance, and by this section's own logic that makes it model-copy — so `TextTitle(text:
+"Revenue: $41.2M")` passes, and a model that simply writes the string inline is unaffected by
+the rule. Refusing it would mean every human-readable string is declared `copy`, which is a
+real ergonomic cost and buys less than it appears to: of the eleven literals in the reference
+cards, six are `glyph` symbols (`‹ ↑ ↓ ≈`) that are closed presentation vocabulary rather than
+language, and translating them is meaningless.
+
+So the guarantee this section provides is narrower than its first paragraph implies. **A
+fabricated number cannot reach a numeric position, and fabricated prose can reach a text
+position.** The first is the failure mode that produced the six shipped bugs this rule exists
+for — an invented `condition`, an invented `wmin`/`wmax` — and it is closed. The second is open
+by choice, and would need retained provenance on every string, not a broader argument category,
+to close.
+
 Implicit dependencies are declared like any other source:
 
 ```
