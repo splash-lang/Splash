@@ -682,6 +682,7 @@ fn an_unmapped_constructor_is_visible_rather_than_dropped() {
         key: "root".into(),
         args: vec![],
         children: vec![],
+        bindings: vec![],
     };
     let dsl = makepad::lower(&node);
     assert!(dsl.contains("no makepad lowering for Hologram"), "{dsl}");
@@ -897,9 +898,9 @@ fn declared_formats_are_applied_by_the_runtime() {
     let report = realize(STOCK, &data, RealizeLimits::default());
     let dsl = makepad::lower(&report.root.expect("root"));
 
+    // A format that needs the NUMBER is applied here, because it cannot be
+    // applied around a call the backend will make later.
     for (expect, why) in [
-        ("$184.20", "money gains a currency symbol and two places"),
-        ("+1.7%", "a signed percentage keeps its sign"),
         ("41.2M", "compact scales volume"),
         ("4.5T", "compact scales market cap"),
         ("58.3", "a ratio is plain"),
@@ -909,6 +910,77 @@ fn declared_formats_are_applied_by_the_runtime() {
     assert!(
         !dsl.contains("41200000"),
         "the raw number should not survive"
+    );
+
+    // A format that is a literal prefix, or that the backend already applies,
+    // survives — so these lower to a LIVE call rather than to the seeded value.
+    // The card then shows the price now, not the price when the blob was made.
+    assert!(
+        dsl.contains(r#""$" + sys.stock("NVDA", "price")"#),
+        "money should prefix a live call:\n{dsl}"
+    );
+    assert!(
+        dsl.contains(r#"sys.stock("NVDA", "changepct")"#),
+        "signed_pct is what the VM already returns, so the call stands alone:\n{dsl}"
+    );
+    // And the seeded values they replaced must be GONE, or the card would show
+    // a stale number beside a live one.
+    assert!(
+        !dsl.contains("$184.20") && !dsl.contains("+1.7%"),
+        "a live call must replace the seeded literal, not sit beside it:\n{dsl}"
+    );
+}
+
+/// The fallback is not a failure mode to be minimised — it is what keeps a
+/// wrong number off the screen.
+///
+/// `sys.stock` exposes no market cap and no P/E, and `compact`/`ratio` need the
+/// number itself. Emitting a call for those would render an em dash where a real
+/// value was available, so they stay seeded and this asserts they do.
+#[test]
+fn a_capability_the_backend_cannot_answer_keeps_its_seeded_value() {
+    let data = serde_json::json!({
+        "movers": [], "selected": "NVDA", "range": "m1", "env": {"locale":{}},
+        "quote": {"name":"NVIDIA","last":184.2,"change":3.1,"pct":1.7,"open":181.0,
+                  "high":185.6,"low":180.2,"volume":41200000.0,
+                  "mktcap":4520000000000.0,"pe":58.3},
+        "copy": {"movers":"Top Movers","open":"Open","high":"High","low":"Low",
+                 "volume":"Volume","mktcap":"Mkt Cap","pe":"P/E"}
+    });
+    let report = realize(STOCK, &data, RealizeLimits::default());
+    let dsl = makepad::lower(&report.root.expect("root"));
+
+    assert!(
+        !dsl.contains("sys.stock(\"NVDA\", \"mktcap\")") && !dsl.contains("\"pe\")"),
+        "no call may be emitted for a field the helper does not expose:\n{dsl}"
+    );
+    assert!(
+        dsl.contains("4.5T"),
+        "market cap keeps its seeded value:\n{dsl}"
+    );
+    assert!(dsl.contains("58.3"), "P/E keeps its seeded value:\n{dsl}");
+
+    // `open` is the one this test exists for. `sys.stock` ACCEPTS the key, so
+    // the mapping looked correct and the DSL was well-formed — but it resolves
+    // `regularMarketOpen`, which the Yahoo chart response does not carry, while
+    // `regularMarketDayHigh` and `…DayLow` beside it do. On device that rendered
+    // `$—` where the seeded blob held a real opening price.
+    //
+    // A helper accepting a key is not evidence it can answer it, and no unit
+    // test could have found this: it took a screenshot.
+    assert!(
+        !dsl.contains(r#"sys.stock("NVDA", "open")"#),
+        "open must not be emitted live — the field is absent upstream:\n{dsl}"
+    );
+    assert!(
+        dsl.contains("$181"),
+        "open keeps its seeded value instead:\n{dsl}"
+    );
+    // High and low DO resolve, so they must still be live — otherwise the fix
+    // for `open` could quietly have been "stop emitting calls at all".
+    assert!(
+        dsl.contains(r#"sys.stock("NVDA", "high")"#) && dsl.contains(r#"sys.stock("NVDA", "low")"#),
+        "high and low resolve upstream and must stay live:\n{dsl}"
     );
 }
 
@@ -1122,7 +1194,10 @@ fn the_plan_orders_dependencies_before_dependents() {
     let at = |name: &str| plan.requests.iter().position(|r| r.name == name).unwrap();
     assert!(at("place") < at("now"), "place must precede now");
     assert!(at("place") < at("week"), "place must precede week");
-    assert!(at("place") < at("aqi"), "place must precede aqi");
+    // `scene`, not `aqi`: the air-quality source went away when `AqiContour`
+    // began fetching its own field, and a source nothing reads is now refused.
+    // `scene` reads `place.name`, so it makes the same point.
+    assert!(at("place") < at("scene"), "place must precede scene");
 
     let now = &plan.requests[at("now")];
     assert_eq!(now.depends_on, vec!["place".to_string()]);
@@ -3566,13 +3641,14 @@ fn a_loop_key_must_name_the_loop_binder() {
 fn a_source_argument_path_must_be_declared() {
     let report = check_ui_l0_named(
         "leak-arg",
-        "source photo sys.photo(query: secrets.token)\nview root Rule()",
+        "source photo sys.photo(query: secrets.token)\nview root Photo(src: photo.url)",
     );
     assert!(!report.valid, "`secrets` is not declared");
 
     // The plan must not carry it either, for a caller that skips checking.
-    let plan =
-        splash_ui_l0::source_plan("source photo sys.photo(query: secrets.token)\nview root Rule()");
+    let plan = splash_ui_l0::source_plan(
+        "source photo sys.photo(query: secrets.token)\nview root Photo(src: photo.url)",
+    );
     assert!(
         !plan.diagnostics.is_empty(),
         "the plan must report it rather than hand the host an undeclared path"
@@ -3582,8 +3658,12 @@ fn a_source_argument_path_must_be_declared() {
     assert!(
         check_ui_l0_named(
             "ok",
+            // The view reads `place`. A source nothing reads is refused now, and
+            // this assertion proved a DECLARED argument path is accepted only by
+            // accident while the source it declared reached no view at all.
             "state city { shape: text, initial: \"\" }\n\
-             source place sys.geocode(name: city)\nview root Rule()"
+             source place sys.geocode(name: city)\n\
+             view root TextRow(text: place.name)"
         )
         .valid
     );
@@ -4123,4 +4203,152 @@ fn news_fixture() -> serde_json::Value {
         "feed": [{"id": "b", "title": "U", "author": "B", "points": 3}],
         "article": {}, "selected": "", "env": {"locale": {}}
     })
+}
+
+// ─── the three defects the state-ownership review found ──────────────────────
+// Each was recorded in §8 of the profile as "found and not fixed". These are
+// the tests that make them fixable rather than merely known.
+
+/// §5.3 keeps card state out of a component, and a name collision walks around
+/// the check: `check_path` asks `scope.knows(path)` BEFORE asking whether the
+/// path names forbidden card state, so a source with the same name satisfies
+/// the first question and the second is never reached.
+///
+/// The component ends up reading the SOURCE, which §5.3 permits — so this is
+/// not a confinement breach and card state does not leak. It is worse in a
+/// quieter way: the card says `state selected` and `source selected` and the
+/// runtime silently picks one. Two namespaces that must be disjoint are not
+/// checked for overlap at all.
+#[test]
+fn a_source_may_not_share_a_name_with_card_state() {
+    const CARD: &str = r#"
+source selected sys.locale()
+state selected { shape: text, initial: "" }
+view root TextTitle(text: selected)
+"#;
+    let report = check_ui_l0_named("t", CARD);
+    assert!(
+        !report.valid,
+        "a source and a state sharing a name must be refused:\n{:#?}",
+        report.diagnostics
+    );
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("selected")),
+        "the diagnostic must name the colliding name:\n{:#?}",
+        report.diagnostics
+    );
+}
+
+/// A declared source nothing reads is a fetch the host performs for nothing.
+///
+/// `stock.card` shipped one and no test noticed: `series` became unread the
+/// moment `StockPlot` started fetching its own data, and the card kept asking
+/// for it. On device that is a network round trip, a parse, and a cache entry
+/// per refresh, for data that reaches no pixel.
+#[test]
+fn a_source_nothing_reads_is_reported() {
+    const CARD: &str = r#"
+source used   sys.locale()
+source unused sys.movers(count: 1, fields: [ticker])
+view root TextTitle(text: used.lang)
+"#;
+    let report = check_ui_l0_named("t", CARD);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("unused")),
+        "an unread source must be reported:\n{:#?}",
+        report.diagnostics
+    );
+    assert!(
+        !report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("used.")
+                || (d.message.contains("used") && !d.message.contains("unused"))),
+        "and a source that IS read must not be:\n{:#?}",
+        report.diagnostics
+    );
+}
+
+/// §5.9's invalidation story exists in pieces that nothing joins.
+///
+/// `stale_sources` computes what a change invalidates and `source_plan` lists
+/// what to request, and both are called only from tests. `dispatch_with_data`
+/// returns a bare `bool` and discards WHICH fields it wrote — so a host holding
+/// the result cannot tell what to refetch, and the stock card's detail view
+/// works only because the test data already contains a quote it never asked
+/// for.
+#[test]
+fn a_dispatch_reports_what_it_invalidated() {
+    let data = serde_json::json!({
+        "movers": [{ "ticker": "NVDA", "name": "Nvidia", "last": 1.0, "change": 0.5, "pct": 2.0 }],
+        "quote": {}, "selected": "", "range": "m1", "env": { "locale": {} },
+        "copy": { "movers": "Top Movers" }
+    });
+    let mut store = splash_ui_l0::InstanceStore::default();
+    let outcome = splash_ui_l0::dispatch_reporting(
+        STOCK,
+        &mut store,
+        "root",
+        "open_quote",
+        Some(&serde_json::Value::String("NVDA".into())),
+        &data,
+    );
+    assert!(outcome.applied, "the event applies");
+    assert!(
+        outcome.changed.iter().any(|f| f == "selected"),
+        "it must report WHICH state it wrote: {:?}",
+        outcome.changed
+    );
+    // `quote` and `series` both take `ticker: state.selected`, so both are now
+    // stale. This is the fact a host needs and could not previously obtain.
+    assert!(
+        outcome.stale.iter().any(|s| s == "quote"),
+        "and which sources that invalidates: {:?}",
+        outcome.stale
+    );
+}
+
+/// A layout decision must measure what is DRAWN, not what is emitted.
+///
+/// The two are the same string until a value goes live, and then they diverge
+/// completely: `"$" + sys.stock("NVDA", "price")` is 33 characters of source
+/// that render as six. Sizing the hero by counting the emitted form dropped it
+/// from 40pt to 24pt and shifted the whole card up — a layout bug with no
+/// layout cause, and invisible to every test that only checked the text.
+#[test]
+fn a_hero_is_sized_by_what_it_draws_not_by_what_it_emits() {
+    let data = serde_json::json!({
+        "movers": [], "selected": "NVDA", "range": "m1", "env": {"locale":{}},
+        "quote": {"name":"NVIDIA","last":184.2,"change":3.1,"pct":1.7,"open":181.0,
+                  "high":185.6,"low":180.2,"volume":41200000.0,
+                  "mktcap":4520000000000.0,"pe":58.3},
+        "copy": {"movers":"Top Movers","open":"Open","high":"High","low":"Low",
+                 "volume":"Volume","mktcap":"Mkt Cap","pe":"P/E"}
+    });
+    let report = realize(STOCK, &data, RealizeLimits::default());
+    let dsl = makepad::lower(&report.root.expect("root"));
+
+    let hero = dsl
+        .lines()
+        .find(|l| l.contains("TextHero"))
+        .unwrap_or_else(|| panic!("no hero:\n{dsl}"));
+
+    // The hero IS live — otherwise this test would pass for the wrong reason,
+    // since a seeded hero measures its own text correctly by construction.
+    assert!(
+        hero.contains("sys.stock"),
+        "the hero must be live for this test to mean anything:\n{hero}"
+    );
+    // "$184.20" is 7 glyphs, which is the 40pt bucket. The emitted expression is
+    // 33 characters, which is the 24pt one.
+    assert!(
+        hero.contains("font_size: 40"),
+        "sized by the drawn value (7 glyphs -> 40pt), not the emitted 33:\n{hero}"
+    );
 }

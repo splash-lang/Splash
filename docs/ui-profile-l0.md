@@ -742,6 +742,58 @@ The third is not the first. Reusing its name for instance identity would put per
 into a global map keyed by whatever the kit chose, which is the collision §5.7 exists to
 prevent.
 
+### 5.11 Who answers a source
+
+A `source` declares *what the card needs*, not *who fetches it*. Two answers are
+now implemented, and the choice belongs to the backend rather than to the card:
+
+| | who fetches | when it is chosen |
+|---|---|---|
+| **Host-answered** | the host walks `source_plan` and fills a data blob | always available; the only option for a backend with no fetch of its own |
+| **Backend-answered** | lowering emits a call the backend makes itself | where the backend has a capability that answers the same question |
+
+The card is identical either way. `source quote sys.quote(ticker: state.selected)`
+followed by `quote.last` is one declaration; whether it becomes a seeded number or
+a live call is decided below the language.
+
+**Realization keeps the provenance.** `UiNode.bindings` records, per argument,
+which source a value came from and which field of it — alongside the resolved
+value, not instead of it. Without that, a backend that *could* fetch has no way
+to know it should: by the time lowering runs, `quote.last` is just a number.
+
+**A backend must fall back rather than guess.** `sys.quote` declares ten fields;
+the makepad VM's `sys.stock` answers seven of them. The rest lower to the seeded
+value, because a call the backend cannot answer renders an em dash where a real
+number was available. Three findings, each from running it on a phone:
+
+- **`open` accepts and cannot answer.** `sys.stock` takes the key and resolves
+  `regularMarketOpen`, which is absent from the upstream response while
+  `regularMarketDayHigh` and `…DayLow` beside it are present. A helper accepting
+  a key is not evidence it can answer it.
+- **Most formats do not survive.** `glyph`, `unit` and `suffix` are literals that
+  concatenate around a call. A `format` mostly is not: `money` is a `"$"` prefix
+  and `signed_pct` is what the VM already returns, but `signed_money` puts the
+  sign outside the currency symbol and `compact` and `ratio` need the number
+  itself. Those keep the seeded value.
+- **Anything that measures text must measure what is DRAWN.** Emitted and drawn
+  text are the same string until a value goes live, and then they diverge
+  completely — `"$" + sys.stock("NVDA", "price")` is 33 characters that render as
+  six. Sizing the hero by the emitted form dropped it from 40pt to 24pt and
+  shifted the whole card up: a layout bug with no layout cause.
+
+**A live card cannot be asserted by a whole-screen golden**, and the device
+harness now says so per case. Where values are live the comparison is restricted
+to a band that is still deterministic, and everything outside it is checked only
+for having rendered. That is weaker than the old golden and true, where the old
+golden would have been stronger and false — it would have been asserting a share
+price.
+
+**What this costs.** `source_plan` and its dependency ordering have no consumer
+on a backend that answers its own sources, and the translation table between L0's
+capability names and a backend's helper names lives in that backend's lowering.
+Both are the price of reaching live data without a second fetch layer, and both
+are recorded here rather than discovered later.
+
 ---
 
 ## 6. What makes L0 terminate
@@ -867,19 +919,34 @@ An earlier version of this paragraph said `StockPlot` and `AqiContour` "lower wi
 arrays". They have no data arrays: both name what to plot and fetch it themselves, and the
 catalog claiming otherwise was the defect.
 
-**Three defects found by reviewing §5.10, not yet fixed.** Each is a checker gap rather than a
-language question:
+**Three defects found by reviewing §5.10, now fixed.** Each was a checker gap rather than a
+language question, and each is held by a mutation rule:
 
-- **A `source` and a card `state` may share a name**, and nothing rejects the collision. The
-  component then reads the source — §5.3 is not violated and card state does not leak — but
-  silent shadowing is not a defensible way to resolve two namespaces that should be disjoint.
-- **A declared source that nothing reads is not reported.** `stock.card` shipped one: `series`
-  became unread when `StockPlot` started fetching its own, and no test noticed. An unread source
-  is a fetch the host performs for nothing.
-- **Nothing connects a state write to a refetch.** `stale_sources` computes what a change
-  invalidates and `source_plan` lists what to request; both are called only from tests.
-  `dispatch_with_data` returns a bare `bool` and discards which fields changed. The pieces of
-  §5.9's invalidation story exist and are individually tested; the loop between them does not.
+- **A `source` and a card `state` sharing a name is refused.** The component would have read the
+  source — §5.3 was not violated and card state did not leak — but which of the two a name
+  resolves to depended on lookup order rather than on anything the card said.
+- **A declared source that nothing reads is refused.** An unread source is a fetch the host
+  performs on every refresh for data that reaches no pixel. Two shipped in the reference cards
+  and no test noticed: `series` and `aqi` both went unread the moment `StockPlot` and
+  `AqiContour` began fetching their own data. Both are now gone from the cards.
+
+  One implicit read has to be counted or this rejects correct cards: resolving `copy.x` looks up
+  `env.locale.lang` to choose a translation, and no path in the card names it. A purely syntactic
+  scan calls `env.locale` dead on every card with copy and no other locale binding — which was
+  two of the three reference cards.
+
+- **A state write reports what it invalidated.** `dispatch_reporting` returns a `DispatchOutcome`
+  — what applied, which state paths were written, and which sources those writes made stale,
+  following the cascade. The pieces existed (`stale_sources`, `source_plan`) and nothing joined
+  them, so a host holding `true` could not tell what to refetch. `dispatch_with_data` keeps its
+  `bool` for callers that do not need the answer.
+
+**Fixing the second one exposed a test that passed for the wrong reason**, which is the more
+useful finding. `a_source_argument_path_must_be_declared` rejected a card carrying an undeclared
+path in a source argument — and its fixture ended `view root Rule()`, so the source went unread.
+Once unread sources were refused, the card was rejected for *that* instead, and the test passed
+with the rule it exists to protect switched off. The mutation harness reported it as unprotected
+the moment the new rule landed.
 
 Component contracts were question 1 and are now specified in §5.2–§5.8, validated by adding
 components to two reference cards. That exercise produced amendment #9, which nothing had

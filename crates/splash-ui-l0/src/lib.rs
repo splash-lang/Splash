@@ -2826,6 +2826,91 @@ fn check_event_batch(
 /// depended on the host keeping an allowlist that the profile claims to make
 /// unnecessary.
 fn validate_sources(card: &Card, sink: &mut Diagnostics) {
+    // A source name and a card state name must be disjoint.
+    //
+    // §5.3 forbids a component from reading card state, and a collision walks
+    // around the check: `check_path` asks whether the scope KNOWS a path before
+    // asking whether it names forbidden state, so a source with the same name
+    // answers the first question and the second is never reached. What the
+    // component then reads is the SOURCE, which §5.3 permits — so nothing leaks
+    // — but the card says two things and the runtime silently picks one, which
+    // is not a defensible way to resolve two namespaces that must not overlap.
+    for state in &card.states {
+        if let Some(source) = card.sources.iter().find(|s| s.name == state.path) {
+            sink.push(
+                source.line,
+                1,
+                format!(
+                    "{:?} is declared as both a source and card state. The two \
+                     namespaces must be disjoint: a component may read a source \
+                     but not card state (profile §5.3), so a shared name makes \
+                     which one is read depend on lookup order rather than on \
+                     anything the card says. Rename one",
+                    state.path
+                ),
+            );
+        }
+    }
+
+    // A declared source nothing reads is a fetch performed for nothing.
+    //
+    // `stock.card` shipped one: `series` went unread the moment `StockPlot`
+    // began fetching its own data, and no test noticed. On device that is a
+    // round trip, a parse and a cache entry per refresh, for data that reaches
+    // no pixel.
+    let mut read: std::collections::BTreeSet<String> = Default::default();
+    let harvest = |element: &Element, read: &mut std::collections::BTreeSet<String>| {
+        let (mut reads, mut pulls) = (Vec::new(), Vec::new());
+        collect_reads(element, &mut reads, &mut pulls);
+        read.extend(reads.iter().map(root_of));
+        read.extend(pulls.iter().map(root_of));
+    };
+    for view in &card.views {
+        harvest(&view.body, &mut read);
+    }
+    for component in &card.components {
+        harvest(&component.body, &mut read);
+    }
+    // A source read by another source counts: `sys.weather(lat: place.lat)`
+    // makes `place` needed even though no view names it.
+    for source in &card.sources {
+        for (_, arg) in &source.args {
+            if let SourceArg::Path(path) = arg {
+                read.insert(root_of(path));
+            }
+        }
+    }
+    // So does a state whose initial resolves from one.
+    for state in &card.states {
+        if let Some(path) = &state.initial_path {
+            read.insert(root_of(path));
+        }
+    }
+    // And a `copy` declaration reads the locale IMPLICITLY: resolving `copy.x`
+    // looks up `env.locale.lang` to choose which translation to render. No path
+    // in the card names it, so a purely syntactic scan calls `env.locale` dead
+    // on every card that has copy but no other locale-dependent binding — which
+    // is two of the three reference cards.
+    if !card.copies.is_empty() {
+        read.insert("env".to_owned());
+        read.insert("env.locale".to_owned());
+    }
+    for source in &card.sources {
+        // A dotted source name (`env.locale`) is read as its own root.
+        if !read.contains(&source.name) && !read.contains(&root_of(&source.name)) {
+            sink.push(
+                source.line,
+                2,
+                format!(
+                    "source {:?} is declared and never read. The host fetches it \
+                     on every refresh and nothing displays it — either bind it \
+                     somewhere or remove the declaration",
+                    source.name
+                ),
+            );
+        }
+    }
+
     // A source may read card state, other sources and copy — the same names a
     // view may, minus anything a component introduces.
     let scope = &Scope::card(card);
@@ -3643,6 +3728,34 @@ pub struct UiNode {
     pub key: String,
     pub args: Vec<(String, NodeValue)>,
     pub children: Vec<UiNode>,
+    /// For each argument whose value came from a `source`, WHICH source and
+    /// which field of it — alongside the resolved value in `args`, not instead
+    /// of it.
+    ///
+    /// Realization resolves `quote.last` against the data blob and produces a
+    /// number, at which point nothing downstream can tell that number came from
+    /// a fetch. A backend that can fetch for itself needs to know, so it can
+    /// emit a live call rather than bake in whatever the blob happened to hold.
+    /// Additive on purpose: a consumer that ignores this sees exactly what it
+    /// saw before.
+    pub bindings: Vec<(String, SourceBinding)>,
+}
+
+/// Where an argument's value came from, with the source's own arguments already
+/// resolved.
+///
+/// The arguments are RESOLVED, not paths: `sys.quote(ticker: state.selected)`
+/// records `ticker = "NVDA"`, because the state is known at realization and the
+/// backend emitting the call has no way to look it up.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceBinding {
+    /// The capability the card named — `sys.quote`.
+    pub helper: String,
+    /// Its arguments, resolved to values.
+    pub args: Vec<(String, String)>,
+    /// The path WITHIN the source's result: `last` for `quote.last`, empty when
+    /// the source itself is named.
+    pub field: String,
 }
 
 /// A resolved argument value.
@@ -4022,9 +4135,15 @@ impl Realizer<'_> {
             key: key.to_string(),
             args: Vec::new(),
             children: Vec::new(),
+            bindings: Vec::new(),
         };
         for arg in &element.args {
             let value = self.value(&element.name, &arg.name, &arg.value, scope);
+            if let Operand::Path(path) = &arg.value {
+                if let Some(binding) = self.source_binding(path, scope) {
+                    node.bindings.push((arg.name.clone(), binding));
+                }
+            }
             node.args.push((arg.name.clone(), value));
         }
         for (segment, child) in sibling_segments(&element.children) {
@@ -4235,6 +4354,51 @@ impl Realizer<'_> {
         compare(left, cmp, right)
     }
 
+    /// If `path` roots at a declared source, what it would take to fetch.
+    ///
+    /// A source's own arguments are resolved here rather than passed through as
+    /// paths: `sys.quote(ticker: state.selected)` becomes `ticker = "NVDA"`,
+    /// because the state is known now and a backend emitting the call has no way
+    /// to look it up. An argument that cannot be resolved drops the binding
+    /// entirely — a fetch with a hole in it is worse than no fetch, since it
+    /// would silently request the wrong thing.
+    fn source_binding(&self, path: &str, scope: &ValueScope) -> Option<SourceBinding> {
+        // `env.locale.lang` roots at the source `env.locale`, not at `env`, so
+        // match the LONGEST declared name that prefixes the path.
+        let declaration = self
+            .card
+            .sources
+            .iter()
+            .filter(|s| path == s.name || path.starts_with(&format!("{}.", s.name)))
+            .max_by_key(|s| s.name.len())?;
+
+        let mut args = Vec::new();
+        for (name, arg) in &declaration.args {
+            let resolved = match arg {
+                SourceArg::Path(p) => {
+                    // `state.x` in a source argument addresses card state; the
+                    // view scope names it without the prefix.
+                    let looked_up = scope.lookup(p.strip_prefix("state.").unwrap_or(p))?;
+                    json_to_key(&looked_up)
+                }
+                SourceArg::Text(t) => t.clone(),
+                SourceArg::Number(n) => makepad::trim_num(*n),
+                // A field list is structural, not a value the backend passes on.
+                SourceArg::List(_) => continue,
+            };
+            args.push((name.clone(), resolved));
+        }
+        Some(SourceBinding {
+            helper: declaration.helper.clone(),
+            args,
+            field: path
+                .strip_prefix(&declaration.name)
+                .unwrap_or_default()
+                .trim_start_matches('.')
+                .to_string(),
+        })
+    }
+
     fn value(
         &mut self,
         ctor: &str,
@@ -4299,7 +4463,7 @@ fn json_to_key(value: &serde_json::Value) -> String {
 /// discipline holding — the card declares questions, and only the *realized
 /// output* contains answers.
 pub mod makepad {
-    use super::{NodeValue, UiNode};
+    use super::{NodeValue, SourceBinding, UiNode};
     use std::fmt::Write as _;
 
     // Matching octos-one's `plan/common.rs`, so a lowered card sits beside the
@@ -4356,6 +4520,71 @@ pub mod makepad {
     /// A value in text position. `Missing` becomes an em dash rather than an
     /// empty string, so an unresolved binding is visible on screen instead of
     /// silently rendering a blank field.
+    /// What to emit for an argument: a LIVE call where the backend can answer
+    /// the source itself, the realized literal otherwise.
+    ///
+    /// This is the difference between a card that shows whatever the host
+    /// happened to seed and one that shows what is true now. Realization already
+    /// resolved the value; `bindings` records where it came from, so a backend
+    /// with its own fetch can go and get it instead.
+    ///
+    /// Falling back is not a failure mode to be minimised — `sys.quote` exposes
+    /// no market cap or P/E, so those two lower to the seeded value and always
+    /// will. Emitting a call the VM cannot answer would render an em dash where
+    /// a real number was available.
+    fn expr_of(node: &UiNode, arg_name: &str) -> String {
+        if let Some((_, binding)) = node.bindings.iter().find(|(n, _)| n == arg_name) {
+            if let Some(call) = vm_call(binding) {
+                return call;
+            }
+        }
+        text_of(arg(node, arg_name))
+    }
+
+    /// The VM helper that answers a declared capability, if one does.
+    ///
+    /// The names differ because the two vocabularies were designed apart: L0
+    /// says `sys.quote(ticker:)` and the VM says `sys.stock(symbol, key)`. This
+    /// table is the whole of the translation, and a helper or field missing from
+    /// it means the seeded value is used — never a wrong call.
+    fn vm_call(binding: &SourceBinding) -> Option<String> {
+        let arg = |name: &str| {
+            binding
+                .args
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.clone())
+        };
+        match binding.helper.as_str() {
+            "sys.quote" => {
+                let symbol = arg("ticker")?;
+                // What this helper can actually answer, verified against a live
+                // response rather than against its documentation.
+                //
+                // `open` is NOT here even though `sys.stock` accepts it: it
+                // resolves `regularMarketOpen`, and that key is absent from the
+                // Yahoo chart response while `regularMarketDayHigh`, `…DayLow`,
+                // `regularMarketPrice` and `chartPreviousClose` are all present.
+                // Emitting the call rendered `$—` on device where the seeded blob
+                // held a real opening price. Market cap and P/E are absent from
+                // the helper outright.
+                //
+                // This is the case the fallback exists for, and it took putting
+                // it on a phone to find — the DSL was well-formed and the unit
+                // tests were green.
+                let key = match binding.field.as_str() {
+                    "last" => "price",
+                    "pct" => "changepct",
+                    "volume" => "vol",
+                    f @ ("name" | "change" | "high" | "low") => f,
+                    _ => return None,
+                };
+                Some(format!("sys.stock({symbol:?}, {key:?})"))
+            }
+            _ => None,
+        }
+    }
+
     fn text_of(value: Option<&NodeValue>) -> String {
         match value {
             Some(NodeValue::Text(s)) => format!("{s:?}"),
@@ -4426,28 +4655,72 @@ pub mod makepad {
     /// A value plus its unit suffix, which is a presentation concern the runtime
     /// owns — the card never wrote "°" next to a number.
     fn valued(node: &UiNode) -> String {
+        // Prefer a live call, where the backend can answer the source itself and
+        // the decoration survives being concatenated around it.
+        if let Some(live) = live_valued(node) {
+            return live;
+        }
+        valued_seeded(node)
+    }
+
+    /// The live form, or `None` when any part of it does not survive.
+    fn live_valued(node: &UiNode) -> Option<String> {
+        let decoration = decoration_of(node);
+        live_value(
+            node,
+            &decoration.glyph,
+            decoration.unit,
+            &decoration.suffix,
+            decoration.format.as_deref(),
+        )
+    }
+
+    /// The realized value with its decoration — what is drawn when nothing goes
+    /// live, and what is MEASURED even when something does.
+    /// What wraps a value: a leading glyph, a unit, a trailing word, and how the
+    /// number itself is formatted. Read once and shared, so the live path and
+    /// the seeded path cannot disagree about what decorates what.
+    struct Decoration {
+        glyph: String,
+        unit: &'static str,
+        suffix: String,
+        format: Option<String>,
+    }
+
+    fn decoration_of(node: &UiNode) -> Decoration {
+        Decoration {
+            unit: match arg(node, "unit") {
+                Some(NodeValue::Token(t)) if t == "c" || t == "f" => "°",
+                Some(NodeValue::Text(t)) if t == "c" || t == "f" => "°",
+                Some(NodeValue::Token(t)) if t == "pct" => "%",
+                _ => "",
+            },
+            glyph: match arg(node, "glyph") {
+                Some(NodeValue::Text(g)) => g.clone(),
+                _ => String::new(),
+            },
+            // `suffix` is a declared unit word — "412 pts", not "412". It was in
+            // the catalog and ignored here, so every score and comment count on
+            // the news card rendered as a bare number.
+            suffix: match arg(node, "suffix") {
+                Some(NodeValue::Text(t)) => format!(" {t}"),
+                _ => String::new(),
+            },
+            format: match arg(node, "format") {
+                Some(NodeValue::Token(t)) => Some(t.clone()),
+                _ => None,
+            },
+        }
+    }
+
+    fn valued_seeded(node: &UiNode) -> String {
         let value = arg(node, "value");
-        let unit = match arg(node, "unit") {
-            Some(NodeValue::Token(t)) if t == "c" || t == "f" => "°",
-            Some(NodeValue::Text(t)) if t == "c" || t == "f" => "°",
-            Some(NodeValue::Token(t)) if t == "pct" => "%",
-            _ => "",
-        };
-        let glyph = match arg(node, "glyph") {
-            Some(NodeValue::Text(g)) => g.clone(),
-            _ => String::new(),
-        };
-        // `suffix` is a declared unit word — "412 pts", not "412". It was in the
-        // catalog and ignored here, so every score and comment count on the news
-        // card rendered as a bare number.
-        let suffix = match arg(node, "suffix") {
-            Some(NodeValue::Text(t)) => format!(" {t}"),
-            _ => String::new(),
-        };
-        let format_kind = match arg(node, "format") {
-            Some(NodeValue::Token(t)) => Some(t.clone()),
-            _ => None,
-        };
+        let Decoration {
+            glyph,
+            unit,
+            suffix,
+            format: format_kind,
+        } = decoration_of(node);
         match value {
             Some(NodeValue::Missing) => "\"—\"".into(),
             Some(v) => {
@@ -4459,8 +4732,88 @@ pub mod makepad {
                 };
                 format!("{:?}", format!("{glyph}{body}{unit}{suffix}"))
             }
-            None => text_of(arg(node, "text")),
+            None => expr_of(node, "text"),
         }
+    }
+
+    /// What to MEASURE when a layout decision depends on how long a value is.
+    ///
+    /// Emitted text and rendered text are the same thing until a value goes
+    /// live, at which point they diverge completely: `"$" + sys.stock(…)` is 33
+    /// characters that draw as six. Any decision made by counting the emitted
+    /// form is then wrong, and wrong in a way that looks like a layout bug.
+    ///
+    /// So measure the realized literal, which is still in `args` and is a sound
+    /// proxy for the live value's length — a share price is about as long as a
+    /// share price. When nothing is bound, this IS the emitted text.
+    fn sizing_text(node: &UiNode, emitted: &str) -> String {
+        if node
+            .bindings
+            .iter()
+            .any(|(n, _)| n == "value" || n == "text")
+        {
+            let literal = valued_literal(node);
+            if !literal.is_empty() {
+                return literal;
+            }
+        }
+        emitted.to_owned()
+    }
+
+    /// The realized value with every decoration applied — exactly what would
+    /// have been drawn had nothing gone live.
+    ///
+    /// This is `valued`'s literal path, reached directly. Reconstructing the
+    /// decoration here instead would give two formatters to keep in step, and
+    /// the one used for measuring would drift from the one used for drawing
+    /// without anything failing.
+    fn valued_literal(node: &UiNode) -> String {
+        valued_seeded(node)
+    }
+
+    /// A `value` argument as a live call plus its decoration, or `None` to use
+    /// the realized literal.
+    ///
+    /// The decoration is the constraint. `glyph`, `unit` and `suffix` are
+    /// literals that concatenate around a call — the DSL supports
+    /// `"H:" + sys.weather(…)` and hand-written cards use it. A `format` mostly
+    /// does not, because it needs the NUMBER:
+    ///
+    /// | format | live? | why |
+    /// |---|---|---|
+    /// | none | yes | nothing to apply |
+    /// | `money` | yes | `sys.stock` returns two decimals, so `"$"` prefixes it |
+    /// | `signed_pct` | yes | the VM already returns `"+0.63%"` — applying it again would double the sign |
+    /// | `signed_money` | no | the sign goes OUTSIDE the currency symbol; not a prefix |
+    /// | `compact`, `ratio` | no | need the number to divide or round |
+    ///
+    /// Returning `None` is the safe direction: the seeded value is stale but
+    /// correct, where a wrong concatenation is neither.
+    fn live_value(
+        node: &UiNode,
+        glyph: &str,
+        unit: &str,
+        suffix: &str,
+        format_kind: Option<&str>,
+    ) -> Option<String> {
+        let (_, binding) = node.bindings.iter().find(|(n, _)| n == "value")?;
+        let call = vm_call(binding)?;
+        let prefix = match format_kind {
+            None | Some("signed_pct") => String::new(),
+            Some("money") => "$".to_owned(),
+            Some(_) => return None,
+        };
+        let mut expr = String::new();
+        let head = format!("{glyph}{prefix}");
+        if !head.is_empty() {
+            expr.push_str(&format!("{head:?} + "));
+        }
+        expr.push_str(&call);
+        let tail = format!("{unit}{suffix}");
+        if !tail.is_empty() {
+            expr.push_str(&format!(" + {tail:?}"));
+        }
+        Some(expr)
     }
 
     fn pad(depth: usize) -> String {
@@ -4630,7 +4983,7 @@ pub mod makepad {
                 let _ = writeln!(
                     out,
                     "{p}  TextCaption{{ text: {} draw_text.color: {DIM} }}",
-                    text_of(arg(node, "label"))
+                    expr_of(node, "label")
                 );
                 let _ = writeln!(
                     out,
@@ -4713,7 +5066,7 @@ pub mod makepad {
                 let _ = writeln!(
                     out,
                     "{p}  TextCaption{{ text: {} draw_text.color: {ink} }}",
-                    text_of(arg(node, "text"))
+                    expr_of(node, "text")
                 );
                 let _ = writeln!(out, "{p}}}");
             }
@@ -4741,14 +5094,22 @@ pub mod makepad {
                 let body = if arg(node, "value").is_some() || arg(node, "glyph").is_some() {
                     valued(node)
                 } else {
-                    text_of(arg(node, "text"))
+                    expr_of(node, "text")
                 };
                 // A hero is sized for the ONE dominant value. "18°" fits at 62;
                 // "$184.20" clipped off the right edge on device. Scaling to fit
                 // is the runtime's call — the card says "this is the hero", not
                 // "this is 62 points".
+                //
+                // Size from the REALIZED value, never from the emitted text. Once
+                // a value lowers to a live call the emitted text is
+                // `"$" + sys.stock("NVDA", "price")` — 33 characters of source
+                // that render as six — so measuring it dropped the hero from 40pt
+                // to 24pt and shifted the whole card up. The seeded value is a
+                // sound proxy for the live one's LENGTH, which is all this needs.
                 let size = if role == "TextHero" {
-                    let glyphs = body.trim_matches('"').chars().count();
+                    let measured = sizing_text(node, &body);
+                    let glyphs = measured.trim_matches('"').chars().count();
                     let pt = match glyphs {
                         0..=4 => 62,
                         5..=6 => 50,
@@ -4979,6 +5340,11 @@ pub fn dispatch_with(
 /// `cycle`, `clear` and `set(.token)` need nothing. Only a transition that
 /// names a path needs the host's data, and passing Null simply makes that one
 /// form a no-op instead of writing something wrong.
+/// Apply an event's transitions, with the data a path-valued initial resolves
+/// against.
+///
+/// Returns only whether anything applied. `dispatch_reporting` returns that plus
+/// what went stale, and is what a host driving refetch should call.
 pub fn dispatch_with_data(
     source: &str,
     store: &mut InstanceStore,
@@ -4987,9 +5353,69 @@ pub fn dispatch_with_data(
     payload: Option<&serde_json::Value>,
     data: &serde_json::Value,
 ) -> bool {
+    !dispatch_writes(source, store, instance_key, event, payload, data).is_empty()
+}
+
+/// What a dispatch did, and what it obliges the host to do next.
+///
+/// `dispatch_with_data` returns a bare `bool`, which is enough to know a tap was
+/// not ignored and not enough to act on. §5.9 says a source parameterised by
+/// state goes stale when that state changes, and a host holding only `true` has
+/// no way to find out which. The pieces to compute it existed — `stale_sources`
+/// and `source_plan` — and nothing joined them, so the stock card's detail view
+/// worked only because its test data already contained a quote it never asked
+/// for.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DispatchOutcome {
+    /// Whether any transition committed. False means refused or unknown — see
+    /// §3, a batch that does not fully resolve does not partially apply.
+    pub applied: bool,
+    /// The state paths written, in the order the batch wrote them.
+    pub changed: Vec<String>,
+    /// The declared sources those writes invalidate, following the dependency
+    /// cascade. The host should refetch these before the next realization.
+    pub stale: Vec<String>,
+}
+
+/// Apply an event and report what it invalidated.
+///
+/// This is `dispatch_with_data` plus the answer to "and now what?". Prefer it
+/// in a host: the bool-returning form cannot drive a refetch, which is the
+/// whole point of letting a source take state as an argument.
+pub fn dispatch_reporting(
+    source: &str,
+    store: &mut InstanceStore,
+    instance_key: &str,
+    event: &str,
+    payload: Option<&serde_json::Value>,
+    data: &serde_json::Value,
+) -> DispatchOutcome {
+    let changed = dispatch_writes(source, store, instance_key, event, payload, data);
+    if changed.is_empty() {
+        return DispatchOutcome::default();
+    }
+    // `stale_sources` takes the changed names; a write to `selected` is a change
+    // to `selected` as a source argument reads it.
+    let names: Vec<&str> = changed.iter().map(String::as_str).collect();
+    let stale = stale_sources(source, &names);
+    DispatchOutcome {
+        applied: true,
+        changed,
+        stale,
+    }
+}
+
+fn dispatch_writes(
+    source: &str,
+    store: &mut InstanceStore,
+    instance_key: &str,
+    event: &str,
+    payload: Option<&serde_json::Value>,
+    data: &serde_json::Value,
+) -> Vec<String> {
     let mut sink = Diagnostics::default();
     let Some(tokens) = lex(source, &mut sink) else {
-        return false;
+        return Vec::new();
     };
     let card = Parser::new(&tokens, &mut sink).parse_card();
 
@@ -5026,11 +5452,11 @@ pub fn dispatch_with_data(
                 &instance_key[..boundary],
                 Some((component, schema_id(component))),
             ),
-            None => return false,
+            None => return Vec::new(),
         },
         None => match card.events.iter().find(|e| e.name == event) {
             Some(d) => (d, &card.states, CARD_STATE_KEY, None),
-            None => return false,
+            None => return Vec::new(),
         },
     };
 
@@ -5046,7 +5472,7 @@ pub fn dispatch_with_data(
 
     for transition in &declared.transitions {
         let Some(state) = states.iter().find(|s| s.path == transition.target) else {
-            return false;
+            return Vec::new();
         };
         // The declared initial, path-valued or not. `clear` and a first `cycle`
         // both fell back to the SHAPE default here, so a card whose initial
@@ -5085,10 +5511,10 @@ pub fn dispatch_with_data(
                     // that has to be checked at runtime: every other set form is
                     // decided against the declared shape at check time.
                     Some(v) if value_fits_shape(&state.shape, v) => v.clone(),
-                    Some(_) => return false,
+                    Some(_) => return Vec::new(),
                     // No payload is a no-op rather than a silent clear: falling
                     // back to the initial would look like a deliberate reset.
-                    None => return false,
+                    None => return Vec::new(),
                 },
                 // A path READS. Treating it as the payload meant
                 // `n: set(config.answer)` wrote whatever the tap carried — or
@@ -5097,23 +5523,28 @@ pub fn dispatch_with_data(
                     Some(v) if value_fits_shape(&state.shape, &v) => v,
                     // Unresolvable or ill-shaped: the batch cannot complete, and
                     // §3 says a batch is all or nothing.
-                    _ => return false,
+                    _ => return Vec::new(),
                 },
                 SetSource::Token(t) | SetSource::Text(t) => serde_json::Value::String(t.clone()),
                 SetSource::Num(n) => serde_json::Value::from(*n),
                 SetSource::Bool(b) => serde_json::Value::Bool(*b),
             },
-            _ => return false,
+            _ => return Vec::new(),
         };
         staged.push((transition.target.clone(), next));
     }
 
-    // Commit.
-    let applied = !staged.is_empty();
+    // Commit, and report what was written. The targets are what a host needs
+    // to know which sources went stale -- discarding them is why §5.9's
+    // invalidation story had pieces that nothing joined.
+    let mut written = Vec::new();
     for (target, value) in staged {
         store.set(instance_key, &target, value);
+        if !written.contains(&target) {
+            written.push(target);
+        }
     }
-    applied
+    written
 }
 
 // ───────────────────────────────────────────────────────────────── source plan ──

@@ -62,6 +62,16 @@ RULES = [
          "None => check_path(path, scope, source.line, 1, sink),",
          "None => { let _ = (path, scope); }"),
 
+    Rule("source-state-collision", "a source and card state may not share a name",
+         "if let Some(source) = card.sources.iter().find(|s| s.name == state.path) {",
+         "if let Some(source) = card.sources.iter().find(|s| s.name == state.path).filter(|_| false) {"),
+    # Mutating to "never report" rather than "always report": the risk is a dead
+    # fetch going unnoticed, which is how `series` and `aqi` both survived a
+    # catalog correction that made them unreachable.
+    Rule("unread-source", "a declared source nothing reads is reported",
+         "if !read.contains(&source.name) && !read.contains(&root_of(&source.name)) {",
+         "if false {"),
+
     # ── the no-facts rule (§4) ───────────────────────────────────────────────
     Rule("data-laundering", "a literal may not reach a data position through a prop",
          "if matches!(arg.value, Operand::Str(_) | Operand::Num(_))",

@@ -21,7 +21,6 @@ source week        sys.weather(lat: place.lat, lon: place.lon, days: state.days,
 # back with the data they describe.
 source sun         sys.daylight(lat: place.lat, lon: place.lon)
 source moon        sys.moonphase()
-source aqi         sys.airquality(lat: place.lat, lon: place.lon)
 source scene       sys.photo(query: place.name)
 source env.locale  sys.locale()
 
