@@ -4,7 +4,7 @@
 //! that the grammar lacks is a defect in `docs/ui-profile-l0.md`, not in the
 //! cards. They are the same files as `octos-one/docs/l0/*.card`.
 
-use splash_core::ui_l0::{catalog, check_ui_l0_named, Level};
+use splash_ui_l0::{catalog, check_ui_l0_named, Level};
 
 const WEATHER: &str = include_str!("fixtures/weather.card");
 const NEWS: &str = include_str!("fixtures/news.card");
@@ -286,7 +286,7 @@ fn diagnostics_are_bounded() {
     source.push('}');
     let report = check_ui_l0_named("many", &source);
     assert!(!report.valid);
-    assert!(report.diagnostics.len() <= splash_core::ui_l0::MAX_UI_L0_DIAGNOSTICS);
+    assert!(report.diagnostics.len() <= splash_ui_l0::MAX_UI_L0_DIAGNOSTICS);
     assert!(report.diagnostics_truncated);
 }
 
@@ -415,7 +415,7 @@ fn an_untotal_transition_form_is_rejected() {
 
 // ────────────────────────────────────────────────────────────────── realization ──
 
-use splash_core::ui_l0::{realize, NodeValue, RealizeLimits};
+use splash_ui_l0::{realize, NodeValue, RealizeLimits};
 
 fn weather_data() -> serde_json::Value {
     serde_json::json!({
@@ -444,11 +444,7 @@ fn weather_data() -> serde_json::Value {
     })
 }
 
-fn find<'a>(
-    node: &'a splash_core::ui_l0::UiNode,
-    kind: &str,
-    out: &mut Vec<&'a splash_core::ui_l0::UiNode>,
-) {
+fn find<'a>(node: &'a splash_ui_l0::UiNode, kind: &str, out: &mut Vec<&'a splash_ui_l0::UiNode>) {
     if node.kind == kind {
         out.push(node);
     }
@@ -639,7 +635,7 @@ fn the_other_two_cards_realize_too() {
 
 // ───────────────────────────────────────────────────────────── makepad lowering ──
 
-use splash_core::ui_l0::makepad;
+use splash_ui_l0::makepad;
 
 #[test]
 fn a_realized_card_lowers_to_renderable_dsl() {
@@ -681,7 +677,7 @@ fn a_realized_card_lowers_to_renderable_dsl() {
 /// warning instead of vanishing.
 #[test]
 fn an_unmapped_constructor_is_visible_rather_than_dropped() {
-    let node = splash_core::ui_l0::UiNode {
+    let node = splash_ui_l0::UiNode {
         kind: "Hologram".into(),
         key: "root".into(),
         args: vec![],
@@ -724,11 +720,10 @@ fn two_rows_data() -> serde_json::Value {
 /// other — the property the whole component model exists to provide.
 #[test]
 fn local_state_is_per_instance() {
-    let mut store = splash_core::ui_l0::InstanceStore::default();
+    let mut store = splash_ui_l0::InstanceStore::default();
     let data = two_rows_data();
 
-    let first =
-        splash_core::ui_l0::realize_with_state(TWO_ROWS, &data, &store, RealizeLimits::default());
+    let first = splash_ui_l0::realize_with_state(TWO_ROWS, &data, &store, RealizeLimits::default());
     let root = first.root.expect("root");
     let mut rows = Vec::new();
     find(&root, "Row", &mut rows);
@@ -736,11 +731,11 @@ fn local_state_is_per_instance() {
 
     // Open only the first row.
     let key = rows[0].key.clone();
-    let applied = splash_core::ui_l0::dispatch(TWO_ROWS, &mut store, &key, "flip");
+    let applied = splash_ui_l0::dispatch(TWO_ROWS, &mut store, &key, "flip");
     assert!(applied, "flip should have applied at {key}");
 
     let second =
-        splash_core::ui_l0::realize_with_state(TWO_ROWS, &data, &store, RealizeLimits::default());
+        splash_ui_l0::realize_with_state(TWO_ROWS, &data, &store, RealizeLimits::default());
     let root = second.root.expect("root");
     let mut captions = Vec::new();
     find(&root, "TextCaption", &mut captions);
@@ -762,22 +757,20 @@ fn local_state_is_per_instance() {
 /// that old values still fit.
 #[test]
 fn a_schema_change_resets_instance_state() {
-    let mut store = splash_core::ui_l0::InstanceStore::default();
+    let mut store = splash_ui_l0::InstanceStore::default();
     let data = two_rows_data();
-    let first =
-        splash_core::ui_l0::realize_with_state(TWO_ROWS, &data, &store, RealizeLimits::default());
+    let first = splash_ui_l0::realize_with_state(TWO_ROWS, &data, &store, RealizeLimits::default());
     let mut rows = Vec::new();
     let first_root = first.root.unwrap();
     find(&first_root, "Row", &mut rows);
-    splash_core::ui_l0::dispatch(TWO_ROWS, &mut store, &rows[0].key, "flip");
+    splash_ui_l0::dispatch(TWO_ROWS, &mut store, &rows[0].key, "flip");
 
     // The component gains a field: same name, different state schema.
     let edited = TWO_ROWS.replace(
         "state open { shape: bool, initial: false }",
         "state open { shape: bool, initial: false }\n  state seen { shape: bool, initial: false }",
     );
-    let after =
-        splash_core::ui_l0::realize_with_state(&edited, &data, &store, RealizeLimits::default());
+    let after = splash_ui_l0::realize_with_state(&edited, &data, &store, RealizeLimits::default());
     let mut captions = Vec::new();
     let after_root = after.root.unwrap();
     find(&after_root, "TextCaption", &mut captions);
@@ -806,23 +799,20 @@ view root Panel {
 /// both depend on.
 #[test]
 fn set_applies_the_event_payload() {
-    let mut store = splash_core::ui_l0::InstanceStore::default();
+    let mut store = splash_ui_l0::InstanceStore::default();
     let data = serde_json::json!({ "items": [{"id":"a","name":"A"},{"id":"b","name":"B"}] });
 
-    let before =
-        splash_core::ui_l0::realize_with_state(SETTER, &data, &store, RealizeLimits::default());
+    let before = splash_ui_l0::realize_with_state(SETTER, &data, &store, RealizeLimits::default());
     let root = before.root.unwrap();
     let mut rows = Vec::new();
     find(&root, "Row", &mut rows);
     assert_eq!(rows.len(), 2, "the list should show both items");
 
     let payload = serde_json::json!("b");
-    let applied =
-        splash_core::ui_l0::dispatch_with(SETTER, &mut store, "root", "choose", Some(&payload));
+    let applied = splash_ui_l0::dispatch_with(SETTER, &mut store, "root", "choose", Some(&payload));
     assert!(applied, "choose should apply");
 
-    let after =
-        splash_core::ui_l0::realize_with_state(SETTER, &data, &store, RealizeLimits::default());
+    let after = splash_ui_l0::realize_with_state(SETTER, &data, &store, RealizeLimits::default());
     let root = after.root.unwrap();
     let mut titles = Vec::new();
     find(&root, "TextTitle", &mut titles);
@@ -871,23 +861,21 @@ fn slot_realizes_the_children_passed_at_the_call_site() {
 /// stale value.
 #[test]
 fn unmounted_instances_are_pruned() {
-    let mut store = splash_core::ui_l0::InstanceStore::default();
+    let mut store = splash_ui_l0::InstanceStore::default();
     let two = serde_json::json!({ "items": [{"id":"a","name":"A"},{"id":"b","name":"B"}] });
 
-    let report =
-        splash_core::ui_l0::realize_with_state(TWO_ROWS, &two, &store, RealizeLimits::default());
+    let report = splash_ui_l0::realize_with_state(TWO_ROWS, &two, &store, RealizeLimits::default());
     let root = report.root.unwrap();
     let mut rows = Vec::new();
     find(&root, "Row", &mut rows);
     for row in &rows {
-        splash_core::ui_l0::dispatch(TWO_ROWS, &mut store, &row.key, "flip");
+        splash_ui_l0::dispatch(TWO_ROWS, &mut store, &row.key, "flip");
     }
     assert_eq!(store.len(), 2, "both rows hold state");
 
     // `b` goes away.
     let one = serde_json::json!({ "items": [{"id":"a","name":"A"}] });
-    let report =
-        splash_core::ui_l0::realize_with_state(TWO_ROWS, &one, &store, RealizeLimits::default());
+    let report = splash_ui_l0::realize_with_state(TWO_ROWS, &one, &store, RealizeLimits::default());
     store.prune(&report.live_keys);
     assert_eq!(store.len(), 1, "the departed instance's cell is dropped");
 }
@@ -1041,7 +1029,7 @@ fn copy_selects_the_reported_locale() {
 
 // ───────────────────────────────────────────────────────────────── source plan ──
 
-use splash_core::ui_l0::{source_plan, SourceArg};
+use splash_ui_l0::{source_plan, SourceArg};
 
 /// A card declares what data it needs; the plan is what a host fetches. Without
 /// it the declaration was inert — the parser skipped the helper and every
@@ -1125,7 +1113,7 @@ fn every_reference_card_yields_a_resolvable_plan() {
 
 // ─────────────────────────────────────────────────────────────── reconciliation ──
 
-use splash_core::ui_l0::{dirty_records, record_dependencies};
+use splash_ui_l0::{dirty_records, record_dependencies};
 
 /// L0 needs no dynamic read-tracking: no expression form means every binding is
 /// structurally visible, so the dependency set is computable without evaluating
@@ -1213,7 +1201,7 @@ fn an_unrelated_write_dirties_nothing() {
     assert!(dirty_records(WEATHER, &["nothing_reads_this"]).is_empty());
 }
 
-use splash_core::ui_l0::patch_points;
+use splash_ui_l0::patch_points;
 
 /// `dirty_records` is transitive, so `root` appears for almost any write — it
 /// splices everything, so it reads everything. Patching root rebuilds the tree,
@@ -1265,8 +1253,8 @@ fn an_unrelated_write_patches_nothing() {
 // ─── named slots (§5.5, open question 5) ─────────────────────────────────────
 
 /// Every `text` argument in the tree, in render order.
-fn texts(root: &splash_core::ui_l0::UiNode) -> Vec<String> {
-    fn walk(n: &splash_core::ui_l0::UiNode, out: &mut Vec<String>) {
+fn texts(root: &splash_ui_l0::UiNode) -> Vec<String> {
+    fn walk(n: &splash_ui_l0::UiNode, out: &mut Vec<String>) {
         for (name, v) in &n.args {
             if name == "text" {
                 if let NodeValue::Text(t) = v {
@@ -1546,14 +1534,13 @@ component Rowy(item: record) {
 }
 view root Panel { for it in items key it.id { Rowy(item: it) } }
 "#;
-    let mut store = splash_core::ui_l0::InstanceStore::default();
+    let mut store = splash_ui_l0::InstanceStore::default();
     let data = two_rows_data();
-    let first =
-        splash_core::ui_l0::realize_with_state(KEPT, &data, &store, RealizeLimits::default());
+    let first = splash_ui_l0::realize_with_state(KEPT, &data, &store, RealizeLimits::default());
     let mut rows = Vec::new();
     let first_root = first.root.unwrap();
     find(&first_root, "Row", &mut rows);
-    splash_core::ui_l0::dispatch(KEPT, &mut store, &rows[0].key, "flip");
+    splash_ui_l0::dispatch(KEPT, &mut store, &rows[0].key, "flip");
 
     // An unrelated field is added: the schema id changes, but `open` itself is
     // untouched and asked to survive.
@@ -1561,8 +1548,7 @@ view root Panel { for it in items key it.id { Rowy(item: it) } }
         "event flip",
         "state seen { shape: bool, initial: false }\n  event flip",
     );
-    let after =
-        splash_core::ui_l0::realize_with_state(&edited, &data, &store, RealizeLimits::default());
+    let after = splash_ui_l0::realize_with_state(&edited, &data, &store, RealizeLimits::default());
     let mut captions = Vec::new();
     let after_root = after.root.unwrap();
     find(&after_root, "TextCaption", &mut captions);
@@ -1590,14 +1576,13 @@ component Rowy(item: record) {
 }
 view root Panel { for it in items key it.id { Rowy(item: it) } }
 "#;
-    let mut store = splash_core::ui_l0::InstanceStore::default();
+    let mut store = splash_ui_l0::InstanceStore::default();
     let data = two_rows_data();
-    let first =
-        splash_core::ui_l0::realize_with_state(KEPT, &data, &store, RealizeLimits::default());
+    let first = splash_ui_l0::realize_with_state(KEPT, &data, &store, RealizeLimits::default());
     let mut rows = Vec::new();
     let first_root = first.root.unwrap();
     find(&first_root, "Row", &mut rows);
-    splash_core::ui_l0::dispatch(KEPT, &mut store, &rows[0].key, "flip");
+    splash_ui_l0::dispatch(KEPT, &mut store, &rows[0].key, "flip");
 
     // `open` is retyped bool → enum. The opt-in does not apply to a field whose
     // own shape moved.
@@ -1610,8 +1595,7 @@ view root Panel { for it in items key it.id { Rowy(item: it) } }
             "event flip { open: toggle }",
             "event flip { open: cycle(.shut, .ajar) }",
         );
-    let after =
-        splash_core::ui_l0::realize_with_state(&edited, &data, &store, RealizeLimits::default());
+    let after = splash_ui_l0::realize_with_state(&edited, &data, &store, RealizeLimits::default());
     let mut captions = Vec::new();
     let after_root = after.root.unwrap();
     find(&after_root, "TextCaption", &mut captions);
@@ -1627,21 +1611,19 @@ view root Panel { for it in items key it.id { Rowy(item: it) } }
 fn without_keep_a_schema_change_still_resets() {
     // This is `a_schema_change_resets_instance_state` restated as the control
     // for the two tests above — the opt-in must not have become the default.
-    let mut store = splash_core::ui_l0::InstanceStore::default();
+    let mut store = splash_ui_l0::InstanceStore::default();
     let data = two_rows_data();
-    let first =
-        splash_core::ui_l0::realize_with_state(TWO_ROWS, &data, &store, RealizeLimits::default());
+    let first = splash_ui_l0::realize_with_state(TWO_ROWS, &data, &store, RealizeLimits::default());
     let mut rows = Vec::new();
     let first_root = first.root.unwrap();
     find(&first_root, "Row", &mut rows);
-    splash_core::ui_l0::dispatch(TWO_ROWS, &mut store, &rows[0].key, "flip");
+    splash_ui_l0::dispatch(TWO_ROWS, &mut store, &rows[0].key, "flip");
 
     let edited = TWO_ROWS.replace(
         "event flip",
         "state seen { shape: bool, initial: false }\n  event flip",
     );
-    let after =
-        splash_core::ui_l0::realize_with_state(&edited, &data, &store, RealizeLimits::default());
+    let after = splash_ui_l0::realize_with_state(&edited, &data, &store, RealizeLimits::default());
     let mut captions = Vec::new();
     let after_root = after.root.unwrap();
     find(&after_root, "TextCaption", &mut captions);
@@ -1734,7 +1716,7 @@ state mode { shape: enum[low, mid, high], initial: .low }\n\
 event step { mode: cycle(.low, .mid, .high) }\n\
 view root Panel { Row(on_tap: step) { Rule() } }\n";
 
-    let mut store = splash_core::ui_l0::InstanceStore::default();
+    let mut store = splash_ui_l0::InstanceStore::default();
     let report = realize(TRI, &serde_json::json!({}), RealizeLimits::default());
     let mut rows = Vec::new();
     let root = report.root.unwrap();
@@ -1742,7 +1724,7 @@ view root Panel { Row(on_tap: step) { Rule() } }\n";
     let key = rows[0].key.clone();
 
     for expected in ["mid", "high", "low"] {
-        splash_core::ui_l0::dispatch(TRI, &mut store, &key, "step");
+        splash_ui_l0::dispatch(TRI, &mut store, &key, "step");
         assert_eq!(
             store.get("@card", "mode").and_then(|v| v.as_str()),
             Some(expected),
@@ -1798,15 +1780,14 @@ view root Panel { Toggly() }
 #[test]
 fn state_survives_an_element_inserted_above() {
     let data = serde_json::json!({});
-    let mut store = splash_core::ui_l0::InstanceStore::default();
+    let mut store = splash_ui_l0::InstanceStore::default();
 
-    let first =
-        splash_core::ui_l0::realize_with_state(TOGGLY, &data, &store, RealizeLimits::default());
+    let first = splash_ui_l0::realize_with_state(TOGGLY, &data, &store, RealizeLimits::default());
     let root = first.root.unwrap();
     let mut rows = Vec::new();
     find(&root, "Row", &mut rows);
     let key = rows[0].key.clone();
-    splash_core::ui_l0::dispatch(TOGGLY, &mut store, &key, "flip");
+    splash_ui_l0::dispatch(TOGGLY, &mut store, &key, "flip");
 
     // The same card with a Rule inserted ABOVE the component.
     let edited = TOGGLY.replace(
@@ -1815,8 +1796,7 @@ fn state_survives_an_element_inserted_above() {
     );
     assert_ne!(edited, TOGGLY, "the edit must actually apply");
 
-    let after =
-        splash_core::ui_l0::realize_with_state(&edited, &data, &store, RealizeLimits::default());
+    let after = splash_ui_l0::realize_with_state(&edited, &data, &store, RealizeLimits::default());
     let after_root = after.root.unwrap();
     let mut rows_after = Vec::new();
     find(&after_root, "Row", &mut rows_after);
@@ -1843,10 +1823,9 @@ fn sibling_instances_of_one_component_keep_separate_state() {
         "view root Panel { Toggly() Toggly() }",
     );
     let data = serde_json::json!({});
-    let mut store = splash_core::ui_l0::InstanceStore::default();
+    let mut store = splash_ui_l0::InstanceStore::default();
 
-    let first =
-        splash_core::ui_l0::realize_with_state(&two, &data, &store, RealizeLimits::default());
+    let first = splash_ui_l0::realize_with_state(&two, &data, &store, RealizeLimits::default());
     let root = first.root.unwrap();
     let mut rows = Vec::new();
     find(&root, "Row", &mut rows);
@@ -1854,9 +1833,8 @@ fn sibling_instances_of_one_component_keep_separate_state() {
     assert_ne!(rows[0].key, rows[1].key, "two instances need two keys");
 
     // Flip only the first.
-    splash_core::ui_l0::dispatch(&two, &mut store, &rows[0].key.clone(), "flip");
-    let after =
-        splash_core::ui_l0::realize_with_state(&two, &data, &store, RealizeLimits::default());
+    splash_ui_l0::dispatch(&two, &mut store, &rows[0].key.clone(), "flip");
+    let after = splash_ui_l0::realize_with_state(&two, &data, &store, RealizeLimits::default());
     let after_root = after.root.unwrap();
     let mut caps = Vec::new();
     find(&after_root, "TextCaption", &mut caps);
@@ -1891,7 +1869,7 @@ fn an_uncatalogued_source_helper_is_rejected() {
 fn an_uncatalogued_helper_produces_no_source_request() {
     // Belt and braces: even if a caller skips checking, the plan must not carry
     // the request onward to a host that trusts it.
-    let plan = splash_core::ui_l0::source_plan(
+    let plan = splash_ui_l0::source_plan(
         "source leak sys.shell(command: \"cat /etc/passwd\")\nview root Rule()",
     );
     assert!(
@@ -1995,7 +1973,7 @@ fn a_predicate_argument_evaluates_to_a_boolean() {
     let mut chips = Vec::new();
     find(&root, "Chip", &mut chips);
     assert_eq!(chips.len(), 2);
-    let active = |c: &splash_core::ui_l0::UiNode| {
+    let active = |c: &splash_ui_l0::UiNode| {
         c.args
             .iter()
             .find(|(n, _)| n == "active")
@@ -2093,15 +2071,15 @@ fn every_set_form_writes_what_it_names() {
                 event yes { ok: set(true) }\n\
                 view root Row(on_tap: bump) { Rule() }";
     let data = serde_json::json!({"movers": {"answer": 7}});
-    let mut store = splash_core::ui_l0::InstanceStore::default();
+    let mut store = splash_ui_l0::InstanceStore::default();
 
-    splash_core::ui_l0::dispatch_with_data(card, &mut store, "root", "bump", None, &data);
+    splash_ui_l0::dispatch_with_data(card, &mut store, "root", "bump", None, &data);
     assert_eq!(store.get("@card", "n").and_then(|v| v.as_f64()), Some(1.0));
 
-    splash_core::ui_l0::dispatch_with_data(card, &mut store, "root", "frompath", None, &data);
+    splash_ui_l0::dispatch_with_data(card, &mut store, "root", "frompath", None, &data);
     assert_eq!(store.get("@card", "n").and_then(|v| v.as_f64()), Some(7.0));
 
-    splash_core::ui_l0::dispatch_with_data(card, &mut store, "root", "yes", None, &data);
+    splash_ui_l0::dispatch_with_data(card, &mut store, "root", "yes", None, &data);
     assert_eq!(
         store.get("@card", "ok").and_then(|v| v.as_bool()),
         Some(true)
@@ -2109,14 +2087,7 @@ fn every_set_form_writes_what_it_names() {
 
     // A payload must not hijack a transition that names a path to read.
     let stray = serde_json::json!("STRAY");
-    splash_core::ui_l0::dispatch_with_data(
-        card,
-        &mut store,
-        "root",
-        "frompath",
-        Some(&stray),
-        &data,
-    );
+    splash_ui_l0::dispatch_with_data(card, &mut store, "root", "frompath", Some(&stray), &data);
     assert_eq!(
         store.get("@card", "n").and_then(|v| v.as_f64()),
         Some(7.0),
@@ -2156,7 +2127,7 @@ fn lowering_emits_the_event_and_the_instance_key() {
         "quote": {}, "series": {}, "selected": "", "range": "m1",
         "env": { "locale": {} }, "copy": { "movers": "Top Movers" }
     });
-    let dsl = splash_core::ui_l0::makepad::lower(
+    let dsl = splash_ui_l0::makepad::lower(
         &realize(STOCK, &data, RealizeLimits::default())
             .root
             .unwrap(),
@@ -2182,7 +2153,7 @@ fn lowering_distinguishes_an_active_chip() {
     let source = "state range { shape: enum[d1, w1], initial: .d1 }\n\
                   view root Col { Chip(text: \"1D\", active: range == .d1) \
                                   Chip(text: \"1W\", active: range == .w1) }";
-    let dsl = splash_core::ui_l0::makepad::lower(
+    let dsl = splash_ui_l0::makepad::lower(
         &realize(source, &serde_json::json!({}), RealizeLimits::default())
             .root
             .unwrap(),
@@ -3351,7 +3322,7 @@ fn a_dotted_source_does_not_authorise_its_whole_root() {
 /// then emitted the dependent BEFORE the thing it depends on.
 #[test]
 fn a_dotted_source_dependency_is_ordered_correctly() {
-    let plan = splash_core::ui_l0::source_plan(
+    let plan = splash_ui_l0::source_plan(
         "source env.locale sys.locale()\n\
          source scene sys.photo(query: env.locale.lang)\n\
          view root Rule()",
@@ -3403,13 +3374,12 @@ fn changing_an_initial_resets_live_component_state() {
         view root Panel { for it in items key it.id { Rowy(item: it) } }";
 
     let data = serde_json::json!({"items": [{"id": "a", "name": "A"}]});
-    let mut store = splash_core::ui_l0::InstanceStore::default();
-    let first =
-        splash_core::ui_l0::realize_with_state(BEFORE, &data, &store, RealizeLimits::default());
+    let mut store = splash_ui_l0::InstanceStore::default();
+    let first = splash_ui_l0::realize_with_state(BEFORE, &data, &store, RealizeLimits::default());
     let root = first.root.unwrap();
     let mut rows = Vec::new();
     find(&root, "Row", &mut rows);
-    let applied = splash_core::ui_l0::dispatch(BEFORE, &mut store, &rows[0].key.clone(), "bump");
+    let applied = splash_ui_l0::dispatch(BEFORE, &mut store, &rows[0].key.clone(), "bump");
     assert!(
         applied,
         "the event must actually apply, or this proves nothing"
@@ -3418,8 +3388,7 @@ fn changing_an_initial_resets_live_component_state() {
     // Prove the caption is PRESENT before the edit. Without this, a dispatch
     // regression alone satisfies the assertion below and masks the schema
     // regression the test is named for.
-    let live =
-        splash_core::ui_l0::realize_with_state(BEFORE, &data, &store, RealizeLimits::default());
+    let live = splash_ui_l0::realize_with_state(BEFORE, &data, &store, RealizeLimits::default());
     let live_root = live.root.unwrap();
     let mut before_caps = Vec::new();
     find(&live_root, "TextCaption", &mut before_caps);
@@ -3430,8 +3399,7 @@ fn changing_an_initial_resets_live_component_state() {
     );
 
     let after = BEFORE.replace("initial: 0", "initial: 7");
-    let out =
-        splash_core::ui_l0::realize_with_state(&after, &data, &store, RealizeLimits::default());
+    let out = splash_ui_l0::realize_with_state(&after, &data, &store, RealizeLimits::default());
     let out_root = out.root.unwrap();
     let mut caps = Vec::new();
     find(&out_root, "TextCaption", &mut caps);
@@ -3548,9 +3516,8 @@ fn a_source_argument_path_must_be_declared() {
     assert!(!report.valid, "`secrets` is not declared");
 
     // The plan must not carry it either, for a caller that skips checking.
-    let plan = splash_core::ui_l0::source_plan(
-        "source photo sys.photo(query: secrets.token)\nview root Rule()",
-    );
+    let plan =
+        splash_ui_l0::source_plan("source photo sys.photo(query: secrets.token)\nview root Rule()");
     assert!(
         !plan.diagnostics.is_empty(),
         "the plan must report it rather than hand the host an undeclared path"
@@ -3662,9 +3629,9 @@ fn a_transition_batch_is_atomic() {
                         event both { a: set(1), b: set(cfg.missing) }\n\
                         view root Row(on_tap: both) { Rule() }";
 
-    let mut store = splash_core::ui_l0::InstanceStore::default();
+    let mut store = splash_ui_l0::InstanceStore::default();
     // `cfg.missing` does not resolve, so the batch cannot complete.
-    let applied = splash_core::ui_l0::dispatch_with_data(
+    let applied = splash_ui_l0::dispatch_with_data(
         CARD,
         &mut store,
         "root",
@@ -3690,10 +3657,9 @@ fn a_payload_must_fit_the_state_it_is_written_to() {
     const CARD: &str = "state n { shape: number, initial: 0 }\n\
                         event pick { n: set($value) }\n\
                         view root Row(on_tap: pick, value: \"x\") { Rule() }";
-    let mut store = splash_core::ui_l0::InstanceStore::default();
+    let mut store = splash_ui_l0::InstanceStore::default();
     let payload = serde_json::json!("not a number");
-    let applied =
-        splash_core::ui_l0::dispatch_with(CARD, &mut store, "root", "pick", Some(&payload));
+    let applied = splash_ui_l0::dispatch_with(CARD, &mut store, "root", "pick", Some(&payload));
     assert!(!applied, "a payload of the wrong shape must be refused");
     assert_eq!(store.get("@card", "n"), None);
 }
@@ -3709,16 +3675,16 @@ fn clear_restores_a_path_valued_initial() {
                         event flip { units: cycle(.c, .f) }\n\
                         view root Row(on_tap: flip) { Rule() }";
     let data = serde_json::json!({"env": {"locale": {"temp_unit": "f"}}});
-    let mut store = splash_core::ui_l0::InstanceStore::default();
+    let mut store = splash_ui_l0::InstanceStore::default();
 
-    splash_core::ui_l0::dispatch_with_data(CARD, &mut store, "root", "flip", None, &data);
+    splash_ui_l0::dispatch_with_data(CARD, &mut store, "root", "flip", None, &data);
     assert_eq!(
         store.get("@card", "units").and_then(|v| v.as_str()),
         Some("c"),
         "cycle must advance from the host-supplied initial `f`, not from the shape default"
     );
 
-    splash_core::ui_l0::dispatch_with_data(CARD, &mut store, "root", "reset", None, &data);
+    splash_ui_l0::dispatch_with_data(CARD, &mut store, "root", "reset", None, &data);
     assert_eq!(
         store.get("@card", "units").and_then(|v| v.as_str()),
         Some("f"),

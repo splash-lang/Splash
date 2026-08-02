@@ -5,7 +5,7 @@
 //! Proves the loop end to end without a UI: state lives in the store, the event
 //! is a declared name, and the second realization reflects the write.
 
-use splash_core::ui_l0::{
+use splash_ui_l0::{
     dispatch_with, makepad, realize_with_state, InstanceStore, RealizeLimits,
 };
 

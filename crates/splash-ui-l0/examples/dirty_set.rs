@@ -2,7 +2,7 @@
 //!
 //! Usage: dirty_set <card> <path>…
 
-use splash_core::ui_l0::{dirty_records, patch_points, record_dependencies};
+use splash_ui_l0::{dirty_records, patch_points, record_dependencies};
 
 fn main() {
     let mut a = std::env::args().skip(1);

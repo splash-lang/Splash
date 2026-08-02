@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/splash-core",
+    "crates/splash-ui-l0",
     "crates/splash-linux-seccomp",
     "crates/splash-linux-project-quota",
     "crates/splash-capabilities",

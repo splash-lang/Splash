@@ -5,7 +5,7 @@
 //! splash-core says WHAT to fetch and in what order; it never fetches. Only a
 //! host knows what answers `sys.weather`.
 
-use splash_core::ui_l0::{source_plan, SourceArg};
+use splash_ui_l0::{source_plan, SourceArg};
 
 fn arg_json(a: &SourceArg) -> String {
     match a {

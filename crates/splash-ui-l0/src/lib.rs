@@ -1,3 +1,26 @@
+//! **UI Profile Level 0** — a canonical Splash profile for LLM-authored UI.
+//!
+//! A generated card is untrusted source. L0 admits UI constructs while admitting
+//! nothing that can reach a capability: constructors, bindings, keyed loops,
+//! guarded branches, and components with declared local state, and **no
+//! expression form at all**. With nothing to evaluate, realization is a walk
+//! over the parsed tree with data substituted, and this crate contains no
+//! reference to a VM. Confinement is structural rather than sandboxed.
+//!
+//! The normative profile is `docs/ui-profile-l0.md`; the closed constructor and
+//! capability catalog is `docs/ui-l0-constructors.toml`. Where this code and
+//! those documents disagree, the documents win — and a test asserts the catalog
+//! agrees with the Rust table in both directions.
+//!
+//! # Why this is its own crate
+//!
+//! It depends on `serde_json` and nothing else, so any host can adopt L0 without
+//! adopting a runtime. That is not a stylistic preference: `splash-core` carries
+//! a vendored `makepad-script`, and an application already using a different
+//! makepad lineage cannot depend on it — Cargo refuses the lockfile, because
+//! both ship `makepad-error-log v1.0.0` at different paths. L0 never needed
+//! that dependency; it inherited it by living in the same crate.
+//!
 //! Level 0 of the UI profile — parser and validator for generated card source.
 //!
 //! See [`docs/ui-profile-l0.md`](../../../docs/ui-profile-l0.md) for the normative
@@ -20,7 +43,20 @@
 //!
 //! Everything is effect-free and bounded: no evaluation, no imports, no host access.
 
-use crate::{SyntaxDiagnostic, DEFAULT_MAX_SOURCE_BYTES, DEFAULT_MAX_SYNTAX_NESTING};
+/// One one-based location. Mirrors `splash_core::SyntaxDiagnostic` in shape;
+/// separate so this crate stands alone.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SyntaxDiagnostic {
+    pub line: usize,
+    pub column: usize,
+    pub message: String,
+}
+/// Largest source this profile will read. Matches `splash-core`'s bound, so a
+/// card refused there is refused here for the same reason.
+pub const DEFAULT_MAX_SOURCE_BYTES: usize = 256 * 1024;
+/// Maximum delimiter nesting. Bounds parse recursion — see the deep-path tests,
+/// which exist because unbounded recursion aborted the process on a 60 KB card.
+pub const DEFAULT_MAX_SYNTAX_NESTING: usize = 128;
 
 /// The narrowest profile a source belongs to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -812,7 +848,7 @@ struct Param {
     /// at all and lookup fell through to top-level injected data — so an
     /// unfilled prop could capture whatever the host happened to supply under
     /// the same name.
-    default: Option<crate::JsonValue>,
+    default: Option<serde_json::Value>,
 }
 
 #[derive(Debug)]
@@ -822,7 +858,7 @@ struct StateDecl {
     /// The declared `initial`. Parsed rather than discarded: without it a guard
     /// on a freshly-mounted state compares against null and takes the wrong
     /// branch on first render.
-    initial: Option<crate::JsonValue>,
+    initial: Option<serde_json::Value>,
     /// A path-valued `initial`, e.g. `initial: env.locale.temp_unit`. Held
     /// separately because it resolves against injected data at realization,
     /// not at parse. Dropping it made weather.card fall back to the enum's
@@ -1366,13 +1402,15 @@ impl<'a> Parser<'a> {
                     "initial" => {
                         if let Some(v) = value {
                             initial = match v.kind {
-                                Kind::Str => Some(crate::JsonValue::String(v.text.clone())),
-                                Kind::Token => Some(crate::JsonValue::String(
+                                Kind::Str => Some(serde_json::Value::String(v.text.clone())),
+                                Kind::Token => Some(serde_json::Value::String(
                                     v.text.trim_start_matches('.').to_string(),
                                 )),
-                                Kind::Num => v.text.parse::<f64>().ok().map(crate::JsonValue::from),
+                                Kind::Num => {
+                                    v.text.parse::<f64>().ok().map(serde_json::Value::from)
+                                }
                                 Kind::Ident if v.text == "true" || v.text == "false" => {
-                                    Some(crate::JsonValue::Bool(v.text == "true"))
+                                    Some(serde_json::Value::Bool(v.text == "true"))
                                 }
                                 Kind::Ident => {
                                     let mut path = v.text.clone();
@@ -1688,21 +1726,21 @@ impl<'a> Parser<'a> {
                         if self.tokens.get(at).is_some_and(|t| t.is_punct("=")) {
                             if let Some(v) = self.tokens.get(at + 1) {
                                 default = match v.kind {
-                                    Kind::Str => Some(crate::JsonValue::String(v.text.clone())),
-                                    Kind::Token => Some(crate::JsonValue::String(
+                                    Kind::Str => Some(serde_json::Value::String(v.text.clone())),
+                                    Kind::Token => Some(serde_json::Value::String(
                                         v.text.trim_start_matches('.').to_string(),
                                     )),
                                     Kind::Num => {
-                                        v.text.parse::<f64>().ok().map(crate::JsonValue::from)
+                                        v.text.parse::<f64>().ok().map(serde_json::Value::from)
                                     }
                                     Kind::Ident if v.text == "true" || v.text == "false" => {
-                                        Some(crate::JsonValue::Bool(v.text == "true"))
+                                        Some(serde_json::Value::Bool(v.text == "true"))
                                     }
                                     // A bare enum member: `unit: enum[c, f] = c`,
                                     // which is how §5.2 spells it and which
                                     // produced no default at all.
                                     Kind::Ident if matches!(shape, Shape::Enum(_)) => {
-                                        Some(crate::JsonValue::String(v.text.clone()))
+                                        Some(serde_json::Value::String(v.text.clone()))
                                     }
                                     _ => None,
                                 };
@@ -2068,18 +2106,18 @@ impl<'a> Parser<'a> {
 /// Follow a dotted path into injected data. Used for a path-valued `initial`,
 /// which resolves against what the host supplied rather than at parse time.
 /// A literal operand's value.
-fn literal_of(operand: &Operand) -> crate::JsonValue {
+fn literal_of(operand: &Operand) -> serde_json::Value {
     match operand {
-        Operand::Str(t) => crate::JsonValue::String(t.clone()),
-        Operand::Num(n) => crate::JsonValue::from(*n),
-        Operand::Token(t) => crate::JsonValue::String(t.trim_start_matches('.').to_string()),
+        Operand::Str(t) => serde_json::Value::String(t.clone()),
+        Operand::Num(n) => serde_json::Value::from(*n),
+        Operand::Token(t) => serde_json::Value::String(t.trim_start_matches('.').to_string()),
         Operand::Path(p) | Operand::Predicate { path: p, .. } => {
-            crate::JsonValue::String(p.clone())
+            serde_json::Value::String(p.clone())
         }
     }
 }
 
-fn data_path(data: &crate::JsonValue, path: &str) -> Option<crate::JsonValue> {
+fn data_path(data: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
     let mut current = data.clone();
     for segment in path.split('.') {
         current = match segment.parse::<usize>() {
@@ -2090,14 +2128,14 @@ fn data_path(data: &crate::JsonValue, path: &str) -> Option<crate::JsonValue> {
     Some(current)
 }
 
-fn scope_value(scope: &ValueScope, operand: &Operand) -> Option<crate::JsonValue> {
+fn scope_value(scope: &ValueScope, operand: &Operand) -> Option<serde_json::Value> {
     match operand {
         Operand::Path(p) => scope.lookup(p),
-        Operand::Token(t) => Some(crate::JsonValue::String(
+        Operand::Token(t) => Some(serde_json::Value::String(
             t.trim_start_matches('.').to_string(),
         )),
-        Operand::Str(s) => Some(crate::JsonValue::String(s.clone())),
-        Operand::Num(n) => Some(crate::JsonValue::from(*n)),
+        Operand::Str(s) => Some(serde_json::Value::String(s.clone())),
+        Operand::Num(n) => Some(serde_json::Value::from(*n)),
         // A nested comparison is not in the grammar.
         Operand::Predicate { .. } => None,
     }
@@ -2105,7 +2143,7 @@ fn scope_value(scope: &ValueScope, operand: &Operand) -> Option<crate::JsonValue
 
 /// Compare two resolved values. Shared by guards (`when a == b`) and by
 /// predicate arguments (`active: range == .d1`), so the two cannot drift.
-fn compare(left: Option<crate::JsonValue>, cmp: &str, right: Option<crate::JsonValue>) -> bool {
+fn compare(left: Option<serde_json::Value>, cmp: &str, right: Option<serde_json::Value>) -> bool {
     let (Some(left), Some(right)) = (left, right) else {
         // An operand that did not resolve cannot be compared. `!=` used to
         // return true here, so a guard against an UNDECLARED name took its
@@ -2550,12 +2588,12 @@ fn shape_name(shape: &Shape) -> &'static str {
 /// mounted a string into a numeric cell before any event ran.
 /// Whether a literal agrees with the shape it was declared alongside. Shared by
 /// state initials and parameter defaults so the two cannot drift.
-fn value_fits_shape(shape: &Shape, value: &crate::JsonValue) -> bool {
+fn value_fits_shape(shape: &Shape, value: &serde_json::Value) -> bool {
     match (shape, value) {
-        (Shape::Text, crate::JsonValue::String(_)) => true,
+        (Shape::Text, serde_json::Value::String(_)) => true,
         (Shape::Number, v) => v.is_number(),
-        (Shape::Bool, crate::JsonValue::Bool(_)) => true,
-        (Shape::Enum(members), crate::JsonValue::String(s)) => members.iter().any(|m| m == s),
+        (Shape::Bool, serde_json::Value::Bool(_)) => true,
+        (Shape::Enum(members), serde_json::Value::String(s)) => members.iter().any(|m| m == s),
         // A shape that names no literal form, or one we could not classify.
         (Shape::Record | Shape::Collection | Shape::Event | Shape::Other, _) => true,
         _ => false,
@@ -2854,8 +2892,10 @@ fn validate_sources(card: &Card, sink: &mut Diagnostics) {
 /// This walks COMPONENTS AND VIEWS as one graph. Walking components alone
 /// missed two shapes that both recurse forever at realization:
 ///
-///     view a b        view b a          (two views referencing each other)
-///     component A { view v }  view v { A() }   (a component via a view)
+/// ```text
+/// view a b        view b a                    two views referencing each other
+/// component A { view v }  view v { A() }      a component via a view
+/// ```
 ///
 /// Both passed the old check and recursed until the node cap tripped, which is
 /// a resource bound catching a structural error — and only because the caller
@@ -3393,8 +3433,10 @@ fn check_arg(
 /// Without this, §4 is enforced only at the literal's immediate call site, and
 /// laundering it through one prop defeats it entirely:
 ///
-///     component Bar(n: number) { view TempBar(lo: n, hi: n, min: n, max: n) }
-///     view root Bar(n: 41.2)
+/// ```text
+/// component Bar(n: number) { view TempBar(lo: n, hi: n, min: n, max: n) }
+/// view root Bar(n: 41.2)
+/// ```
 ///
 /// Computed to a fixpoint so passing the value through a chain of components is
 /// no better a hiding place than passing it directly.
@@ -3692,13 +3734,13 @@ pub struct RealizeReport {
 /// values and copy, keyed by declaration name. **No capability is reachable from
 /// here** — not because one is blocked, but because realization is a tree walk
 /// and there is no evaluator to reach anything with.
-pub fn realize(source: &str, data: &crate::JsonValue, limits: RealizeLimits) -> RealizeReport {
+pub fn realize(source: &str, data: &serde_json::Value, limits: RealizeLimits) -> RealizeReport {
     realize_inner(source, data, None, limits)
 }
 
 fn realize_inner(
     source: &str,
-    data: &crate::JsonValue,
+    data: &serde_json::Value,
     store: Option<&InstanceStore>,
     limits: RealizeLimits,
 ) -> RealizeReport {
@@ -3755,7 +3797,7 @@ fn realize_inner(
     // then its declared initial. Without this, an event that wrote card state
     // would apply and be invisible at the next realization — and a guard on a
     // state with no value at all would take the wrong branch on first render.
-    let mut frames: Vec<(String, crate::JsonValue)> = Vec::new();
+    let mut frames: Vec<(String, serde_json::Value)> = Vec::new();
     for state in &card.states {
         let value = store
             .and_then(|s| s.get(CARD_STATE_KEY, &state.path))
@@ -3788,13 +3830,13 @@ fn realize_inner(
 
 /// Bindings introduced by loops and component props, innermost last.
 struct ValueScope<'a> {
-    frames: Vec<(String, crate::JsonValue)>,
-    data: &'a crate::JsonValue,
+    frames: Vec<(String, serde_json::Value)>,
+    data: &'a serde_json::Value,
     copies: &'a [CopyDecl],
 }
 
 impl ValueScope<'_> {
-    fn lookup(&self, path: &str) -> Option<crate::JsonValue> {
+    fn lookup(&self, path: &str) -> Option<serde_json::Value> {
         let mut segments = path.split('.');
         let root = segments.next()?;
 
@@ -3819,7 +3861,7 @@ impl ValueScope<'_> {
                         "pending"
                     }
                 });
-            return Some(crate::JsonValue::String(status.to_string()));
+            return Some(serde_json::Value::String(status.to_string()));
         }
 
         // `copy.<name>` is authored in the ledger, not fetched. Resolve it from
@@ -3842,7 +3884,7 @@ impl ValueScope<'_> {
                 .find(|(k, _)| k == lang)
                 .or_else(|| entry.locales.iter().find(|(k, _)| k == "en"))
                 .or_else(|| entry.locales.first())?;
-            return Some(crate::JsonValue::String(text.1.clone()));
+            return Some(serde_json::Value::String(text.1.clone()));
         }
 
         let mut current = match self.frames.iter().rev().find(|(n, _)| n == root) {
@@ -3854,7 +3896,7 @@ impl ValueScope<'_> {
             if let Some(inner) = segment.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
                 let key = self.lookup(inner)?;
                 current = match &key {
-                    crate::JsonValue::String(k) => current.get(k.as_str())?.clone(),
+                    serde_json::Value::String(k) => current.get(k.as_str())?.clone(),
                     v => match v.as_u64() {
                         Some(i) => current.get(i as usize)?.clone(),
                         None => return None,
@@ -4019,24 +4061,24 @@ impl Realizer<'_> {
                 // An event names itself. It has no value in data, and looking
                 // one up is how the wrong event came to fire.
                 (Some(arg), Shape::Event) => match &arg.value {
-                    Operand::Path(p) => crate::JsonValue::String(p.clone()),
+                    Operand::Path(p) => serde_json::Value::String(p.clone()),
                     other => literal_of(other),
                 },
                 // A token is a bare member; the dot is lexical marking, not
                 // part of the value.
                 (Some(arg), _) => match &arg.value {
                     Operand::Token(t) => {
-                        crate::JsonValue::String(t.trim_start_matches('.').to_string())
+                        serde_json::Value::String(t.trim_start_matches('.').to_string())
                     }
                     Operand::Path(p) | Operand::Predicate { path: p, .. } => scope
                         .lookup(p)
-                        .unwrap_or_else(|| crate::JsonValue::String(p.clone())),
+                        .unwrap_or_else(|| serde_json::Value::String(p.clone())),
                     other => literal_of(other),
                 },
                 // Omitted: the declared default, or nothing. Binding a frame
                 // either way is what stops lookup falling through to injected
                 // data and letting the host capture an unfilled prop.
-                (None, _) => param.default.clone().unwrap_or(crate::JsonValue::Null),
+                (None, _) => param.default.clone().unwrap_or(serde_json::Value::Null),
             };
             scope.frames.push((param.name.clone(), value));
             bound += 1;
@@ -4162,7 +4204,7 @@ impl Realizer<'_> {
             if let Some(index_binder) = element.binders.get(1) {
                 scope
                     .frames
-                    .push((index_binder.clone(), crate::JsonValue::from(index + 1)));
+                    .push((index_binder.clone(), serde_json::Value::from(index + 1)));
                 bound += 1;
             }
 
@@ -4188,7 +4230,7 @@ impl Realizer<'_> {
 
         let Some(cmp) = element.cmp.as_deref() else {
             // Bare boolean guard — amendment #10.
-            return matches!(left, Some(crate::JsonValue::Bool(true)));
+            return matches!(left, Some(serde_json::Value::Bool(true)));
         };
         let right = element.rhs.as_ref().and_then(|r| scope_value(scope, r));
         compare(left, cmp, right)
@@ -4212,7 +4254,7 @@ impl Realizer<'_> {
                 // Through a component prop the name arrives bound; directly it
                 // is the path itself.
                 return match scope.lookup(p) {
-                    Some(crate::JsonValue::String(name)) => NodeValue::Event(name),
+                    Some(serde_json::Value::String(name)) => NodeValue::Event(name),
                     _ => NodeValue::Event(p.clone()),
                 };
             }
@@ -4225,8 +4267,8 @@ impl Realizer<'_> {
                 NodeValue::Bool(compare(scope.lookup(path), cmp, scope_value(scope, rhs)))
             }
             Operand::Path(p) => match scope.lookup(p) {
-                Some(crate::JsonValue::String(s)) => NodeValue::Text(s),
-                Some(crate::JsonValue::Bool(b)) => NodeValue::Bool(b),
+                Some(serde_json::Value::String(s)) => NodeValue::Text(s),
+                Some(serde_json::Value::Bool(b)) => NodeValue::Bool(b),
                 Some(v) => match v.as_f64() {
                     Some(n) => NodeValue::Number(n),
                     None => NodeValue::Missing,
@@ -4237,9 +4279,9 @@ impl Realizer<'_> {
     }
 }
 
-fn json_to_key(value: &crate::JsonValue) -> String {
+fn json_to_key(value: &serde_json::Value) -> String {
     match value {
-        crate::JsonValue::String(s) => s.clone(),
+        serde_json::Value::String(s) => s.clone(),
         other => other.to_string(),
     }
 }
@@ -4696,7 +4738,7 @@ pub const CARD_STATE_KEY: &str = "@card";
 #[derive(Clone, Debug, Default)]
 pub struct InstanceStore {
     /// `instance-key` → field → value.
-    cells: BTreeMap<String, BTreeMap<String, crate::JsonValue>>,
+    cells: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     /// Component name → the schema id its live cells were written under.
     schemas: BTreeMap<String, u64>,
     /// Component name → state path → the shape that cell was written under.
@@ -4706,11 +4748,11 @@ pub struct InstanceStore {
 }
 
 impl InstanceStore {
-    pub fn get(&self, key: &str, field: &str) -> Option<&crate::JsonValue> {
+    pub fn get(&self, key: &str, field: &str) -> Option<&serde_json::Value> {
         self.cells.get(key)?.get(field)
     }
 
-    fn set(&mut self, key: &str, field: &str, value: crate::JsonValue) {
+    fn set(&mut self, key: &str, field: &str, value: serde_json::Value) {
         self.cells
             .entry(key.to_string())
             .or_default()
@@ -4813,16 +4855,16 @@ fn schema_id(component: &Component) -> u64 {
     acc
 }
 
-fn initial_for(shape: &Shape) -> crate::JsonValue {
+fn initial_for(shape: &Shape) -> serde_json::Value {
     match shape {
-        Shape::Bool => crate::JsonValue::Bool(false),
+        Shape::Bool => serde_json::Value::Bool(false),
         Shape::Enum(members) => members
             .first()
-            .map(|m| crate::JsonValue::String(m.clone()))
-            .unwrap_or(crate::JsonValue::Null),
-        Shape::Text => crate::JsonValue::String(String::new()),
-        Shape::Number => crate::JsonValue::from(0.0),
-        Shape::Record | Shape::Collection | Shape::Event | Shape::Other => crate::JsonValue::Null,
+            .map(|m| serde_json::Value::String(m.clone()))
+            .unwrap_or(serde_json::Value::Null),
+        Shape::Text => serde_json::Value::String(String::new()),
+        Shape::Number => serde_json::Value::from(0.0),
+        Shape::Record | Shape::Collection | Shape::Event | Shape::Other => serde_json::Value::Null,
     }
 }
 
@@ -4832,7 +4874,7 @@ fn initial_for(shape: &Shape) -> crate::JsonValue {
 /// identically either way.
 pub fn realize_with_state(
     source: &str,
-    data: &crate::JsonValue,
+    data: &serde_json::Value,
     store: &InstanceStore,
     limits: RealizeLimits,
 ) -> RealizeReport {
@@ -4858,7 +4900,7 @@ pub fn dispatch_with(
     store: &mut InstanceStore,
     instance_key: &str,
     event: &str,
-    payload: Option<&crate::JsonValue>,
+    payload: Option<&serde_json::Value>,
 ) -> bool {
     dispatch_with_data(
         source,
@@ -4866,7 +4908,7 @@ pub fn dispatch_with(
         instance_key,
         event,
         payload,
-        &crate::JsonValue::Null,
+        &serde_json::Value::Null,
     )
 }
 
@@ -4881,8 +4923,8 @@ pub fn dispatch_with_data(
     store: &mut InstanceStore,
     instance_key: &str,
     event: &str,
-    payload: Option<&crate::JsonValue>,
-    data: &crate::JsonValue,
+    payload: Option<&serde_json::Value>,
+    data: &serde_json::Value,
 ) -> bool {
     let mut sink = Diagnostics::default();
     let Some(tokens) = lex(source, &mut sink) else {
@@ -4939,7 +4981,7 @@ pub fn dispatch_with_data(
     // left the earlier writes standing when a later one could not be computed —
     // a half-applied event, which is the thing atomicity exists to prevent.
     // Stage every write first, commit only if the whole batch resolves.
-    let mut staged: Vec<(String, crate::JsonValue)> = Vec::new();
+    let mut staged: Vec<(String, serde_json::Value)> = Vec::new();
 
     for transition in &declared.transitions {
         let Some(state) = states.iter().find(|s| s.path == transition.target) else {
@@ -4964,7 +5006,7 @@ pub fn dispatch_with_data(
 
         let next = match (&transition.form, &state.shape) {
             (Form::Toggle, Shape::Bool) => {
-                crate::JsonValue::Bool(!current.as_bool().unwrap_or(false))
+                serde_json::Value::Bool(!current.as_bool().unwrap_or(false))
             }
             (Form::Clear, shape) => declared_initial
                 .clone()
@@ -4974,7 +5016,7 @@ pub fn dispatch_with_data(
                     .as_str()
                     .and_then(|s| members.iter().position(|m| m == s))
                     .unwrap_or(0);
-                crate::JsonValue::String(members[(at + 1) % members.len()].clone())
+                serde_json::Value::String(members[(at + 1) % members.len()].clone())
             }
             (Form::Set(source), _) => match source {
                 SetSource::Payload => match payload {
@@ -4996,9 +5038,9 @@ pub fn dispatch_with_data(
                     // §3 says a batch is all or nothing.
                     _ => return false,
                 },
-                SetSource::Token(t) | SetSource::Text(t) => crate::JsonValue::String(t.clone()),
-                SetSource::Num(n) => crate::JsonValue::from(*n),
-                SetSource::Bool(b) => crate::JsonValue::Bool(*b),
+                SetSource::Token(t) | SetSource::Text(t) => serde_json::Value::String(t.clone()),
+                SetSource::Num(n) => serde_json::Value::from(*n),
+                SetSource::Bool(b) => serde_json::Value::Bool(*b),
             },
             _ => return false,
         };

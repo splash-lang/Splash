@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).parent
-SRC = ROOT / "crates/splash-core/src/ui_l0.rs"
+SRC = ROOT / "crates/splash-ui-l0/src/lib.rs"
 
 
 @dataclass(frozen=True)
@@ -139,7 +139,7 @@ RULES = [
 def suite():
     """(built, passed). built=False means the mutation did not compile."""
     r = subprocess.run(
-        ["cargo", "test", "-q", "-p", "splash-core", "--test", "ui_profile_l0"],
+        ["cargo", "test", "-q", "-p", "splash-ui-l0", "--test", "profile"],
         cwd=ROOT, capture_output=True, text=True,
     )
     out = r.stdout + r.stderr

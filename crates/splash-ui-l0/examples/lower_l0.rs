@@ -5,7 +5,7 @@
 //! The data stands in for what the runtime would have fetched. Realization is a
 //! tree walk, so this never evaluates anything and reaches nothing.
 
-use splash_core::ui_l0::{makepad, realize, RealizeLimits};
+use splash_ui_l0::{makepad, realize, RealizeLimits};
 
 fn main() {
     let mut args = std::env::args().skip(1);
