@@ -71,8 +71,7 @@ view header  Col {
                }
              }
 
-view chart  StockPlot(points: series.points, min: series.min, max: series.max,
-                      tint: quote.change)
+view chart  StockPlot(symbol: selected, range: range)
 
 # Range switching is a set() over a declared enum — no expression, and the
 # selected range is a guard rather than a computed style.

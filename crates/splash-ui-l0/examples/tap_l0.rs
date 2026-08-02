@@ -5,9 +5,7 @@
 //! Proves the loop end to end without a UI: state lives in the store, the event
 //! is a declared name, and the second realization reflects the write.
 
-use splash_ui_l0::{
-    dispatch_with, makepad, realize_with_state, InstanceStore, RealizeLimits,
-};
+use splash_ui_l0::{dispatch_with, makepad, realize_with_state, InstanceStore, RealizeLimits};
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();

@@ -2365,16 +2365,11 @@ pub mod catalog {
         ("MoonPhase", &[("phase", Path), ("illum", Path)]),
         (
             "AqiContour",
-            &[("field", Path), ("index", Path), ("band", Path)],
+            &[("lat", Path), ("lon", Path), ("span", Number)],
         ),
         (
             "StockPlot",
-            &[
-                ("points", Path),
-                ("min", Path),
-                ("max", Path),
-                ("tint", Path),
-            ],
+            &[("symbol", Path), ("range", TokenOrPath(UNIT))],
         ),
     ];
 
@@ -3726,6 +3721,9 @@ pub struct RealizeReport {
     /// without it the store grows for the life of the app, and a key that
     /// reappears inherits a stale value (§5.7, unmount).
     pub live_keys: Vec<String>,
+    /// Nodes carried over from a previous tree by [`realize_patch`] rather than
+    /// rebuilt. Zero for a full realization.
+    pub reused: usize,
 }
 
 /// Realize a card against resolved data.
@@ -3754,6 +3752,7 @@ fn realize_inner(
             nodes: 0,
             truncated: false,
             live_keys: Vec::new(),
+            reused: 0,
         };
     }
 
@@ -3766,6 +3765,7 @@ fn realize_inner(
                 nodes: 0,
                 truncated: false,
                 live_keys: Vec::new(),
+                reused: 0,
             }
         }
     };
@@ -3779,6 +3779,7 @@ fn realize_inner(
             nodes: 0,
             truncated: false,
             live_keys: Vec::new(),
+            reused: 0,
         };
     };
 
@@ -3821,6 +3822,7 @@ fn realize_inner(
     let live_keys = std::mem::take(&mut ctx.live);
     RealizeReport {
         root: out.into_iter().next(),
+        reused: 0,
         diagnostics: sink.items,
         nodes,
         truncated,
@@ -4627,14 +4629,26 @@ pub mod makepad {
                 );
             }
             "AqiContour" => {
+                // lat/lon/span, not a field: the widget fetches its own data.
+                // Emitting `draw_bg.idx` was writing a GPU uniform from the
+                // card, which is the ABI leak the widget was rewritten to end.
                 let _ = writeln!(
                     out,
-                    "{p}AqiContour{{ width: Fill height: 190 draw_bg.have: 1.0 draw_bg.idx: {} }}",
-                    trim_num(num_of(arg(node, "index")))
+                    "{p}AqiContour{{ width: Fill height: 190 lat: {} lon: {} span: {} }}",
+                    trim_num(num_of(arg(node, "lat"))),
+                    trim_num(num_of(arg(node, "lon"))),
+                    trim_num(num_of(arg(node, "span"))),
                 );
             }
             "StockPlot" => {
-                let _ = writeln!(out, "{p}StockPlot{{ width: Fill height: 180 }}");
+                // The card names WHICH series; the widget fetches it. Emitting
+                // neither left the chart empty on every card that used one.
+                let _ = writeln!(
+                    out,
+                    "{p}StockPlot{{ width: Fill height: 180 symbol: {} range: {} }}",
+                    text_of(arg(node, "symbol")),
+                    text_of(arg(node, "range")),
+                );
             }
             "Chip" => {
                 // `active` selects the fill. Dropping it made every range chip
@@ -5272,17 +5286,33 @@ pub fn record_dependencies(source: &str) -> Vec<RecordDeps> {
 /// avoid. A record is a **patch point** only when its OWN bindings read a
 /// changed path; an ancestor that merely contains it is handled by patching the
 /// descendant.
-pub fn patch_points(source: &str, changed: &[&str]) -> Vec<String> {
+/// Which sources a change invalidates, following the cascade.
+///
+/// Re-fetching is the expensive half of reconciliation — realization walks a
+/// ninety-node tree, a source is a network round trip — so this is what a host
+/// needs after an event. `patch_points` computed it internally and discarded it,
+/// which left the cheap half exposed and the costly half unreachable.
+///
+/// The cascade matters: `city` feeds `place`, `place` feeds `now`. A host that
+/// refetched only the direct dependent would read a fresh coordinate against a
+/// stale forecast.
+pub fn stale_sources(source: &str, changed: &[&str]) -> Vec<String> {
     let mut sink = Diagnostics::default();
     let Some(tokens) = lex(source, &mut sink) else {
         return Vec::new();
     };
     let card = Parser::new(&tokens, &mut sink).parse_card();
-    let roots: Vec<String> = changed.iter().map(root_of).collect();
+    let declared: Vec<&str> = card.sources.iter().map(|s| s.name.as_str()).collect();
+    invalidated_by(&card, changed)
+        .into_iter()
+        .filter(|n| declared.iter().any(|d| *d == n))
+        .collect()
+}
 
-    // A source reading changed state must be re-fetched, and anything binding
-    // its result is then stale.
-    let mut invalidated: Vec<String> = roots.clone();
+/// The transitive closure of what `changed` invalidates: the changed roots
+/// themselves, plus every source that reads one, to a fixpoint.
+fn invalidated_by(card: &Card, changed: &[&str]) -> Vec<String> {
+    let mut invalidated: Vec<String> = changed.iter().map(root_of).collect();
     let mut steps = 0usize;
     loop {
         steps += 1;
@@ -5314,6 +5344,95 @@ pub fn patch_points(source: &str, changed: &[&str]) -> Vec<String> {
             break;
         }
     }
+    invalidated
+}
+
+/// Realize, reusing the subtrees a change cannot have touched.
+///
+/// This is what makes `patch_points` load-bearing rather than advisory. It
+/// computed which records a change reaches and nothing consumed the answer, so
+/// every event rebuilt the whole card.
+///
+/// The reuse rule is deliberately conservative: a subtree is carried over only
+/// when its record is **absent** from the patch set, so a record whose
+/// dependencies could not be determined is rebuilt. Being wrong in that
+/// direction costs work; being wrong in the other renders a stale value, and a
+/// stale value on screen is indistinguishable from a correct one.
+///
+/// The result must equal a full realization. A test asserts that on the same
+/// card, because an optimisation that changes what is rendered is not an
+/// optimisation.
+pub fn realize_patch(
+    source: &str,
+    data: &serde_json::Value,
+    store: Option<&InstanceStore>,
+    previous: &UiNode,
+    changed: &[&str],
+    limits: RealizeLimits,
+) -> RealizeReport {
+    let dirty = patch_points(source, changed);
+    let mut report = realize_inner(source, data, store, limits);
+
+    if let Some(root) = report.root.as_mut() {
+        report.reused = carry_over(root, previous, &dirty);
+    }
+    report
+}
+
+/// Copy nodes from `previous` into `next` wherever the record they belong to is
+/// not dirty, and count what was carried.
+///
+/// Identity is the instance key, which already encodes the declaration path and
+/// enclosing loop keys — the same key that decides state ownership, so reuse and
+/// state agree by construction rather than by a second rule.
+fn carry_over(next: &mut UiNode, previous: &UiNode, dirty: &[String]) -> usize {
+    // A key names the records it passes through: `root/when#0/w:stream#0/stream`.
+    let touches_dirty = |key: &str| {
+        dirty
+            .iter()
+            .any(|d| key.split(['/', '#', '[']).any(|seg| seg == d))
+    };
+
+    // A subtree is reusable only if NOTHING inside it is dirty. Checking the
+    // node's own key alone lets the root short-circuit the whole tree, because
+    // `patch_points` deliberately excludes ancestors that merely *contain* a
+    // change — so a clean parent above a dirty child is the normal case, not an
+    // edge one.
+    fn subtree_is_clean(n: &UiNode, touches_dirty: &dyn Fn(&str) -> bool) -> bool {
+        !touches_dirty(&n.key)
+            && n.children
+                .iter()
+                .all(|c| subtree_is_clean(c, touches_dirty))
+    }
+
+    if next.key == previous.key
+        && next.kind == previous.kind
+        && subtree_is_clean(next, &touches_dirty)
+    {
+        *next = previous.clone();
+        return count_nodes(previous);
+    }
+
+    let mut reused = 0;
+    for child in next.children.iter_mut() {
+        if let Some(was) = previous.children.iter().find(|p| p.key == child.key) {
+            reused += carry_over(child, was, dirty);
+        }
+    }
+    reused
+}
+
+fn count_nodes(n: &UiNode) -> usize {
+    1 + n.children.iter().map(count_nodes).sum::<usize>()
+}
+
+pub fn patch_points(source: &str, changed: &[&str]) -> Vec<String> {
+    let mut sink = Diagnostics::default();
+    let Some(tokens) = lex(source, &mut sink) else {
+        return Vec::new();
+    };
+    let card = Parser::new(&tokens, &mut sink).parse_card();
+    let invalidated = invalidated_by(&card, changed);
 
     let mut out = Vec::new();
     for view in &card.views {

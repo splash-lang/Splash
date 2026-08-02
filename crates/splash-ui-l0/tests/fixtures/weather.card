@@ -101,7 +101,7 @@ view forecast  Panel {
 
 view airfield  Panel {
                  TextCaption(text: copy.air)
-                 AqiContour(field: aqi.grid, index: aqi.index, band: aqi.band)
+                 AqiContour(lat: place.lat, lon: place.lon, span: 1.6)
                }
 
 view sunmoon  Panel {

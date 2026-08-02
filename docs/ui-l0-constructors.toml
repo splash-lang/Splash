@@ -152,16 +152,23 @@ now  = { kind = "path" }
 phase = { kind = "path" }
 illum = { kind = "path" }
 
+# The card supplies a LOCATION, never the field. An earlier version took
+# `field`/`index`/`band`, which described an interface the widget deliberately
+# abandoned: supplying the field meant sixteen scalar uniforms in the card, and
+# as the widget's own comment puts it, "that put a GPU uniform layout into the
+# authoring language — it is not a widget contract, it is an ABI". The widget
+# fetches its own field now, so a card cannot express one wrongly.
 [AqiContour]
-field = { kind = "path" }
-index = { kind = "path" }
-band  = { kind = "path" }
+lat  = { kind = "path" }
+lon  = { kind = "path" }
+span = { kind = "number" }
 
+# Likewise: the card names WHICH series, and the widget fetches it. Passing
+# `points`/`min`/`max` made the card responsible for a scaled series it has no
+# way to compute — §4's no-facts rule with the arithmetic hidden in the host.
 [StockPlot]
-points = { kind = "path" }
-min    = { kind = "path" }
-max    = { kind = "path" }
-tint   = { kind = "path" }
+symbol = { kind = "path" }
+range  = { kind = "unit" }
 
 # ─── shared token sets ────────────────────────────────────────────────────────
 # Named kinds referenced above, so a token set is defined once rather than

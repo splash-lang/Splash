@@ -3805,3 +3805,139 @@ fn no_role_accepts_presentation() {
         }
     }
 }
+
+// ─── reconciliation, applied ─────────────────────────────────────────────────
+
+/// `patch_points` computes which SOURCES a change invalidates and then throws
+/// that away, returning only the records to re-realize. Re-fetching is the
+/// expensive half — realization is a tree walk over ~90 nodes, a source is a
+/// network round trip — so the invalidation set is what a host actually needs.
+#[test]
+fn a_state_change_names_the_sources_that_must_be_refetched() {
+    const CARD: &str = r#"
+state city  { shape: text, initial: "" }
+state units { shape: enum[c, f], initial: .c }
+source place sys.geocode(name: state.city)
+source now   sys.weather(lat: place.lat, lon: place.lon)
+source moon  sys.moonphase()
+view root Col { TextRow(text: place.name) TextValue(value: now.temp, unit: units) }
+"#;
+
+    // `city` feeds `place`, and `place` feeds `now` — the cascade must be
+    // followed, or a host refetches a coordinate and reads a stale forecast.
+    let stale = splash_ui_l0::stale_sources(CARD, &["city"]);
+    assert!(stale.contains(&"place".to_string()), "{stale:?}");
+    assert!(
+        stale.contains(&"now".to_string()),
+        "the cascade must be followed: {stale:?}"
+    );
+    assert!(
+        !stale.contains(&"moon".to_string()),
+        "the moon does not depend on the city: {stale:?}"
+    );
+
+    // A display-only unit change costs no fetch at all. This is the case the
+    // whole mechanism exists for.
+    assert!(
+        splash_ui_l0::stale_sources(CARD, &["units"]).is_empty(),
+        "changing a display unit must not refetch anything"
+    );
+}
+
+/// The second half: realization reuses the subtrees a change cannot have
+/// touched, instead of rebuilding the card.
+#[test]
+fn realization_reuses_the_records_a_change_did_not_touch() {
+    const CARD: &str = r#"
+state units { shape: enum[c, f], initial: .c }
+source now  sys.weather(lat: 1.0, lon: 2.0)
+source news sys.news(count: 1, fields: [title])
+view root Col { temps headline }
+view temps    Col { TextValue(value: now.temp, unit: units) }
+view headline Col { TextRow(text: news.0.title) }
+"#;
+    let data = serde_json::json!({
+        "now": {"temp": 21.0}, "news": [{"title": "unchanged"}], "units": "c"
+    });
+
+    let full = realize(CARD, &data, RealizeLimits::default());
+    let before = full.root.expect("a tree");
+
+    let patched = splash_ui_l0::realize_patch(
+        CARD,
+        &data,
+        None,
+        &before,
+        &["units"],
+        RealizeLimits::default(),
+    );
+    let after = patched.root.expect("a tree");
+
+    assert_eq!(
+        shape_signature(&before),
+        shape_signature(&after),
+        "a patch must produce the same tree as a full realize"
+    );
+    assert!(
+        patched.reused > 0,
+        "the headline reads no changed path and should have been reused"
+    );
+    assert!(
+        patched.reused < patched.nodes,
+        "and the temperature record must have been rebuilt, not reused"
+    );
+}
+
+fn shape_signature(n: &splash_ui_l0::UiNode) -> String {
+    let kids: Vec<String> = n.children.iter().map(shape_signature).collect();
+    format!("{}[{}]", n.kind, kids.join(","))
+}
+
+/// The catalog described an interface these widgets abandoned. `AqiContour`
+/// took `field`/`index`/`band` and `StockPlot` took `points`/`min`/`max` — but
+/// both fetch their own data now, and the widget's own comment says why:
+/// supplying the field meant sixteen scalar uniforms, and "that put a GPU
+/// uniform layout into the authoring language — it is not a widget contract, it
+/// is an ABI."
+///
+/// So a card names a LOCATION or a SERIES, and the arguments it names must
+/// reach the widget.
+#[test]
+fn a_contour_carries_the_location_it_was_given() {
+    let dsl = splash_ui_l0::makepad::lower(
+        &realize(
+            "source p sys.geocode(name: \"Kyoto\")\n\
+             view root Col { AqiContour(lat: p.lat, lon: p.lon, span: 1.6) }",
+            &serde_json::json!({"p": {"lat": 35.0, "lon": 135.7}}),
+            RealizeLimits::default(),
+        )
+        .root
+        .unwrap(),
+    );
+    assert!(dsl.contains("AqiContour"), "{dsl}");
+    for v in ["35", "135.7", "1.6"] {
+        assert!(
+            dsl.contains(v),
+            "the bound {v} must reach the widget, or it samples the wrong place: {dsl}"
+        );
+    }
+}
+
+#[test]
+fn a_plot_carries_the_series_it_was_given() {
+    let dsl = splash_ui_l0::makepad::lower(
+        &realize(
+            "state sel { shape: text, initial: \"NVDA\" }\n\
+             view root Col { StockPlot(symbol: sel, range: .money) }",
+            &serde_json::json!({}),
+            RealizeLimits::default(),
+        )
+        .root
+        .unwrap(),
+    );
+    assert!(dsl.contains("StockPlot"), "{dsl}");
+    assert!(
+        dsl.contains("NVDA"),
+        "the symbol must reach the widget, or it plots nothing: {dsl}"
+    );
+}
