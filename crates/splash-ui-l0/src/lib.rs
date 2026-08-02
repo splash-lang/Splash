@@ -5518,3 +5518,121 @@ fn collect_reads(element: &Element, reads: &mut Vec<String>, pulls: &mut Vec<Str
         }
     }
 }
+
+// ────────────────────────────────────────────── DSL lowering, consumer-checked ──
+
+/// What a lowering produced, and what it could not.
+pub struct DslReport {
+    pub dsl: String,
+    /// Roles with no kind in the consumer's table. A card containing one is
+    /// incomplete, and saying so is the difference between a missing chart and
+    /// a missing chart nobody was told about.
+    pub diagnostics: Vec<SyntaxDiagnostic>,
+}
+
+/// Lower to the Splash DSL data form, reporting what could not be mapped.
+///
+/// The kinds and attribute names below are the consumer's, established by
+/// running `splash_render::build` rather than by reading about it. Three facts
+/// shaped this and each cost a revert to learn:
+///
+/// - `splash-render`'s tag table is closed. An unknown kind at the root rejects
+///   the whole document; as a child it is dropped with no diagnostic at all.
+/// - Its `Attrs` is a fixed 37-field struct, not an open bag, so an attribute
+///   it does not name is simply unread. Emitting one is the same as emitting
+///   nothing, only harder to notice.
+/// - The root must be a literal object. A theme function call in that position
+///   fails inside the VM, so a card's outermost role cannot lower to one.
+///
+/// Six roles have no kind here — the data visualisations. They are reported,
+/// not emitted: a card that loses its temperature bars should say so.
+pub fn lower_dsl_checked(root: &UiNode) -> DslReport {
+    let mut out = String::from("// REALIZED from an L0 ledger — do not edit.\n");
+    let mut diagnostics = Vec::new();
+    emit_dsl(root, 0, &mut out, &mut diagnostics);
+    out.push('\n');
+    DslReport {
+        dsl: out,
+        diagnostics,
+    }
+}
+
+/// The DSL text alone, for callers that have already checked.
+pub fn lower_dsl(root: &UiNode) -> String {
+    lower_dsl_checked(root).dsl
+}
+
+/// A role's kind in the consumer's table, or `None` if it has none.
+///
+/// Deliberately not a fallback: an unmapped role must reach the caller as a
+/// diagnostic. Guessing a kind is what produced five names the consumer had
+/// never heard of.
+fn dsl_kind(role: &str) -> Option<&'static str> {
+    Some(match role {
+        "Surface" | "Col" => "column",
+        "Row" => "row",
+        "Grid" => "grid",
+        "Panel" | "Card" => "card",
+        "Rule" => "divider",
+        "Tile" => "listitem",
+        "Chip" => "chip",
+        "Photo" => "image",
+        "WeatherIcon" => "weathericon",
+        role if role.starts_with("Text") => "text",
+        // TempBar, SunArc, MoonPhase, AqiContour, StockPlot — no kind exists.
+        _ => return None,
+    })
+}
+
+/// Attribute names the consumer's `Attrs` actually reads. Anything else is
+/// dropped on arrival, so emitting it only hides the loss.
+fn dsl_attr(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "text" => "text",
+        "label" => "label",
+        "src" => "src",
+        "gap" => "spacing",
+        "cols" => "w",
+        "pad" => "pad",
+        _ => return None,
+    })
+}
+
+fn emit_dsl(node: &UiNode, depth: usize, out: &mut String, sink: &mut Vec<SyntaxDiagnostic>) {
+    use std::fmt::Write as _;
+    let pad = "  ".repeat(depth);
+
+    let Some(kind) = dsl_kind(&node.kind) else {
+        sink.push(SyntaxDiagnostic {
+            line: 1,
+            column: 1,
+            message: format!(
+                "{} has no kind in the renderer's table, so it cannot be lowered — a card \
+                 using it would render without it and look complete (profile §1.1)",
+                node.kind
+            ),
+        });
+        return;
+    };
+
+    let _ = write!(out, "{pad}{{t: {kind:?}");
+    for (name, value) in &node.args {
+        let Some(attr) = dsl_attr(name) else { continue };
+        let _ = match value {
+            NodeValue::Text(s) => write!(out, ", {attr}: {s:?}"),
+            NodeValue::Number(n) => write!(out, ", {attr}: {}", makepad::trim_num(*n)),
+            NodeValue::Token(t) => write!(out, ", {attr}: {t:?}"),
+            _ => Ok(()),
+        };
+    }
+
+    if node.children.is_empty() {
+        out.push_str("}\n");
+        return;
+    }
+    out.push_str(", c: [\n");
+    for child in &node.children {
+        emit_dsl(child, depth + 1, out, sink);
+    }
+    let _ = writeln!(out, "{pad}]}}");
+}

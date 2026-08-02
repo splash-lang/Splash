@@ -3941,3 +3941,89 @@ fn a_plot_carries_the_series_it_was_given() {
         "the symbol must reach the widget, or it plots nothing: {dsl}"
     );
 }
+
+// ─── DSL lowering, verified against the real consumer ────────────────────────
+
+/// A previous attempt at this was reverted because it asserted a contract with
+/// `splash-render` that nobody had opened: five of 23 kinds did not exist, the
+/// consumer reads `variant` where it emitted `role`, and its `Attrs` is a fixed
+/// 37-field struct rather than an open bag, so about twenty attributes were
+/// unread. All of that was one `grep` away.
+///
+/// So this lowering emits ONLY what the consumer accepts, and refuses loudly
+/// where it cannot. The constraints below were found by running
+/// `splash_render::build`, not by reading about it:
+///
+/// - the root must be a literal object; a function call there fails
+/// - an unknown kind at the root rejects the document, and as a child is
+///   dropped without a diagnostic
+#[test]
+fn dsl_lowering_emits_only_kinds_the_consumer_accepts() {
+    const ACCEPTED: &[&str] = &[
+        "column",
+        "row",
+        "stack",
+        "scroll",
+        "list",
+        "grid",
+        "text",
+        "image",
+        "button",
+        "card",
+        "listitem",
+        "divider",
+        "spacer",
+        "chip",
+        "weathericon",
+    ];
+    let dsl = splash_ui_l0::lower_dsl(
+        &realize(NEWS, &news_fixture(), RealizeLimits::default())
+            .root
+            .unwrap(),
+    );
+    for kind in dsl
+        .split("{t: \"")
+        .skip(1)
+        .filter_map(|s| s.split('"').next())
+    {
+        assert!(
+            ACCEPTED.contains(&kind),
+            "{kind:?} is not in splash-render's tag table; as a child it would be \
+             dropped without a diagnostic and as a root it would reject the card"
+        );
+    }
+}
+
+/// A role with no accepted kind must produce a DIAGNOSTIC, not a node the
+/// consumer silently discards. Silent dropping is how a card renders with four
+/// of its five visualisations missing and still looks finished.
+#[test]
+fn an_unmappable_role_is_reported_rather_than_dropped() {
+    let report = splash_ui_l0::lower_dsl_checked(
+        &realize(
+            "source w sys.weather(lat: 1.0, lon: 2.0)\n\
+             view root Col { TempBar(lo: w.lo, hi: w.hi, min: w.min, max: w.max) }",
+            &serde_json::json!({"w": {"lo": 1.0, "hi": 2.0, "min": 0.0, "max": 3.0}}),
+            RealizeLimits::default(),
+        )
+        .root
+        .unwrap(),
+    );
+    assert!(
+        !report.diagnostics.is_empty(),
+        "TempBar has no kind in splash-render, so lowering it must say so"
+    );
+    assert!(
+        report.diagnostics[0].message.contains("TempBar"),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+fn news_fixture() -> serde_json::Value {
+    serde_json::json!({
+        "lead": [{"id": "a", "title": "T", "author": "A", "points": 1, "comments": 2}],
+        "feed": [{"id": "b", "title": "U", "author": "B", "points": 3}],
+        "article": {}, "selected": "", "env": {"locale": {}}
+    })
+}
