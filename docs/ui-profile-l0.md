@@ -742,6 +742,58 @@ The third is not the first. Reusing its name for instance identity would put per
 into a global map keyed by whatever the kit chose, which is the collision §5.7 exists to
 prevent.
 
+### 5.11 Who answers a source
+
+A `source` declares *what the card needs*, not *who fetches it*. Two answers are
+now implemented, and the choice belongs to the backend rather than to the card:
+
+| | who fetches | when it is chosen |
+|---|---|---|
+| **Host-answered** | the host walks `source_plan` and fills a data blob | always available; the only option for a backend with no fetch of its own |
+| **Backend-answered** | lowering emits a call the backend makes itself | where the backend has a capability that answers the same question |
+
+The card is identical either way. `source quote sys.quote(ticker: state.selected)`
+followed by `quote.last` is one declaration; whether it becomes a seeded number or
+a live call is decided below the language.
+
+**Realization keeps the provenance.** `UiNode.bindings` records, per argument,
+which source a value came from and which field of it — alongside the resolved
+value, not instead of it. Without that, a backend that *could* fetch has no way
+to know it should: by the time lowering runs, `quote.last` is just a number.
+
+**A backend must fall back rather than guess.** `sys.quote` declares ten fields;
+the makepad VM's `sys.stock` answers seven of them. The rest lower to the seeded
+value, because a call the backend cannot answer renders an em dash where a real
+number was available. Three findings, each from running it on a phone:
+
+- **`open` accepts and cannot answer.** `sys.stock` takes the key and resolves
+  `regularMarketOpen`, which is absent from the upstream response while
+  `regularMarketDayHigh` and `…DayLow` beside it are present. A helper accepting
+  a key is not evidence it can answer it.
+- **Most formats do not survive.** `glyph`, `unit` and `suffix` are literals that
+  concatenate around a call. A `format` mostly is not: `money` is a `"$"` prefix
+  and `signed_pct` is what the VM already returns, but `signed_money` puts the
+  sign outside the currency symbol and `compact` and `ratio` need the number
+  itself. Those keep the seeded value.
+- **Anything that measures text must measure what is DRAWN.** Emitted and drawn
+  text are the same string until a value goes live, and then they diverge
+  completely — `"$" + sys.stock("NVDA", "price")` is 33 characters that render as
+  six. Sizing the hero by the emitted form dropped it from 40pt to 24pt and
+  shifted the whole card up: a layout bug with no layout cause.
+
+**A live card cannot be asserted by a whole-screen golden**, and the device
+harness now says so per case. Where values are live the comparison is restricted
+to a band that is still deterministic, and everything outside it is checked only
+for having rendered. That is weaker than the old golden and true, where the old
+golden would have been stronger and false — it would have been asserting a share
+price.
+
+**What this costs.** `source_plan` and its dependency ordering have no consumer
+on a backend that answers its own sources, and the translation table between L0's
+capability names and a backend's helper names lives in that backend's lowering.
+Both are the price of reaching live data without a second fetch layer, and both
+are recorded here rather than discovered later.
+
 ---
 
 ## 6. What makes L0 terminate

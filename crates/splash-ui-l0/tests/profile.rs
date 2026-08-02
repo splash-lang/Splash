@@ -682,6 +682,7 @@ fn an_unmapped_constructor_is_visible_rather_than_dropped() {
         key: "root".into(),
         args: vec![],
         children: vec![],
+        bindings: vec![],
     };
     let dsl = makepad::lower(&node);
     assert!(dsl.contains("no makepad lowering for Hologram"), "{dsl}");
@@ -897,9 +898,9 @@ fn declared_formats_are_applied_by_the_runtime() {
     let report = realize(STOCK, &data, RealizeLimits::default());
     let dsl = makepad::lower(&report.root.expect("root"));
 
+    // A format that needs the NUMBER is applied here, because it cannot be
+    // applied around a call the backend will make later.
     for (expect, why) in [
-        ("$184.20", "money gains a currency symbol and two places"),
-        ("+1.7%", "a signed percentage keeps its sign"),
         ("41.2M", "compact scales volume"),
         ("4.5T", "compact scales market cap"),
         ("58.3", "a ratio is plain"),
@@ -909,6 +910,77 @@ fn declared_formats_are_applied_by_the_runtime() {
     assert!(
         !dsl.contains("41200000"),
         "the raw number should not survive"
+    );
+
+    // A format that is a literal prefix, or that the backend already applies,
+    // survives — so these lower to a LIVE call rather than to the seeded value.
+    // The card then shows the price now, not the price when the blob was made.
+    assert!(
+        dsl.contains(r#""$" + sys.stock("NVDA", "price")"#),
+        "money should prefix a live call:\n{dsl}"
+    );
+    assert!(
+        dsl.contains(r#"sys.stock("NVDA", "changepct")"#),
+        "signed_pct is what the VM already returns, so the call stands alone:\n{dsl}"
+    );
+    // And the seeded values they replaced must be GONE, or the card would show
+    // a stale number beside a live one.
+    assert!(
+        !dsl.contains("$184.20") && !dsl.contains("+1.7%"),
+        "a live call must replace the seeded literal, not sit beside it:\n{dsl}"
+    );
+}
+
+/// The fallback is not a failure mode to be minimised — it is what keeps a
+/// wrong number off the screen.
+///
+/// `sys.stock` exposes no market cap and no P/E, and `compact`/`ratio` need the
+/// number itself. Emitting a call for those would render an em dash where a real
+/// value was available, so they stay seeded and this asserts they do.
+#[test]
+fn a_capability_the_backend_cannot_answer_keeps_its_seeded_value() {
+    let data = serde_json::json!({
+        "movers": [], "selected": "NVDA", "range": "m1", "env": {"locale":{}},
+        "quote": {"name":"NVIDIA","last":184.2,"change":3.1,"pct":1.7,"open":181.0,
+                  "high":185.6,"low":180.2,"volume":41200000.0,
+                  "mktcap":4520000000000.0,"pe":58.3},
+        "copy": {"movers":"Top Movers","open":"Open","high":"High","low":"Low",
+                 "volume":"Volume","mktcap":"Mkt Cap","pe":"P/E"}
+    });
+    let report = realize(STOCK, &data, RealizeLimits::default());
+    let dsl = makepad::lower(&report.root.expect("root"));
+
+    assert!(
+        !dsl.contains("sys.stock(\"NVDA\", \"mktcap\")") && !dsl.contains("\"pe\")"),
+        "no call may be emitted for a field the helper does not expose:\n{dsl}"
+    );
+    assert!(
+        dsl.contains("4.5T"),
+        "market cap keeps its seeded value:\n{dsl}"
+    );
+    assert!(dsl.contains("58.3"), "P/E keeps its seeded value:\n{dsl}");
+
+    // `open` is the one this test exists for. `sys.stock` ACCEPTS the key, so
+    // the mapping looked correct and the DSL was well-formed — but it resolves
+    // `regularMarketOpen`, which the Yahoo chart response does not carry, while
+    // `regularMarketDayHigh` and `…DayLow` beside it do. On device that rendered
+    // `$—` where the seeded blob held a real opening price.
+    //
+    // A helper accepting a key is not evidence it can answer it, and no unit
+    // test could have found this: it took a screenshot.
+    assert!(
+        !dsl.contains(r#"sys.stock("NVDA", "open")"#),
+        "open must not be emitted live — the field is absent upstream:\n{dsl}"
+    );
+    assert!(
+        dsl.contains("$181"),
+        "open keeps its seeded value instead:\n{dsl}"
+    );
+    // High and low DO resolve, so they must still be live — otherwise the fix
+    // for `open` could quietly have been "stop emitting calls at all".
+    assert!(
+        dsl.contains(r#"sys.stock("NVDA", "high")"#) && dsl.contains(r#"sys.stock("NVDA", "low")"#),
+        "high and low resolve upstream and must stay live:\n{dsl}"
     );
 }
 
@@ -3574,8 +3646,9 @@ fn a_source_argument_path_must_be_declared() {
     assert!(!report.valid, "`secrets` is not declared");
 
     // The plan must not carry it either, for a caller that skips checking.
-    let plan =
-        splash_ui_l0::source_plan("source photo sys.photo(query: secrets.token)\nview root Photo(src: photo.url)");
+    let plan = splash_ui_l0::source_plan(
+        "source photo sys.photo(query: secrets.token)\nview root Photo(src: photo.url)",
+    );
     assert!(
         !plan.diagnostics.is_empty(),
         "the plan must report it rather than hand the host an undeclared path"
@@ -4238,5 +4311,44 @@ fn a_dispatch_reports_what_it_invalidated() {
         outcome.stale.iter().any(|s| s == "quote"),
         "and which sources that invalidates: {:?}",
         outcome.stale
+    );
+}
+
+/// A layout decision must measure what is DRAWN, not what is emitted.
+///
+/// The two are the same string until a value goes live, and then they diverge
+/// completely: `"$" + sys.stock("NVDA", "price")` is 33 characters of source
+/// that render as six. Sizing the hero by counting the emitted form dropped it
+/// from 40pt to 24pt and shifted the whole card up — a layout bug with no
+/// layout cause, and invisible to every test that only checked the text.
+#[test]
+fn a_hero_is_sized_by_what_it_draws_not_by_what_it_emits() {
+    let data = serde_json::json!({
+        "movers": [], "selected": "NVDA", "range": "m1", "env": {"locale":{}},
+        "quote": {"name":"NVIDIA","last":184.2,"change":3.1,"pct":1.7,"open":181.0,
+                  "high":185.6,"low":180.2,"volume":41200000.0,
+                  "mktcap":4520000000000.0,"pe":58.3},
+        "copy": {"movers":"Top Movers","open":"Open","high":"High","low":"Low",
+                 "volume":"Volume","mktcap":"Mkt Cap","pe":"P/E"}
+    });
+    let report = realize(STOCK, &data, RealizeLimits::default());
+    let dsl = makepad::lower(&report.root.expect("root"));
+
+    let hero = dsl
+        .lines()
+        .find(|l| l.contains("TextHero"))
+        .unwrap_or_else(|| panic!("no hero:\n{dsl}"));
+
+    // The hero IS live — otherwise this test would pass for the wrong reason,
+    // since a seeded hero measures its own text correctly by construction.
+    assert!(
+        hero.contains("sys.stock"),
+        "the hero must be live for this test to mean anything:\n{hero}"
+    );
+    // "$184.20" is 7 glyphs, which is the 40pt bucket. The emitted expression is
+    // 33 characters, which is the 24pt one.
+    assert!(
+        hero.contains("font_size: 40"),
+        "sized by the drawn value (7 glyphs -> 40pt), not the emitted 33:\n{hero}"
     );
 }
