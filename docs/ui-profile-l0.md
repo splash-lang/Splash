@@ -910,10 +910,30 @@ the language.
 once: it lowers to a *backend dialect* rather than to the theme's component kit, it decides
 *presentation* (ten hardcoded colours, a font-size ramp) which belongs to a theme, and it
 therefore reaches one backend of three. It also defines a second `UiNode`, duplicating the one
-`splash-render` already produces. The fix is not to move it to a backend crate — it is to
-retarget it at the component kit and delete the colour table. L1 and L2 are
-specified only as "what L0 excludes" — neither is implemented, and the level classifier can
-therefore name them but not check them.
+`splash-render` already produces.
+
+**The replacement now exists, and does not yet replace anything.** `kit::lower` emits role calls
+against `Splash-Makepad`'s `components/l0/_kit.splash` — 21 roles, each verified by building it
+through `splash_render::build` in the repository where that consumer lives. The three reference
+cards build (news 25 nodes, stock 11, weather 62), the emitted source carries no presentation,
+and live backend calls survive, because both lowerings share one value formatter.
+
+An earlier version of this paragraph said the fix was "to retarget it at the component kit",
+which assumed a kit answering L0's roles existed. None did: `components/flutter` and
+`components/material` are ports of Flutter samples, and about four of L0's roles map loosely.
+The kit had to be written, and that was most of the work.
+
+What still keeps `makepad::lower` in place: **a card lowered through the kit has no
+interaction**, and five of the six data visualisations lower to a named marker rather than to a
+chart. Neither is a language question. Interaction is a matter of carrying an event through the
+`tapto` attribute the renderer already has — its non-`set:` strings fall through to the host, so
+an instance key survives without any change to the VM, and `docs/scoped-state.md` is not needed
+for it.
+
+L1 and L2 **as capability levels** — the levels this document's §7 classifies, not the layers
+above — remain specified only as "what L0 excludes". Neither is implemented, and the classifier
+can name them but not check them. That is unchanged and unrelated to the kit work; the two
+senses of "L1" are easy to conflate and this paragraph previously did.
 
 An earlier version of this paragraph said `StockPlot` and `AqiContour` "lower without their data
 arrays". They have no data arrays: both name what to plot and fetch it themselves, and the

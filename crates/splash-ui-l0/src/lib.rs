@@ -4532,7 +4532,7 @@ pub mod makepad {
     /// no market cap or P/E, so those two lower to the seeded value and always
     /// will. Emitting a call the VM cannot answer would render an em dash where
     /// a real number was available.
-    fn expr_of(node: &UiNode, arg_name: &str) -> String {
+    pub(super) fn expr_of(node: &UiNode, arg_name: &str) -> String {
         if let Some((_, binding)) = node.bindings.iter().find(|(n, _)| n == arg_name) {
             if let Some(call) = vm_call(binding) {
                 return call;
@@ -4654,7 +4654,7 @@ pub mod makepad {
 
     /// A value plus its unit suffix, which is a presentation concern the runtime
     /// owns — the card never wrote "°" next to a number.
-    fn valued(node: &UiNode) -> String {
+    pub(super) fn valued(node: &UiNode) -> String {
         // Prefer a live call, where the backend can answer the source itself and
         // the decoration survives being concatenated around it.
         if let Some(live) = live_valued(node) {
@@ -4733,6 +4733,23 @@ pub mod makepad {
                 format!("{:?}", format!("{glyph}{body}{unit}{suffix}"))
             }
             None => expr_of(node, "text"),
+        }
+    }
+
+    /// How large a hero should be, given what it will DRAW.
+    ///
+    /// A hero is defined by dominating the card rather than by a point size:
+    /// "18°" fits at 62 where "$184.20" clipped off the right edge on device.
+    /// Shared by both lowerings — two copies of a ramp is two ramps, and they
+    /// drift.
+    pub(super) fn hero_points(node: &UiNode, emitted: &str) -> u32 {
+        let measured = sizing_text(node, emitted);
+        match measured.trim_matches('"').chars().count() {
+            0..=4 => 62,
+            5..=6 => 50,
+            7..=8 => 40,
+            9..=12 => 32,
+            _ => 24,
         }
     }
 
@@ -5108,16 +5125,10 @@ pub mod makepad {
                 // to 24pt and shifted the whole card up. The seeded value is a
                 // sound proxy for the live one's LENGTH, which is all this needs.
                 let size = if role == "TextHero" {
-                    let measured = sizing_text(node, &body);
-                    let glyphs = measured.trim_matches('"').chars().count();
-                    let pt = match glyphs {
-                        0..=4 => 62,
-                        5..=6 => 50,
-                        7..=8 => 40,
-                        9..=12 => 32,
-                        _ => 24,
-                    };
-                    format!(" draw_text.text_style.font_size: {pt}")
+                    format!(
+                        " draw_text.text_style.font_size: {}",
+                        hero_points(node, &body)
+                    )
                 } else {
                     String::new()
                 };
@@ -6113,4 +6124,238 @@ fn emit_dsl(node: &UiNode, depth: usize, out: &mut String, sink: &mut Vec<Syntax
         emit_dsl(child, depth + 1, out, sink);
     }
     let _ = writeln!(out, "{pad}]}}");
+}
+
+// ──────────────────────────────────────────────────────────── kit lowering ──
+
+/// Lower a realized card to calls on the **L0 theme kit**.
+///
+/// This is what §1.1 asks for and what `makepad::lower` does not do. That module
+/// emits a backend's own widget dialect with ten hardcoded colours and a
+/// font-size ramp, so it decides presentation — a theme's job — and reaches one
+/// backend of three. This emits role calls and lets the kit answer them:
+///
+/// ```text
+/// l0_panel([ l0_caption("LEAD"), l0_body("Rust 1.95 lands") ])
+///
+/// not   RoundedView{ draw_bg.color: #ffffff12 draw_bg.border_radius: 14.0 … }
+/// ```
+///
+/// **The kit is a contract with a consumer this crate cannot depend on**, and
+/// that is exactly how the two reverted attempts went wrong. So the contract is
+/// checked where the consumer lives: `Splash-Makepad` dev-depends on this crate
+/// and builds the output through `splash_render::build`. That dependency is
+/// only possible because this crate was extracted from `splash-core` and
+/// depends on `serde_json` alone.
+pub mod kit {
+    use super::makepad;
+    use super::{NodeValue, UiNode};
+    use std::fmt::Write as _;
+
+    /// The assembled script's value must be a bare VARIABLE.
+    ///
+    /// `fn f() { … }` followed by `f()` evaluates to nil in this VM, so a card
+    /// emitted as a bare call renders as nothing at all — which looks exactly
+    /// like a broken kit. Every kit in `Splash-Makepad` ends this way.
+    pub fn lower(root: &UiNode) -> String {
+        let mut out = String::from("// REALIZED from an L0 ledger — do not edit.\n");
+        out.push_str("let node = ");
+        element(root, 0, &mut out);
+        out.push_str("\nnode\n");
+        out
+    }
+
+    /// A card's roles, and the kit function that answers each.
+    ///
+    /// Returning `None` means the role has no answer in this kit — it lowers to
+    /// a visible marker rather than to nothing, because a card that silently
+    /// loses its temperature bars still looks complete (§1.1).
+    fn kit_fn(role: &str) -> Option<&'static str> {
+        Some(match role {
+            "Surface" => "l0_surface",
+            "Col" => "l0_col",
+            "Row" => "l0_row",
+            "Grid" => "l0_grid",
+            "Panel" | "Card" => "l0_panel",
+            "Rule" => "l0_rule",
+            "Tile" => "l0_tile",
+            "Chip" => "l0_chip",
+            "Photo" => "l0_photo",
+            "WeatherIcon" => "l0_weathericon",
+            "TextHero" => "l0_hero",
+            "TextTitle" => "l0_title",
+            "TextBody" => "l0_body",
+            "TextRow" => "l0_row_text",
+            "TextCaption" => "l0_caption",
+            "TextValue" => "l0_value",
+            "TextStat" => "l0_stat",
+            _ => return None,
+        })
+    }
+
+    fn arg<'a>(node: &'a UiNode, name: &str) -> Option<&'a NodeValue> {
+        node.args.iter().find(|(n, _)| n == name).map(|(_, v)| v)
+    }
+
+    /// A statistic's direction — the SIGN, not the colour.
+    ///
+    /// Red-versus-green is presentation and belongs to the kit; "this value
+    /// fell" is meaning and belongs here. A lowering that dropped `tint`
+    /// entirely lost both, which is why the profile calls it the instructive
+    /// case.
+    fn direction(node: &UiNode) -> i32 {
+        match arg(node, "tint") {
+            Some(NodeValue::Number(n)) if *n > 0.0 => 1,
+            Some(NodeValue::Number(n)) if *n < 0.0 => -1,
+            Some(NodeValue::Token(t)) if t == "up" => 1,
+            Some(NodeValue::Token(t)) if t == "down" => -1,
+            _ => 0,
+        }
+    }
+
+    fn children(node: &UiNode, depth: usize, out: &mut String) {
+        out.push_str("[\n");
+        for (i, child) in node.children.iter().enumerate() {
+            let _ = write!(out, "{}", "  ".repeat(depth + 1));
+            element(child, depth + 1, out);
+            if i + 1 < node.children.len() {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+        let _ = write!(out, "{}]", "  ".repeat(depth));
+    }
+
+    /// A tap, as the string the backend carries.
+    ///
+    /// JSON rather than a delimited form, because every field is data: an
+    /// instance key contains colons (`w:list#0`) and slashes, and a payload is
+    /// whatever the card bound. Every separator worth using has a
+    /// data-dependent failure, and a failure here is a tap routed to the wrong
+    /// row — which looks like a card bug and is not.
+    ///
+    /// The `l0:` prefix is what distinguishes it from this renderer's own
+    /// `set:` verbs, which it handles internally.
+    fn tap_target(node: &UiNode) -> Option<String> {
+        let Some(NodeValue::Event(event)) = arg(node, "on_tap") else {
+            return None;
+        };
+        let value = match arg(node, "value") {
+            Some(NodeValue::Text(t)) => t.clone(),
+            Some(NodeValue::Number(n)) => makepad::trim_num(*n),
+            Some(NodeValue::Token(t)) => t.clone(),
+            _ => String::new(),
+        };
+        let json = serde_json::json!({ "e": event, "k": node.key, "v": value });
+        Some(format!("l0:{json}"))
+    }
+
+    fn element(node: &UiNode, depth: usize, out: &mut String) {
+        // A tappable node is WRAPPED. A `card`, `chip` or `image` carrying
+        // `tapto` renders and does nothing — the attribute is dropped before it
+        // reaches the UI — so only a container carries a tap.
+        if let Some(target) = tap_target(node) {
+            // The wrapper sizes like what it wraps: a Chip is intrinsic and sits
+            // in a row of chips, and a filling wrapper makes the first one eat
+            // the row.
+            let f = if node.kind == "Chip" {
+                "l0_tap_fit"
+            } else {
+                "l0_tap"
+            };
+            let _ = write!(out, "{f}({target:?}, ");
+            element_untapped(node, depth, out);
+            out.push(')');
+            return;
+        }
+        element_untapped(node, depth, out);
+    }
+
+    fn element_untapped(node: &UiNode, depth: usize, out: &mut String) {
+        let Some(f) = kit_fn(&node.kind) else {
+            let _ = write!(out, "l0_unsupported({:?})", node.kind);
+            return;
+        };
+        match node.kind.as_str() {
+            "Surface" => {
+                let _ = write!(out, "{f}(");
+                children(node, depth, out);
+                out.push(')');
+            }
+            "Col" | "Row" => {
+                // `gap` is a declared spacing, so it stays a semantic argument
+                // rather than becoming a number the kit cannot reinterpret.
+                match arg(node, "gap") {
+                    Some(NodeValue::Number(g)) => {
+                        let _ = write!(out, "{f}_gap({}, ", makepad::trim_num(*g));
+                    }
+                    _ => {
+                        let _ = write!(out, "{f}(");
+                    }
+                }
+                children(node, depth, out);
+                out.push(')');
+            }
+            "Panel" | "Card" | "Grid" => {
+                let _ = write!(out, "{f}(");
+                children(node, depth, out);
+                out.push(')');
+            }
+            "Rule" => {
+                let _ = write!(out, "{f}()");
+            }
+            "Tile" => {
+                let _ = write!(
+                    out,
+                    "{f}({}, {})",
+                    makepad::expr_of(node, "label"),
+                    makepad::valued(node)
+                );
+            }
+            "Chip" => {
+                let on = i32::from(matches!(arg(node, "active"), Some(NodeValue::Bool(true))));
+                let _ = write!(out, "{f}({}, {on})", makepad::expr_of(node, "text"));
+            }
+            // A `Photo` WITH children is not an image, it is the page: the
+            // weather card wraps the whole card in one, and a lowering that made
+            // it a leaf dropped every child. That is the mistake the reverted
+            // attempt made, and it is why `l0_surface_photo` exists — image,
+            // scrim, then the content, so text stays legible over whatever the
+            // image turns out to be.
+            "Photo" if !node.children.is_empty() => {
+                let _ = write!(out, "l0_surface_photo({}, ", makepad::expr_of(node, "src"));
+                children(node, depth, out);
+                out.push(')');
+            }
+            "Photo" => {
+                let _ = write!(out, "{f}({})", makepad::expr_of(node, "src"));
+            }
+            "WeatherIcon" => {
+                let cond = match arg(node, "cond") {
+                    Some(NodeValue::Text(c)) => format!("{c:?}"),
+                    Some(NodeValue::Token(c)) => format!("{c:?}"),
+                    _ => "\"\"".into(),
+                };
+                let _ = write!(out, "{f}({cond})");
+            }
+            "TextStat" => {
+                let _ = write!(out, "{f}({}, {})", makepad::valued(node), direction(node));
+            }
+            // A hero is sized by the caller, because only the lowering knows
+            // what will be DRAWN — a live value's text is not in the DSL.
+            "TextHero" => {
+                let body = makepad::valued(node);
+                let _ = write!(out, "{f}({body}, {})", makepad::hero_points(node, &body));
+            }
+            // The remaining text roles take one string.
+            _ => {
+                let body = if arg(node, "value").is_some() || arg(node, "glyph").is_some() {
+                    makepad::valued(node)
+                } else {
+                    makepad::expr_of(node, "text")
+                };
+                let _ = write!(out, "{f}({body})");
+            }
+        }
+    }
 }
