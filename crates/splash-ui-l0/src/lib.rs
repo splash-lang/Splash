@@ -6361,6 +6361,20 @@ pub mod kit {
             "TextStat" => {
                 let _ = write!(out, "{f}({}, {})", makepad::valued(node), direction(node));
             }
+            // Five text roles may carry a tint, and the stock LIST tints a
+            // `TextValue` while the detail tints a `TextStat`. Lowering only the
+            // latter dropped the colour from every row on the list — the
+            // percentages rendered white, and "this one fell" stopped being
+            // said at all. `tint` is §1.1's instructive case for exactly this:
+            // red-versus-green is presentation, but the SIGN is meaning.
+            "TextTitle" | "TextBody" | "TextCaption" | "TextValue" if direction(node) != 0 => {
+                let body = if arg(node, "value").is_some() || arg(node, "glyph").is_some() {
+                    makepad::valued(node)
+                } else {
+                    makepad::expr_of(node, "text")
+                };
+                let _ = write!(out, "l0_tinted({f}({body}), {})", direction(node));
+            }
             // The five data visualisations. Each takes its declared arguments in
             // the catalog's order — no defaults, because a bar drawn against a
             // range nobody supplied is a bar drawn against zero, and it looks
