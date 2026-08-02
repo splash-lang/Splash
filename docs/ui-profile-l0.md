@@ -61,35 +61,35 @@ codes do not.
 It also keeps the three backends honest. The branch point is `UiNode`; anything that lowers
 past it reaches one platform and silently abandons the other two.
 
-**Some roles are a backend widget, not a theme composition.** Six of the catalogue —
+**Some roles cannot be a theme composition.** Six of the catalogue —
 `WeatherIcon`, `TempBar`, `SunArc`, `MoonPhase`, `AqiContour`, `StockPlot` — are small data
-visualisations, and they cannot be authored in the DSL at all. `splash-render` states the
-reason plainly: *a DSL node cannot carry shader source — MPSL compiles at build time — but it
-can select a shader that was compiled.* A gradient bar or a sun arc is a fragment shader
-parameterised by data, not a composition of boxes and text, so there is no theme file that
-could contain one.
+visualisations. `splash-render` states why they cannot be authored in the DSL: *a DSL node
+cannot carry shader source — MPSL compiles at build time — but it can select a shader that was
+compiled.* A gradient bar is a fragment shader parameterised by data, not a composition of
+boxes and text.
 
-They are therefore **backend widgets named semantically**, exactly as `splash-render` already
-treats `Map` — *"a real map is not a platform view here, it is a widget"* — and `Shader`,
-`Sdf`, `Fab` and `Segmented`. This is not an exception carved out for L0; it is the category
-the renderer already has.
+**How they reach a backend is unsettled, and a previous version of this section settled it
+wrongly.** It declared six new node kinds and asserted that `splash-render` would route them.
+Five of the six are not in that consumer's tag table, and its fallback is to return `None` —
+so a card's temperature bars, sun arc, moon phase and air-quality field would have been
+dropped without a diagnostic. The section asserted a cross-repository contract that nobody had
+checked, in the same breath as claiming an unknown role should "fail visibly".
 
-§1.1 still holds for them, and holds without apology. A card writes
+What is true and what is not:
 
-```
-TempBar(lo: item.lo, hi: item.hi, min: week.min_lo, max: week.max_hi)
-```
+- **True:** these six are widget-layer concerns, and each backend's widget layer is its own.
+  `TempBar` is a makepad widget with an MPSL shader; an OpenHarmony equivalent is an ArkUI
+  custom component; an Android one is a Canvas view. There is no shared implementation to
+  unify — only a shared name and data contract.
+- **Not settled:** what that contract is. `Shader`/`Sdf` with a variant is the mechanism the
+  consumer already documents and was dismissed too quickly; adding kinds is the alternative
+  and obliges every backend at once.
 
-which is four bound paths and no presentation whatsoever. What colour the gradient runs, how
-thick the bar is, whether its caps are rounded — every one of those stays the backend's. The
-card names a role. That role simply happens to be one only a shader can fill.
-
-**The cost, stated rather than buried:** every backend must implement all six, or a card using
-one renders blank on that platform. That is a real porting burden, and it is the strongest
-argument against admitting them. It is accepted because the alternative is worse: pre-rendering
-them to images server-side would make a live value into a fact fetched once, which is precisely
-what §4 exists to prevent. A backend that has not implemented a role should fail visibly rather
-than draw nothing.
+**The order this implies.** Prove the pipeline end to end on the backend that already
+implements these widgets — six of six exist and ship in octos-one today, against one in
+`Splash-Makepad` — and let the vocabulary be whatever that requires. Then port to the others
+against a contract that has shipped once. Defining the contract first is defining it for three
+implementations, two of which do not exist, which is how the previous attempt went wrong.
 
 **The implementation does not yet do this.** `splash-core`'s `makepad::lower` emits makepad's
 widget dialect directly, with ten hardcoded colours and a font-size ramp — so it bypasses the
@@ -97,9 +97,23 @@ DSL, the VM, `UiNode` and two backends, and it puts a theme inside the crate who
 deciding whether a card is safe. That is a defect measured against this section, and §9 lists
 it as such.
 
-The retarget it implies is therefore a clean split rather than a judgement call: **16 roles
-lower to the theme's component kit, 6 lower to a backend widget node, and `Photo` is already an
-image.**
+**A first attempt at this retarget was reverted**, and its failures are recorded here because
+they are the specification's failures rather than the code's. It mapped roles to consumer tags
+that were never checked against the consumer: five of 23 did not exist, `role:` was emitted
+where the consumer reads `variant`, `Photo` became an image node although the weather card uses
+it as the *container* around the whole card, `Tile` became a `listitem` whose fields are
+label/text rather than value/unit, and string tokens landed in numeric properties as zero. The
+consumer holds a fixed attribute struct rather than an open bag, so roughly twenty emitted
+attributes were simply unread.
+
+Two lessons belong in the profile rather than in a commit message. **A lowering target is a
+contract with a consumer, and this repository has no dependency on that consumer** — so
+nothing prevents the two schemas drifting, and they did, immediately. And **a lowering must
+carry semantics forward, not merely drop presentation**: the reverted attempt correctly removed
+a colour palette and a font-size ramp, and incorrectly removed the interaction contract, a
+chip's selected state, and formatting intent. `tint` is the instructive case — red-versus-green
+is presentation, but *"this value is negative"* is meaning, and deleting the attribute lost
+both.
 
 What that changes:
 

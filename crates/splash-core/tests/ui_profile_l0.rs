@@ -3809,97 +3809,33 @@ fn realization_depth_is_bounded_independently_of_node_count() {
     );
 }
 
-// ─── §1.1 lowering: a card becomes Splash DSL, not a backend dialect ─────────
-
-/// The retarget. A card lowers to the DSL data form `{t: "…", …}` that
-/// `splash-render` evaluates into a `UiNode`, from which all three backends
-/// render. It does NOT lower to makepad's widget dialect, which reaches one
-/// backend and carries a theme.
+/// §1.1 as a check rather than a paragraph: a card must have no way to state a
+/// colour, a size in pixels, or a font. The principle survives the revert of the
+/// lowering that was meant to implement it — a card naming roles rather than
+/// appearance is right regardless of what consumes the result.
 #[test]
-fn lowering_emits_splash_dsl_not_a_backend_dialect() {
-    let dsl = splash_core::ui_l0::lower_dsl(
-        &realize(
-            NEWS,
-            &serde_json::json!({
-                "lead": [{"id": "a", "title": "T", "author": "A", "points": 1, "comments": 2}],
-                "feed": [{"id": "b", "title": "U", "author": "B", "points": 3}],
-                "article": {}, "selected": "", "env": {"locale": {}}
-            }),
-            RealizeLimits::default(),
-        )
-        .root
-        .unwrap(),
-    );
-
-    assert!(
-        dsl.contains("{t: \""),
-        "the output must be the DSL data form: {}",
-        &dsl[..dsl.len().min(200)]
-    );
-    for backend_ism in [
-        "SolidView",
-        "RoundedView",
-        "draw_bg.color",
-        "draw_text.color",
-    ] {
-        assert!(
-            !dsl.contains(backend_ism),
-            "{backend_ism:?} is makepad's dialect; §1.1 says a card names roles"
-        );
-    }
-    // No colour may appear — that was the ten-constant table. Matched as a hex
-    // literal rather than a bare '#', because an instance key legitimately
-    // contains one: `root/for#0[b]/StoryRow#0`.
-    let colour = dsl
-        .match_indices('#')
-        .find(|(i, _)| dsl[i + 1..].chars().take(6).all(|c| c.is_ascii_hexdigit()));
-    assert!(
-        colour.is_none(),
-        "a lowered card must carry no colour: §1.1 leaves that to the theme ({colour:?})"
-    );
-}
-
-/// Seven text roles collapse onto one node kind carrying the role, because the
-/// theme decides what a hero looks like. The role must survive, or the theme
-/// has nothing to decide with.
-#[test]
-fn text_roles_lower_to_text_carrying_the_role() {
-    let dsl = splash_core::ui_l0::lower_dsl(
-        &realize(
-            "view root Col { TextHero(text: \"x\") TextCaption(text: \"y\") }",
-            &serde_json::json!({}),
-            RealizeLimits::default(),
-        )
-        .root
-        .unwrap(),
-    );
-    assert!(dsl.contains("t: \"text\""), "{dsl}");
-    assert!(
-        dsl.contains("role: \"hero\""),
-        "the role must survive: {dsl}"
-    );
-    assert!(dsl.contains("role: \"caption\""), "{dsl}");
-}
-
-/// The six shader-backed roles keep their own node kind — they are backend
-/// widgets, and their data must reach the backend intact.
-#[test]
-fn a_data_visualisation_lowers_to_its_own_kind_with_its_data() {
-    let dsl = splash_core::ui_l0::lower_dsl(
-        &realize(
-            "source w sys.weather(lat: 1.0, lon: 2.0)\n\
-             view root TempBar(lo: w.lo, hi: w.hi, min: w.min, max: w.max)",
-            &serde_json::json!({"w": {"lo": 12, "hi": 21, "min": 10, "max": 24}}),
-            RealizeLimits::default(),
-        )
-        .root
-        .unwrap(),
-    );
-    assert!(dsl.contains("t: \"tempbar\""), "{dsl}");
-    for v in ["12", "21", "10", "24"] {
-        assert!(
-            dsl.contains(v),
-            "the bound value {v} must reach the backend: {dsl}"
-        );
+fn no_role_accepts_presentation() {
+    for (ctor, args) in catalog::CONSTRUCTORS {
+        for (arg, _) in *args {
+            assert!(
+                !matches!(
+                    *arg,
+                    "color"
+                        | "colour"
+                        | "bg"
+                        | "fill"
+                        | "font"
+                        | "font_size"
+                        | "weight"
+                        | "radius"
+                        | "elevation"
+                        | "shadow"
+                        | "padding"
+                        | "margin"
+                ),
+                "{ctor}.{arg} is presentation; §1.1 says a card names roles and the theme \
+                 decides appearance"
+            );
+        }
     }
 }
