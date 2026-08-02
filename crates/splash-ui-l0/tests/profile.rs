@@ -1122,7 +1122,10 @@ fn the_plan_orders_dependencies_before_dependents() {
     let at = |name: &str| plan.requests.iter().position(|r| r.name == name).unwrap();
     assert!(at("place") < at("now"), "place must precede now");
     assert!(at("place") < at("week"), "place must precede week");
-    assert!(at("place") < at("aqi"), "place must precede aqi");
+    // `scene`, not `aqi`: the air-quality source went away when `AqiContour`
+    // began fetching its own field, and a source nothing reads is now refused.
+    // `scene` reads `place.name`, so it makes the same point.
+    assert!(at("place") < at("scene"), "place must precede scene");
 
     let now = &plan.requests[at("now")];
     assert_eq!(now.depends_on, vec!["place".to_string()]);
@@ -3566,13 +3569,13 @@ fn a_loop_key_must_name_the_loop_binder() {
 fn a_source_argument_path_must_be_declared() {
     let report = check_ui_l0_named(
         "leak-arg",
-        "source photo sys.photo(query: secrets.token)\nview root Rule()",
+        "source photo sys.photo(query: secrets.token)\nview root Photo(src: photo.url)",
     );
     assert!(!report.valid, "`secrets` is not declared");
 
     // The plan must not carry it either, for a caller that skips checking.
     let plan =
-        splash_ui_l0::source_plan("source photo sys.photo(query: secrets.token)\nview root Rule()");
+        splash_ui_l0::source_plan("source photo sys.photo(query: secrets.token)\nview root Photo(src: photo.url)");
     assert!(
         !plan.diagnostics.is_empty(),
         "the plan must report it rather than hand the host an undeclared path"
@@ -3582,8 +3585,12 @@ fn a_source_argument_path_must_be_declared() {
     assert!(
         check_ui_l0_named(
             "ok",
+            // The view reads `place`. A source nothing reads is refused now, and
+            // this assertion proved a DECLARED argument path is accepted only by
+            // accident while the source it declared reached no view at all.
             "state city { shape: text, initial: \"\" }\n\
-             source place sys.geocode(name: city)\nview root Rule()"
+             source place sys.geocode(name: city)\n\
+             view root TextRow(text: place.name)"
         )
         .valid
     );
@@ -4185,8 +4192,11 @@ view root TextTitle(text: used.lang)
         report.diagnostics
     );
     assert!(
-        !report.diagnostics.iter().any(|d| d.message.contains("used.")
-            || (d.message.contains("used") && !d.message.contains("unused"))),
+        !report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("used.")
+                || (d.message.contains("used") && !d.message.contains("unused"))),
         "and a source that IS read must not be:\n{:#?}",
         report.diagnostics
     );

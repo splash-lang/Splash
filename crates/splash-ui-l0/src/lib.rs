@@ -2826,6 +2826,91 @@ fn check_event_batch(
 /// depended on the host keeping an allowlist that the profile claims to make
 /// unnecessary.
 fn validate_sources(card: &Card, sink: &mut Diagnostics) {
+    // A source name and a card state name must be disjoint.
+    //
+    // §5.3 forbids a component from reading card state, and a collision walks
+    // around the check: `check_path` asks whether the scope KNOWS a path before
+    // asking whether it names forbidden state, so a source with the same name
+    // answers the first question and the second is never reached. What the
+    // component then reads is the SOURCE, which §5.3 permits — so nothing leaks
+    // — but the card says two things and the runtime silently picks one, which
+    // is not a defensible way to resolve two namespaces that must not overlap.
+    for state in &card.states {
+        if let Some(source) = card.sources.iter().find(|s| s.name == state.path) {
+            sink.push(
+                source.line,
+                1,
+                format!(
+                    "{:?} is declared as both a source and card state. The two \
+                     namespaces must be disjoint: a component may read a source \
+                     but not card state (profile §5.3), so a shared name makes \
+                     which one is read depend on lookup order rather than on \
+                     anything the card says. Rename one",
+                    state.path
+                ),
+            );
+        }
+    }
+
+    // A declared source nothing reads is a fetch performed for nothing.
+    //
+    // `stock.card` shipped one: `series` went unread the moment `StockPlot`
+    // began fetching its own data, and no test noticed. On device that is a
+    // round trip, a parse and a cache entry per refresh, for data that reaches
+    // no pixel.
+    let mut read: std::collections::BTreeSet<String> = Default::default();
+    let harvest = |element: &Element, read: &mut std::collections::BTreeSet<String>| {
+        let (mut reads, mut pulls) = (Vec::new(), Vec::new());
+        collect_reads(element, &mut reads, &mut pulls);
+        read.extend(reads.iter().map(root_of));
+        read.extend(pulls.iter().map(root_of));
+    };
+    for view in &card.views {
+        harvest(&view.body, &mut read);
+    }
+    for component in &card.components {
+        harvest(&component.body, &mut read);
+    }
+    // A source read by another source counts: `sys.weather(lat: place.lat)`
+    // makes `place` needed even though no view names it.
+    for source in &card.sources {
+        for (_, arg) in &source.args {
+            if let SourceArg::Path(path) = arg {
+                read.insert(root_of(path));
+            }
+        }
+    }
+    // So does a state whose initial resolves from one.
+    for state in &card.states {
+        if let Some(path) = &state.initial_path {
+            read.insert(root_of(path));
+        }
+    }
+    // And a `copy` declaration reads the locale IMPLICITLY: resolving `copy.x`
+    // looks up `env.locale.lang` to choose which translation to render. No path
+    // in the card names it, so a purely syntactic scan calls `env.locale` dead
+    // on every card that has copy but no other locale-dependent binding — which
+    // is two of the three reference cards.
+    if !card.copies.is_empty() {
+        read.insert("env".to_owned());
+        read.insert("env.locale".to_owned());
+    }
+    for source in &card.sources {
+        // A dotted source name (`env.locale`) is read as its own root.
+        if !read.contains(&source.name) && !read.contains(&root_of(&source.name)) {
+            sink.push(
+                source.line,
+                2,
+                format!(
+                    "source {:?} is declared and never read. The host fetches it \
+                     on every refresh and nothing displays it — either bind it \
+                     somewhere or remove the declaration",
+                    source.name
+                ),
+            );
+        }
+    }
+
     // A source may read card state, other sources and copy — the same names a
     // view may, minus anything a component introduces.
     let scope = &Scope::card(card);

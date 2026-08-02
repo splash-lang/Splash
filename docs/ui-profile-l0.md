@@ -867,19 +867,34 @@ An earlier version of this paragraph said `StockPlot` and `AqiContour` "lower wi
 arrays". They have no data arrays: both name what to plot and fetch it themselves, and the
 catalog claiming otherwise was the defect.
 
-**Three defects found by reviewing §5.10, not yet fixed.** Each is a checker gap rather than a
-language question:
+**Three defects found by reviewing §5.10, now fixed.** Each was a checker gap rather than a
+language question, and each is held by a mutation rule:
 
-- **A `source` and a card `state` may share a name**, and nothing rejects the collision. The
-  component then reads the source — §5.3 is not violated and card state does not leak — but
-  silent shadowing is not a defensible way to resolve two namespaces that should be disjoint.
-- **A declared source that nothing reads is not reported.** `stock.card` shipped one: `series`
-  became unread when `StockPlot` started fetching its own, and no test noticed. An unread source
-  is a fetch the host performs for nothing.
-- **Nothing connects a state write to a refetch.** `stale_sources` computes what a change
-  invalidates and `source_plan` lists what to request; both are called only from tests.
-  `dispatch_with_data` returns a bare `bool` and discards which fields changed. The pieces of
-  §5.9's invalidation story exist and are individually tested; the loop between them does not.
+- **A `source` and a card `state` sharing a name is refused.** The component would have read the
+  source — §5.3 was not violated and card state did not leak — but which of the two a name
+  resolves to depended on lookup order rather than on anything the card said.
+- **A declared source that nothing reads is refused.** An unread source is a fetch the host
+  performs on every refresh for data that reaches no pixel. Two shipped in the reference cards
+  and no test noticed: `series` and `aqi` both went unread the moment `StockPlot` and
+  `AqiContour` began fetching their own data. Both are now gone from the cards.
+
+  One implicit read has to be counted or this rejects correct cards: resolving `copy.x` looks up
+  `env.locale.lang` to choose a translation, and no path in the card names it. A purely syntactic
+  scan calls `env.locale` dead on every card with copy and no other locale binding — which was
+  two of the three reference cards.
+
+- **A state write reports what it invalidated.** `dispatch_reporting` returns a `DispatchOutcome`
+  — what applied, which state paths were written, and which sources those writes made stale,
+  following the cascade. The pieces existed (`stale_sources`, `source_plan`) and nothing joined
+  them, so a host holding `true` could not tell what to refetch. `dispatch_with_data` keeps its
+  `bool` for callers that do not need the answer.
+
+**Fixing the second one exposed a test that passed for the wrong reason**, which is the more
+useful finding. `a_source_argument_path_must_be_declared` rejected a card carrying an undeclared
+path in a source argument — and its fixture ended `view root Rule()`, so the source went unread.
+Once unread sources were refused, the card was rejected for *that* instead, and the test passed
+with the rule it exists to protect switched off. The mutation harness reported it as unprotected
+the moment the new rule landed.
 
 Component contracts were question 1 and are now specified in §5.2–§5.8, validated by adding
 components to two reference cards. That exercise produced amendment #9, which nothing had

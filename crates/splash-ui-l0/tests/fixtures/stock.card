@@ -13,8 +13,6 @@ source movers      sys.movers(count: 10, fields: [ticker, name, last, change, pc
 source quote       sys.quote(ticker: state.selected,
                              fields: [name, last, change, pct, open, high, low,
                                       volume, mktcap, pe])
-source series      sys.series(ticker: state.selected, range: state.range,
-                              fields: [points, min, max])
 source env.locale  sys.locale()
 
 state selected { shape: text, initial: "" }                    # "" ⇒ movers list
