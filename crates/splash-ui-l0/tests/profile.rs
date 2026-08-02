@@ -4124,3 +4124,109 @@ fn news_fixture() -> serde_json::Value {
         "article": {}, "selected": "", "env": {"locale": {}}
     })
 }
+
+// ─── the three defects the state-ownership review found ──────────────────────
+// Each was recorded in §8 of the profile as "found and not fixed". These are
+// the tests that make them fixable rather than merely known.
+
+/// §5.3 keeps card state out of a component, and a name collision walks around
+/// the check: `check_path` asks `scope.knows(path)` BEFORE asking whether the
+/// path names forbidden card state, so a source with the same name satisfies
+/// the first question and the second is never reached.
+///
+/// The component ends up reading the SOURCE, which §5.3 permits — so this is
+/// not a confinement breach and card state does not leak. It is worse in a
+/// quieter way: the card says `state selected` and `source selected` and the
+/// runtime silently picks one. Two namespaces that must be disjoint are not
+/// checked for overlap at all.
+#[test]
+fn a_source_may_not_share_a_name_with_card_state() {
+    const CARD: &str = r#"
+source selected sys.locale()
+state selected { shape: text, initial: "" }
+view root TextTitle(text: selected)
+"#;
+    let report = check_ui_l0_named("t", CARD);
+    assert!(
+        !report.valid,
+        "a source and a state sharing a name must be refused:\n{:#?}",
+        report.diagnostics
+    );
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("selected")),
+        "the diagnostic must name the colliding name:\n{:#?}",
+        report.diagnostics
+    );
+}
+
+/// A declared source nothing reads is a fetch the host performs for nothing.
+///
+/// `stock.card` shipped one and no test noticed: `series` became unread the
+/// moment `StockPlot` started fetching its own data, and the card kept asking
+/// for it. On device that is a network round trip, a parse, and a cache entry
+/// per refresh, for data that reaches no pixel.
+#[test]
+fn a_source_nothing_reads_is_reported() {
+    const CARD: &str = r#"
+source used   sys.locale()
+source unused sys.movers(count: 1, fields: [ticker])
+view root TextTitle(text: used.lang)
+"#;
+    let report = check_ui_l0_named("t", CARD);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("unused")),
+        "an unread source must be reported:\n{:#?}",
+        report.diagnostics
+    );
+    assert!(
+        !report.diagnostics.iter().any(|d| d.message.contains("used.")
+            || (d.message.contains("used") && !d.message.contains("unused"))),
+        "and a source that IS read must not be:\n{:#?}",
+        report.diagnostics
+    );
+}
+
+/// §5.9's invalidation story exists in pieces that nothing joins.
+///
+/// `stale_sources` computes what a change invalidates and `source_plan` lists
+/// what to request, and both are called only from tests. `dispatch_with_data`
+/// returns a bare `bool` and discards WHICH fields it wrote — so a host holding
+/// the result cannot tell what to refetch, and the stock card's detail view
+/// works only because the test data already contains a quote it never asked
+/// for.
+#[test]
+fn a_dispatch_reports_what_it_invalidated() {
+    let data = serde_json::json!({
+        "movers": [{ "ticker": "NVDA", "name": "Nvidia", "last": 1.0, "change": 0.5, "pct": 2.0 }],
+        "quote": {}, "selected": "", "range": "m1", "env": { "locale": {} },
+        "copy": { "movers": "Top Movers" }
+    });
+    let mut store = splash_ui_l0::InstanceStore::default();
+    let outcome = splash_ui_l0::dispatch_reporting(
+        STOCK,
+        &mut store,
+        "root",
+        "open_quote",
+        Some(&serde_json::Value::String("NVDA".into())),
+        &data,
+    );
+    assert!(outcome.applied, "the event applies");
+    assert!(
+        outcome.changed.iter().any(|f| f == "selected"),
+        "it must report WHICH state it wrote: {:?}",
+        outcome.changed
+    );
+    // `quote` and `series` both take `ticker: state.selected`, so both are now
+    // stale. This is the fact a host needs and could not previously obtain.
+    assert!(
+        outcome.stale.iter().any(|s| s == "quote"),
+        "and which sources that invalidates: {:?}",
+        outcome.stale
+    );
+}

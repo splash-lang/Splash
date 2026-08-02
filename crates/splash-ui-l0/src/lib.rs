@@ -4979,6 +4979,11 @@ pub fn dispatch_with(
 /// `cycle`, `clear` and `set(.token)` need nothing. Only a transition that
 /// names a path needs the host's data, and passing Null simply makes that one
 /// form a no-op instead of writing something wrong.
+/// Apply an event's transitions, with the data a path-valued initial resolves
+/// against.
+///
+/// Returns only whether anything applied. `dispatch_reporting` returns that plus
+/// what went stale, and is what a host driving refetch should call.
 pub fn dispatch_with_data(
     source: &str,
     store: &mut InstanceStore,
@@ -4987,9 +4992,69 @@ pub fn dispatch_with_data(
     payload: Option<&serde_json::Value>,
     data: &serde_json::Value,
 ) -> bool {
+    !dispatch_writes(source, store, instance_key, event, payload, data).is_empty()
+}
+
+/// What a dispatch did, and what it obliges the host to do next.
+///
+/// `dispatch_with_data` returns a bare `bool`, which is enough to know a tap was
+/// not ignored and not enough to act on. §5.9 says a source parameterised by
+/// state goes stale when that state changes, and a host holding only `true` has
+/// no way to find out which. The pieces to compute it existed — `stale_sources`
+/// and `source_plan` — and nothing joined them, so the stock card's detail view
+/// worked only because its test data already contained a quote it never asked
+/// for.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DispatchOutcome {
+    /// Whether any transition committed. False means refused or unknown — see
+    /// §3, a batch that does not fully resolve does not partially apply.
+    pub applied: bool,
+    /// The state paths written, in the order the batch wrote them.
+    pub changed: Vec<String>,
+    /// The declared sources those writes invalidate, following the dependency
+    /// cascade. The host should refetch these before the next realization.
+    pub stale: Vec<String>,
+}
+
+/// Apply an event and report what it invalidated.
+///
+/// This is `dispatch_with_data` plus the answer to "and now what?". Prefer it
+/// in a host: the bool-returning form cannot drive a refetch, which is the
+/// whole point of letting a source take state as an argument.
+pub fn dispatch_reporting(
+    source: &str,
+    store: &mut InstanceStore,
+    instance_key: &str,
+    event: &str,
+    payload: Option<&serde_json::Value>,
+    data: &serde_json::Value,
+) -> DispatchOutcome {
+    let changed = dispatch_writes(source, store, instance_key, event, payload, data);
+    if changed.is_empty() {
+        return DispatchOutcome::default();
+    }
+    // `stale_sources` takes the changed names; a write to `selected` is a change
+    // to `selected` as a source argument reads it.
+    let names: Vec<&str> = changed.iter().map(String::as_str).collect();
+    let stale = stale_sources(source, &names);
+    DispatchOutcome {
+        applied: true,
+        changed,
+        stale,
+    }
+}
+
+fn dispatch_writes(
+    source: &str,
+    store: &mut InstanceStore,
+    instance_key: &str,
+    event: &str,
+    payload: Option<&serde_json::Value>,
+    data: &serde_json::Value,
+) -> Vec<String> {
     let mut sink = Diagnostics::default();
     let Some(tokens) = lex(source, &mut sink) else {
-        return false;
+        return Vec::new();
     };
     let card = Parser::new(&tokens, &mut sink).parse_card();
 
@@ -5026,11 +5091,11 @@ pub fn dispatch_with_data(
                 &instance_key[..boundary],
                 Some((component, schema_id(component))),
             ),
-            None => return false,
+            None => return Vec::new(),
         },
         None => match card.events.iter().find(|e| e.name == event) {
             Some(d) => (d, &card.states, CARD_STATE_KEY, None),
-            None => return false,
+            None => return Vec::new(),
         },
     };
 
@@ -5046,7 +5111,7 @@ pub fn dispatch_with_data(
 
     for transition in &declared.transitions {
         let Some(state) = states.iter().find(|s| s.path == transition.target) else {
-            return false;
+            return Vec::new();
         };
         // The declared initial, path-valued or not. `clear` and a first `cycle`
         // both fell back to the SHAPE default here, so a card whose initial
@@ -5085,10 +5150,10 @@ pub fn dispatch_with_data(
                     // that has to be checked at runtime: every other set form is
                     // decided against the declared shape at check time.
                     Some(v) if value_fits_shape(&state.shape, v) => v.clone(),
-                    Some(_) => return false,
+                    Some(_) => return Vec::new(),
                     // No payload is a no-op rather than a silent clear: falling
                     // back to the initial would look like a deliberate reset.
-                    None => return false,
+                    None => return Vec::new(),
                 },
                 // A path READS. Treating it as the payload meant
                 // `n: set(config.answer)` wrote whatever the tap carried — or
@@ -5097,23 +5162,28 @@ pub fn dispatch_with_data(
                     Some(v) if value_fits_shape(&state.shape, &v) => v,
                     // Unresolvable or ill-shaped: the batch cannot complete, and
                     // §3 says a batch is all or nothing.
-                    _ => return false,
+                    _ => return Vec::new(),
                 },
                 SetSource::Token(t) | SetSource::Text(t) => serde_json::Value::String(t.clone()),
                 SetSource::Num(n) => serde_json::Value::from(*n),
                 SetSource::Bool(b) => serde_json::Value::Bool(*b),
             },
-            _ => return false,
+            _ => return Vec::new(),
         };
         staged.push((transition.target.clone(), next));
     }
 
-    // Commit.
-    let applied = !staged.is_empty();
+    // Commit, and report what was written. The targets are what a host needs
+    // to know which sources went stale -- discarding them is why §5.9's
+    // invalidation story had pieces that nothing joined.
+    let mut written = Vec::new();
     for (target, value) in staged {
         store.set(instance_key, &target, value);
+        if !written.contains(&target) {
+            written.push(target);
+        }
     }
-    applied
+    written
 }
 
 // ───────────────────────────────────────────────────────────────── source plan ──
