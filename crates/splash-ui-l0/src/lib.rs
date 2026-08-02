@@ -3899,10 +3899,7 @@ impl ValueScope<'_> {
                 let key = self.lookup(inner)?;
                 current = match &key {
                     serde_json::Value::String(k) => current.get(k.as_str())?.clone(),
-                    v => match v.as_u64() {
-                        Some(i) => current.get(i as usize)?.clone(),
-                        None => return None,
-                    },
+                    v => current.get(v.as_u64()? as usize)?.clone(),
                 };
                 continue;
             }
