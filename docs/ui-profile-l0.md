@@ -414,8 +414,10 @@ Recursive by construction, because a static declaration path is not enough: two 
 instances each containing an unkeyed `Toggle` must not share one state cell.
 
 **This is not React's rule.** React associates state with position in the realized tree, where
-component type and keys both affect preservation. L0 binds to a declared path so that
-identity survives a ledger edit that inserts an element above.
+component type and keys both affect preservation. L0 binds to a declared path, so identity
+survives a ledger edit that inserts a **differently named** element above — and only that.
+§5.1's closing paragraph lists exactly what does and does not move the path; read it before
+relying on this sentence, which states the motivation rather than the guarantee.
 
 **Neither the card namespace nor the version is currently a key segment.** Keys begin at the
 root view and append component names; the schema id is held in a separate map keyed by component
@@ -584,7 +586,12 @@ exist to prevent. A missing key on an iteration is a grammar error.
 ### 5.8 State schema versioning
 
 A component's **state schema id** is derived from its `state` declarations — names, shapes and
-initials — and forms part of instance identity (§5.1).
+initials.
+
+**It is not part of the instance key**, and an earlier version of this section said it was. The
+key is `{parent}/{component}`; the schema id is held separately, per component name, and a
+schema change reconciles the live cells *in place* rather than minting a new identity. The
+observable behaviour below is what the implementation does; the mechanism is not identity.
 
 | Definition change | Effect |
 |---|---|
@@ -614,8 +621,12 @@ opted in for.
 
 **Consequence worth stating plainly:** folding the ledger reconstructs the *program*, not the
 visible application state. Local state is disposable UI state — scroll positions, expansion
-flags. Anything that must survive a definition change belongs in a `source` or in card state
-with a declared migration, not in a component.
+flags. Anything that must survive a definition change belongs in a `source`, not in a component.
+
+An earlier version of this paragraph offered card state "with a declared migration" as the other
+home for durable values. **There is no card-state migration** — no syntax, no implementation.
+Card state is reset like any other, and §8 question 8 records this as an open question rather
+than a mechanism, because durability needs a storage contract this profile does not have.
 
 ### 5.9 Source lifecycle
 
@@ -662,6 +673,74 @@ derivable under the invariant above.
 **Cadence and freshness budget belong to the capability, not the card.** A card names what it
 needs; how often `sys.weather` is worth re-fetching is a property of weather, and duplicating it
 per card is how two cards on one screen disagree about how old their data is.
+
+### 5.10 Who owns state, and what L1 must be told
+
+L0 does not hold all the state a running card has. Three owners exist, and confusing them is
+how a layer boundary gets drawn in the wrong place:
+
+| # | State | Owner | Example | May a source depend on it? |
+|---|---|---|---|---|
+| 1 | **Card state** | L0 | `selected`, `city`, `units` | Yes — `sys.quote(ticker: state.selected)` |
+| 2 | **Component-local state** | L0 today | `ForecastRow.expanded` | No — §5.3 keeps it out of source arguments |
+| 3 | **Source lifecycle** | the host | `weather.$state` | Not applicable — it *is* the fetch's status |
+
+**Kind 1 cannot be pushed below L0.** It is the state composition creates: `selected` is read by
+the list, the detail, the header, the chart, and by two sources. It is not any component's
+state, it is what *relates* them, so only the layer that composes can declare it. A component
+kit cannot supply it however complete the kit is.
+
+**Kind 2 is a candidate for moving down, and that move is not yet justified.** The argument for
+it is that expansion flags and scroll offsets are widget business the composer should not have
+to mention — and the reference corpus agrees, containing six kind-1 declarations and exactly
+one of kind 2. The argument against is §5.10.1.
+
+**Kind 3 was missed by an earlier draft of this section**, which offered a two-way split. It
+fits neither: the host owns it, several components read it, it drives guards and refetch, and it
+outlives any widget instance.
+
+Ownership is also not the only axis. A cell has a **visibility** (private, card-shared),
+an **effect** (render-only, layout, source query, navigation), and a **lifetime** (instance,
+card, session). `selected` is card-shared by visibility but *navigation* by effect; `units`
+looks like a durable preference. Classifying by owner alone answers where a value lives, not
+how long it should, which is why question 8 in §8 stays open.
+
+#### 5.10.1 Moving kind 2 down requires a protocol, not just a move
+
+Suppose component-local state moved to the component kit. L0 would no longer know `expanded`
+exists — and L0 still decides when a subtree is rebuilt. Measured on the weather card:
+
+```
+week  changes ->  28 of  79 nodes reused     forecast rows are REPLACED
+city  changes ->   0 of  79 nodes reused     whole tree rebuilt
+units changes ->  13 of  79 nodes reused
+```
+
+The forecast rows read `week`. So when forecast data refreshes, L0 rebuilds those subtrees.
+Today that is harmless: `expanded` lives in the instance store, keyed by instance identity and
+held *outside* the tree, so it survives. Move the value down without moving identity down and a
+row the user expanded collapses whenever data arrives.
+
+**So the layers do not need a shared value store, but they do need a shared protocol** —
+instance identity, mount and unmount, what survives a rebuild, and what invalidates. Precisely
+*because* L0 would not own kind 2, it must hand identity down so the owner can preserve it.
+
+That protocol does not exist. `docs/scoped-state.md` is the nearest thing and is written for
+the opposite arrangement — it has L0 lowering emit its own state declarations into the VM — so
+it needs rewriting around kit-owned state before it describes this.
+
+**The identity that would have to cross is not the renderer's `key`.** Three distinct things
+currently share the name:
+
+| Name | What it is |
+|---|---|
+| `UiNode.key` | L0's declaration-and-loop path, used for realization and patch reuse |
+| emitted `l0_key` | that same path, written as a backend attribute for tap routing |
+| `Attrs.key` in `splash-render` | a kit-selected name for a slot in a process-global `BTreeMap<String, f64>` — no instance scoping, no pruning |
+
+The third is not the first. Reusing its name for instance identity would put per-instance cells
+into a global map keyed by whatever the kit chose, which is the collision §5.7 exists to
+prevent.
 
 ---
 
@@ -767,19 +846,40 @@ construct and keep the widest.
 | ~~5~~ | ~~Named slots~~ — **settled in §5.5.** `slot name` in the component, `into name { … }` at the call site, anonymous slot unchanged as the default. An `into` naming a slot that does not exist is rejected rather than silently dropping its children |
 | ~~6~~ | ~~An explicit state migration~~ — **settled in §5.8.** `keep: true` opts a cell out of the schema-change reset, and only while that field's own shape is unchanged |
 | ~~7~~ | ~~The closed token sets per constructor argument~~ — **settled**: `docs/ui-l0-constructors.toml` is the normative catalog, and tests assert the two agree in both directions — constructor names and shared token sets, and for source capabilities the arguments too |
+| **8** | **What, if anything, is durable.** Card state resets with the card; §5.8 previously claimed a card-state migration that does not exist. `units` and `city` look like preferences a user expects to survive a restart. Answering needs a storage contract, a migration story, and a decision about what a user is entitled to get back — none of which belongs under a state mechanism |
+| **9** | **Whether component-local state (§5.10 kind 2) moves to the component kit.** The corpus says it would cost little — six kind-1 declarations against one kind-2. §5.10.1 says it cannot move alone: identity, mount/unmount and invalidation must move with it, and that protocol is unwritten. Open until the protocol exists, not until the split looks tidy |
 
-All seven are now settled. What replaces them is not a shorter list of questions but a
-different kind of work: the profile is specified and implemented, and the remaining gaps are
-in the surrounding system rather than in the language.
+Questions 1–7 are settled; 8 and 9 were opened by working through where state lives. What
+replaces the original seven is not a shorter list but a different kind of work: the profile is
+specified and implemented, and the remaining gaps are in the surrounding system rather than in
+the language.
 
 **Known gaps, stated plainly.** `makepad::lower` violates §1.1 and does so in three ways at
 once: it lowers to a *backend dialect* rather than to the theme's component kit, it decides
 *presentation* (ten hardcoded colours, a font-size ramp) which belongs to a theme, and it
 therefore reaches one backend of three. It also defines a second `UiNode`, duplicating the one
 `splash-render` already produces. The fix is not to move it to a backend crate — it is to
-retarget it at the component kit and delete the colour table. `StockPlot` and `AqiContour` lower without their data arrays. L1 and L2 are
+retarget it at the component kit and delete the colour table. L1 and L2 are
 specified only as "what L0 excludes" — neither is implemented, and the level classifier can
 therefore name them but not check them.
+
+An earlier version of this paragraph said `StockPlot` and `AqiContour` "lower without their data
+arrays". They have no data arrays: both name what to plot and fetch it themselves, and the
+catalog claiming otherwise was the defect.
+
+**Three defects found by reviewing §5.10, not yet fixed.** Each is a checker gap rather than a
+language question:
+
+- **A `source` and a card `state` may share a name**, and nothing rejects the collision. The
+  component then reads the source — §5.3 is not violated and card state does not leak — but
+  silent shadowing is not a defensible way to resolve two namespaces that should be disjoint.
+- **A declared source that nothing reads is not reported.** `stock.card` shipped one: `series`
+  became unread when `StockPlot` started fetching its own, and no test noticed. An unread source
+  is a fetch the host performs for nothing.
+- **Nothing connects a state write to a refetch.** `stale_sources` computes what a change
+  invalidates and `source_plan` lists what to request; both are called only from tests.
+  `dispatch_with_data` returns a bare `bool` and discards which fields changed. The pieces of
+  §5.9's invalidation story exist and are individually tested; the loop between them does not.
 
 Component contracts were question 1 and are now specified in §5.2–§5.8, validated by adding
 components to two reference cards. That exercise produced amendment #9, which nothing had

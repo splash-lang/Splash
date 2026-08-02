@@ -2,6 +2,19 @@
 
 **Status:** proposed. Nothing here is implemented.
 
+**Superseded in part — read this first.** `ui-profile-l0.md` §5.10 classifies state by owner and
+reaches a different arrangement than §7 below assumes. §7 has L0's lowering emit its own state
+declarations and transitions into the VM. Under §5.10 the state that would live in the VM is
+kind 2 — component-local — which is a candidate for belonging to the *component kit*, declared
+there rather than in an L0 card. If that move happens, the cells here are the kit's and L0 never
+mentions them.
+
+What survives regardless: §3's per-instance cell keyed by an opaque emitter-supplied key, §3.1's
+collision rule, §4's redraw-on-write, and §5's lifetime. What needs rewriting is §7, and the
+question of *who emits* the declaration. §5.10.1 adds an obligation this document does not
+carry: whoever owns the cells must be handed instance identity, because L0 rebuilds subtrees on
+data changes and a cell that cannot be re-found is a cell that is lost.
+
 `UPSTREAM.md` permits a behavioural change to the vendored VM "only when [it]
 implements a published Splash language contract". This is that contract. It is
 deliberately narrow: it publishes the smallest state mechanism that lets an

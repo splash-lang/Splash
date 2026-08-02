@@ -126,6 +126,18 @@ RULES = [
          "if scope.forbidden_state.contains(&root) {",
          "if false {"),
 
+    # ── reconciliation (§5.10.1) ─────────────────────────────────────────────
+    # Mutating to `true` (reuse everything) rather than `false` because that is
+    # the direction the first implementation got wrong: it checked a node's own
+    # key and let a clean root short-circuit its dirty children. The suite must
+    # notice a patch that reuses a subtree a change did touch.
+    Rule("patch-reuse", "a subtree is reused only when nothing under it is dirty",
+         """        !touches_dirty(&n.key)
+            && n.children
+                .iter()
+                .all(|c| subtree_is_clean(c, touches_dirty))""",
+         "        let _ = (n, touches_dirty);\n        true"),
+
     # ── level and header (§7) ────────────────────────────────────────────────
     Rule("header-level", "a declared level must match the derived one",
          "if !matches {",

@@ -3893,6 +3893,48 @@ fn shape_signature(n: &splash_ui_l0::UiNode) -> String {
     format!("{}[{}]", n.kind, kids.join(","))
 }
 
+/// §5.10.1's premise, on the real weather card rather than a synthetic one.
+///
+/// The argument there is that component-local state cannot simply be moved down
+/// to the component kit, because L0 keeps deciding when a subtree is rebuilt and
+/// would no longer know the state exists. That argument is only worth making if
+/// the rebuild actually happens — so this asserts the premise, not the
+/// conclusion: a source refresh really does replace the subtrees that read it.
+///
+/// If this ever goes green in the other direction — forecast rows surviving a
+/// `week` refresh — then §5.10.1 is wrong and the move is cheaper than stated.
+#[test]
+fn a_source_refresh_replaces_the_subtrees_that_read_it() {
+    let data = weather_data();
+    let store = splash_ui_l0::InstanceStore::default();
+    let limits = RealizeLimits::default();
+
+    let before = splash_ui_l0::realize_with_state(WEATHER, &data, &store, limits)
+        .root
+        .expect("the reference card realizes");
+
+    let patch = |changed: &str| {
+        splash_ui_l0::realize_patch(WEATHER, &data, Some(&store), &before, &[changed], limits)
+    };
+
+    // `week` feeds the forecast rows, which is where `ForecastRow.expanded`
+    // lives. Rebuilding them is what would discard a kit-owned flag.
+    let week = patch("week");
+    assert!(
+        week.reused < week.nodes,
+        "a week refresh must rebuild the records that read it, not reuse everything"
+    );
+
+    // The counterpart: a name no source or state declares dirties nothing, so
+    // the whole tree carries over. Without this, the assertion above would also
+    // pass for an implementation that never reuses anything at all.
+    let untouched = patch("no_such_record");
+    assert_eq!(
+        untouched.reused, untouched.nodes,
+        "a change touching no declared record must reuse the entire tree"
+    );
+}
+
 /// The catalog described an interface these widgets abandoned. `AqiContour`
 /// took `field`/`index`/`band` and `StockPlot` took `points`/`min`/`max` — but
 /// both fetch their own data now, and the widget's own comment says why:
