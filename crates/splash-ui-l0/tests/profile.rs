@@ -1007,6 +1007,61 @@ fn copy_resolves_from_the_card_not_the_data() {
     );
 }
 
+/// A tap must be RECEIVABLE, not merely described.
+///
+/// Lowering emitted `l0_event`/`l0_key`/`l0_value` as attributes and nothing
+/// read them — the VM does not hit-test an arbitrary attribute — so every card
+/// that declared `on_tap` rendered inert on device while these tests passed.
+/// The mechanism that works is the one hand-written cards use: a transparent
+/// `Button` over the content calling `agent.notify`, which the host receives.
+#[test]
+fn a_tappable_node_lowers_to_a_reachable_notify() {
+    let data = serde_json::json!({
+        "movers": [{ "ticker": "NVDA", "name": "Nvidia", "last": 1.0, "change": 0.5, "pct": 2.0 }],
+        "quote": { "name": "Nvidia", "last": 1.0, "change": 0.5, "pct": 2.0, "open": 1.0,
+                   "high": 2.0, "low": 0.5, "volume": 10.0, "mktcap": 99.0, "pe": 12.0 },
+        "selected": "", "range": "m1", "env": { "locale": {} },
+        "copy": { "movers": "Top Movers", "open": "Open", "high": "High", "low": "Low",
+                  "volume": "Volume", "mktcap": "Mkt Cap", "pe": "P/E" }
+    });
+    let report = realize(STOCK, &data, RealizeLimits::default());
+    let dsl = makepad::lower(&report.root.expect("root"));
+
+    // The row that opens a quote must carry all three: which event, which
+    // instance, and what payload. Missing the key means a tap cannot say WHICH
+    // row was hit, which is the whole basis of §5.1 identity.
+    let notify = dsl
+        .lines()
+        .find(|l| l.contains("agent.notify") && l.contains("open_quote"))
+        .unwrap_or_else(|| panic!("no reachable tap for open_quote:\n{dsl}"));
+    assert!(notify.contains("event: \"open_quote\""), "event:\n{notify}");
+    assert!(notify.contains("value: \"NVDA\""), "payload:\n{notify}");
+    assert!(
+        notify.contains("key: \"root/when#0/w:list#0/list/Panel#0/for#0[NVDA]/Row#0\""),
+        "instance key:\n{notify}"
+    );
+
+    // `agent.notify`'s first argument must stay a LITERAL. The host's
+    // `tag_notify_calls` only rewrites literals, and an untagged event is
+    // discarded as unattributable — so a computed channel name would render the
+    // card inert again, silently and in exactly the same way.
+    assert!(
+        notify.contains("agent.notify(\"l0\","),
+        "the channel must be a literal:\n{notify}"
+    );
+
+    // The discriminating half: buttons appear ONLY where a tap was declared.
+    // Wrapping every node would make the whole card a hit target, and the
+    // assertions above would still pass.
+    let buttons = dsl.matches("agent.notify").count();
+    let taps = dsl.matches("l0_event:").count();
+    assert_eq!(
+        buttons, taps,
+        "one hit target per declared tap, no more:\n{dsl}"
+    );
+    assert!(taps > 0, "the stock card declares taps");
+}
+
 /// The declared language is chosen when the runtime reports one.
 #[test]
 fn copy_selects_the_reported_locale() {

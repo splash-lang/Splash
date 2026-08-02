@@ -4476,7 +4476,57 @@ pub mod makepad {
         }
     }
 
+    /// A node that declares `on_tap`, wrapped so the tap can actually be
+    /// received.
+    ///
+    /// `tap_binding` alone emits `l0_event`/`l0_key`/`l0_value` as attributes,
+    /// and nothing reads them: the VM has no hit-testing for an arbitrary
+    /// attribute, so every one of those cards rendered inert. The mechanism that
+    /// DOES work on device is the one hand-written cards already use — a
+    /// transparent `Button` overlaid on the content, calling `agent.notify`,
+    /// which the host receives as `SplashAction::Notify`.
+    ///
+    /// So this wraps a tappable element in `flow: Overlay` and lays that button
+    /// over it. The attributes stay: they cost nothing, they are what the tests
+    /// assert, and they are how a lowered card can be read back.
     fn element(node: &UiNode, depth: usize, out: &mut String) {
+        let Some(NodeValue::Event(event)) = arg(node, "on_tap") else {
+            return element_body(node, depth, out);
+        };
+        let p = pad(depth);
+        // The wrapper must size like what it wraps. A Chip is `width: Fit` and
+        // sits in a Row of chips; wrapping it in `Fill` makes the first chip eat
+        // the row. Text roles are likewise intrinsic.
+        let fill = matches!(node.kind.as_str(), "Row" | "Panel" | "Card");
+        let w = if fill { "Fill" } else { "Fit" };
+        let _ = writeln!(out, "{p}View{{ width: {w} height: Fit flow: Overlay");
+        element_body(node, depth + 1, out);
+        let _ = writeln!(out, "{p}  {}", tap_button(node, event));
+        let _ = writeln!(out, "{p}}}");
+    }
+
+    /// The transparent hit target. `agent.notify`'s first argument must be a
+    /// LITERAL for the host's `tag_notify_calls` to prefix it with the card id —
+    /// an untagged event is discarded as unattributable — so the event name
+    /// travels in the payload rather than in the channel name.
+    fn tap_button(node: &UiNode, event: &str) -> String {
+        let value = match arg(node, "value") {
+            Some(NodeValue::Text(t)) => t.clone(),
+            Some(NodeValue::Number(n)) => trim_num(*n),
+            Some(NodeValue::Token(t)) => t.clone(),
+            _ => String::new(),
+        };
+        format!(
+            "Button{{ width: Fill height: Fill draw_bg.color: #00000000 \
+             draw_bg.color_hover: #ffffff08 draw_bg.color_focus: #00000000 \
+             draw_bg.color_down: #ffffff12 draw_bg.border_size: 0.0 \
+             draw_bg.border_radius: 10 text: \"\" \
+             on_click: || agent.notify(\"l0\", {{key: {:?}, event: {event:?}, value: {value:?}}}) }}",
+            node.key
+        )
+    }
+
+    fn element_body(node: &UiNode, depth: usize, out: &mut String) {
         let p = pad(depth);
         match node.kind.as_str() {
             "Surface" => {
