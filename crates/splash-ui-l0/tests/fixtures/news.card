@@ -1,0 +1,109 @@
+# ledger news@1.0.0
+# level:   L0
+# profile: ui/l0
+# model:   glm-5.2
+#
+# Reference card for Splash/docs/ui-profile-l0.md. Expresses everything
+# app/app/src/app/plan/news.rs lowers: Masthead, LeadStory, StoryFeed.
+#
+# Note what is absent: no headline, byline, score or url appears anywhere. A
+# fabricated headline is worse than a wrong coordinate — it is quotable and
+# indistinguishable from a real one — so there is no field that could hold one.
+
+# TWO sources, not one sliced two ways. The feed must skip the lead story, and
+# the profile refuses a derived sub-collection (`stories.rest`) — `rest` invites
+# `filter`, which invites a predicate, which invites arithmetic. The runtime
+# shapes the data; the view does not reshape it.
+source lead        sys.news(count: 1, fields: [id, title, author, points, comments, url])
+source feed        sys.news(count: 7, offset: 1, fields: [id, title, author, points])
+source article     sys.news_item(id: state.selected,
+                                 fields: [title, author, points, comments, url])
+source env.locale  sys.locale()
+
+state selected { shape: text, initial: "" }        # "" ⇒ feed, else a story id
+
+event open_story  { selected: set($value) }
+event back        { selected: clear }
+
+copy masthead { class: vocabulary, en: "Top Stories",  zh: "头条" }
+copy source   { class: vocabulary, en: "HACKER NEWS", zh: "科技新闻" }
+copy latest   { class: vocabulary, en: "LATEST",      zh: "最新" }
+copy lead     { class: vocabulary, en: "LEAD",        zh: "焦点" }
+copy pts      { class: vocabulary, en: "pts",         zh: "分" }
+copy comments { class: vocabulary, en: "comments",    zh: "评论" }
+copy by       { class: vocabulary, en: "by",          zh: "作者" }
+
+view root  Surface(pad: .page) {
+             when selected == "" { stream }
+             when selected != "" { story }
+           }
+
+view stream  Col {
+               masthead
+               headline
+               latest
+             }
+
+view masthead  Col {
+                 TextCaption(text: copy.source)
+                 TextTitle(text: copy.masthead)
+               }
+
+# The lead story, given room. Every field is live.
+view headline  Card(on_tap: open_story, value: lead.0.id) {
+                 TextCaption(text: copy.lead)
+                 TextBody(text: lead.0.title, width: .fill)
+                 Row(gap: 6) {
+                   TextCaption(value: lead.0.points,   suffix: copy.pts)
+                   TextCaption(value: lead.0.comments, suffix: copy.comments)
+                   TextCaption(text: copy.by)
+                   TextCaption(text: lead.0.author)
+                 }
+               }
+
+# Exercises the component contracts (profile §5.2-§5.7):
+#   - typed props with a `record` shape
+#   - an EVENT prop: the row raises open_story, which is declared at card scope,
+#     so the transition runs where it was declared rather than in the child
+#   - reads card-scope `copy` directly (§5.3 permits copy and source, not state)
+#   - has no local state, so its schema id is empty and it never resets
+#
+# The prop is `position`, not `rank`: `width: .rank` is a layout token, and a
+# prop of the same name would collide. See finding #9.
+component StoryRow(story: record, position: number, on_open: event) {
+  view Col {
+         Row(align: .center, on_tap: on_open, value: story.id) {
+           TextRow(text: position, width: .rank)
+           Col(gap: 3) {
+             TextRow(text: story.title, width: .fill)
+             Row(gap: 6) {
+               TextCaption(value: story.points, suffix: copy.pts)
+               TextCaption(text: story.author)
+             }
+           }
+         }
+         Rule()
+       }
+}
+
+# `i` is the loop index binding (amendment #5) — the rank column is supplied by
+# the iterator, not computed in the card.
+view latest  Col {
+               TextCaption(text: copy.latest)
+               Panel {
+                 for s, i in feed key s.id {
+                   StoryRow(story: s, position: i, on_open: open_story)
+                 }
+               }
+             }
+
+view story  Col {
+              Row(on_tap: back) { TextCaption(glyph: "‹") }
+              TextTitle(text: article.title, width: .fill)
+              Row(gap: 6) {
+                TextCaption(value: article.points, suffix: copy.pts)
+                TextCaption(text: copy.by)
+                TextCaption(text: article.author)
+              }
+              TextCaption(text: article.url)
+            }

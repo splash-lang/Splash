@@ -8,6 +8,14 @@
 //! Rust code.
 
 mod profile;
+/// The UI profile, re-exported so existing paths keep working.
+///
+/// It lives in `splash-ui-l0` now: it depends on `serde_json` alone, and an
+/// application carrying a different makepad lineage cannot depend on THIS crate
+/// at all — Cargo refuses the lockfile, since both ship `makepad-error-log
+/// v1.0.0` at different paths. L0 never needed the vendored VM; it inherited it
+/// by living here.
+pub use splash_ui_l0 as ui_l0;
 
 use std::any::Any;
 use std::cell::Cell;

@@ -1,0 +1,243 @@
+# L0 constructor catalog — the normative argument contract for
+# docs/ui-profile-l0.md. Derived from the three reference cards in
+# octos-one/docs/l0/, not invented: every constructor and argument here is one
+# they use.
+#
+# TOKENS ARE LEXICALLY MARKED with a leading dot: `.fill`, `.money`, `.center`.
+#
+# This supersedes amendment #9's resolution. That rule said a bare identifier
+# resolved by the argument's declared shape — which fails the moment one
+# argument admits both, and `unit` does: `unit: units` is a path to card state,
+# `unit: .pct` is a token. Marking tokens removes the ambiguity at the lexical
+# level rather than the semantic one, so a prop named `fill` can never collide
+# with `.fill`, and the catalog only has to say which tokens are LEGAL rather
+# than disambiguate what a name means.
+#
+# kinds:
+#   token       one of `tokens`, written with a leading dot
+#   path        a bound path — source, state, prop, copy or loop binder
+#   event       a declared event name (local or received as a prop)
+#   number/text/bool   a literal of that type, or a path of that shape
+#   data        a bound path that renders a FACT. Distinct from `number`
+#               because `gap: 6` is layout the card may choose and
+#               `value: 41.2` is a measurement it may not (§4 no-facts)
+#   any         path or literal
+#   record/collection  component props only
+
+# ─── containers ───────────────────────────────────────────────────────────────
+
+[Surface]
+pad = { kind = "token", tokens = ["page", "tight", "none"] }
+
+[Photo]
+src = { kind = "path" }
+pad = { kind = "token", tokens = ["page", "tight", "none"] }
+
+[Panel]
+
+[Card]
+on_tap = { kind = "event" }
+value  = { kind = "any" }
+
+[Col]
+align = { kind = "token", tokens = ["start", "center", "end"] }
+gap   = { kind = "number" }
+
+[Row]
+align  = { kind = "token", tokens = ["start", "center", "end", "baseline"] }
+gap    = { kind = "number" }
+on_tap = { kind = "event" }
+value  = { kind = "any" }
+
+[Grid]
+cols = { kind = "number" }
+
+[Rule]
+
+# ─── text roles ───────────────────────────────────────────────────────────────
+# Seven ROLES. A role says what a piece of text is FOR; the active theme decides
+# what it looks like (profile §1.1). `TextHero` is "the one number this card
+# exists to show", not white-at-62pt — a different theme answers the same role
+# differently, and a card written today should survive that.
+#
+# A role is a constructor rather than a `font` argument for the same reason: a
+# model-authored font_family once dropped CJK coverage and rendered 上海 as tofu.
+# Naming the role lets the theme carry the whole glyph fallback chain.
+
+[TextHero]
+text   = { kind = "text" }
+value  = { kind = "data" }
+unit   = { kind = "unit" }
+format = { kind = "format" }
+on_tap = { kind = "event" }
+
+[TextTitle]
+text  = { kind = "text" }
+width = { kind = "width" }
+
+[TextBody]
+text  = { kind = "text" }
+width = { kind = "width" }
+
+[TextStat]
+value  = { kind = "data" }
+format = { kind = "format" }
+tint   = { kind = "path" }
+
+[TextRow]
+text  = { kind = "text" }
+width = { kind = "width" }
+
+[TextCaption]
+text   = { kind = "text" }
+value  = { kind = "data" }
+glyph  = { kind = "text" }
+suffix = { kind = "text" }
+unit   = { kind = "unit" }
+width  = { kind = "width" }
+
+[TextValue]
+value  = { kind = "data" }
+unit   = { kind = "unit" }
+format = { kind = "format" }
+tint   = { kind = "path" }
+
+[Tile]
+label  = { kind = "text" }
+value  = { kind = "data" }
+unit   = { kind = "unit" }
+format = { kind = "format" }
+
+[Chip]
+text   = { kind = "text" }
+on_tap = { kind = "event" }
+value  = { kind = "any" }
+active = { kind = "bool" }        # a predicate is a bool operand
+
+# ─── data-visualisation roles ─────────────────────────────────────────────────
+# Every argument is a path. These render live data and hold no authored values —
+# the class of bug that put an invented `condition` and invented `wmin`/`wmax`
+# into shipped cards.
+#
+# These six cannot be theme compositions (profile §1.1): a gradient bar or a sun
+# arc is a fragment shader parameterised by data, and `splash-render` notes that
+# a DSL node cannot carry shader source, because MPSL compiles at build time.
+#
+# HOW they reach a backend is unsettled. An earlier version of this comment said
+# each backend implements them "exactly as it already does for Map", which
+# asserted a contract that does not exist: five of the six are absent from
+# splash-render's tag table, and its fallback drops the node. Six of six are
+# implemented in octos-one today and one in Splash-Makepad, so the pipeline
+# should be proven there before the vocabulary is fixed.
+#
+# The card still names only a role and its data. Colour, thickness and cap shape
+# remain the backend's, so §1.1 holds here as everywhere else.
+
+[WeatherIcon]
+cond = { kind = "path" }
+size = { kind = "token", tokens = ["hero", "row", "tile"] }
+
+[TempBar]
+lo  = { kind = "path" }
+hi  = { kind = "path" }
+min = { kind = "path" }
+max = { kind = "path" }
+
+[SunArc]
+rise = { kind = "path" }
+set  = { kind = "path" }
+now  = { kind = "path" }
+
+[MoonPhase]
+phase = { kind = "path" }
+illum = { kind = "path" }
+
+# The card supplies a LOCATION, never the field. An earlier version took
+# `field`/`index`/`band`, which described an interface the widget deliberately
+# abandoned: supplying the field meant sixteen scalar uniforms in the card, and
+# as the widget's own comment puts it, "that put a GPU uniform layout into the
+# authoring language — it is not a widget contract, it is an ABI". The widget
+# fetches its own field now, so a card cannot express one wrongly.
+[AqiContour]
+lat  = { kind = "path" }
+lon  = { kind = "path" }
+span = { kind = "number" }
+
+# Likewise: the card names WHICH series, and the widget fetches it. Passing
+# `points`/`min`/`max` made the card responsible for a scaled series it has no
+# way to compute — §4's no-facts rule with the arithmetic hidden in the host.
+[StockPlot]
+symbol = { kind = "path" }
+range  = { kind = "unit" }
+
+# ─── shared token sets ────────────────────────────────────────────────────────
+# Named kinds referenced above, so a token set is defined once rather than
+# repeated at every argument that admits it.
+
+[kinds.unit]
+# Admits a token OR a path: `unit: .pct` is fixed, `unit: units` follows card
+# state. This is the argument that forced tokens to be lexically marked.
+accepts = ["token", "path"]
+tokens  = ["c", "f", "pct", "speed", "pressure", "index", "distance", "money"]
+
+[kinds.format]
+accepts = ["token"]
+tokens  = ["money", "signed_money", "signed_pct", "compact", "ratio", "time", "date"]
+
+[kinds.width]
+accepts = ["token", "number"]
+tokens  = ["fill", "fit", "day", "rank", "temp"]
+
+# ─── source capabilities ──────────────────────────────────────────────────────
+# The CLOSED set of helpers a `source` may name. Like the constructor catalog
+# above, this is derived from the reference cards rather than invented.
+#
+# Without it, `source_plan` hands an arbitrary dotted name to the host as the
+# function to resolve, and a card can write
+#
+#     source leak sys.shell(command: "cat /etc/passwd")
+#
+# which parses clean and produces a well-formed request. Confinement then rests
+# entirely on the host having its own allowlist — the policy boundary §1 claims
+# L0 removes. A card must not be able to NAME a capability it was not granted,
+# and that is a property the profile can decide rather than delegate.
+#
+# `args` lists the argument names each helper accepts. An argument outside the
+# list is rejected: a helper that silently ignores an unknown argument is how a
+# card asks for something it did not get and renders as though it did.
+
+[sources."sys.geocode"]
+args = ["name"]
+
+[sources."sys.weather"]
+args = ["lat", "lon", "days", "fields", "aggregate"]
+
+[sources."sys.daylight"]
+args = ["lat", "lon"]
+
+[sources."sys.airquality"]
+args = ["lat", "lon"]
+
+[sources."sys.moonphase"]
+args = ["lat", "lon"]
+
+[sources."sys.photo"]
+args = ["query"]
+
+[sources."sys.locale"]
+args = []
+
+[sources."sys.news"]
+args = ["count", "offset", "fields"]
+
+[sources."sys.news_item"]
+args = ["id", "fields"]
+
+[sources."sys.movers"]
+args = ["count", "fields"]
+
+[sources."sys.quote"]
+args = ["ticker", "fields"]
+
+[sources."sys.series"]
+args = ["ticker", "range", "points", "fields", "aggregate"]

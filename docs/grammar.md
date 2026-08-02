@@ -237,6 +237,26 @@ it remains outside this grammar and cannot run through `splash-cli`. It
 requires a Makepad UI host that supplies widget modules and `ui`; see
 [Makepad UI compatibility](makepad-ui-compatibility.md).
 
+### Generated UI source
+
+The two boundaries above leave a gap. This grammar rejects UI constructs, and
+the compatibility APIs that accept them must not receive generated source — so
+a host wanting LLM-authored UI has no supported path and must embed the raw
+Makepad VM, which restores the very bindings this profile masks.
+
+[UI Profile Level 0](ui-profile-l0.md) is that third path: a sibling canonical
+profile that admits UI constructs while admitting nothing which can reach a
+capability. Sources are queries the runtime resolves before realization and
+injects as data.
+
+It is **implemented** — `splash_core::ui_l0::check_ui_l0` accepts or rejects,
+and `realize` produces a renderer-neutral node tree. Note what that entry point
+does *not* do: L0 has no expression form, so there is nothing to evaluate and
+realization never enters the VM. Authority confinement is therefore structural
+in the strongest sense available — not a sandbox blocking calls, and not an
+evaluator holding an empty module table, but no execution machinery in the path
+at all.
+
 ## Canonical Workflow Source
 
 ```splash
