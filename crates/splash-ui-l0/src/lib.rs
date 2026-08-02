@@ -6226,7 +6226,52 @@ pub mod kit {
         let _ = write!(out, "{}]", "  ".repeat(depth));
     }
 
+    /// A tap, as the string the backend carries.
+    ///
+    /// JSON rather than a delimited form, because every field is data: an
+    /// instance key contains colons (`w:list#0`) and slashes, and a payload is
+    /// whatever the card bound. Every separator worth using has a
+    /// data-dependent failure, and a failure here is a tap routed to the wrong
+    /// row — which looks like a card bug and is not.
+    ///
+    /// The `l0:` prefix is what distinguishes it from this renderer's own
+    /// `set:` verbs, which it handles internally.
+    fn tap_target(node: &UiNode) -> Option<String> {
+        let Some(NodeValue::Event(event)) = arg(node, "on_tap") else {
+            return None;
+        };
+        let value = match arg(node, "value") {
+            Some(NodeValue::Text(t)) => t.clone(),
+            Some(NodeValue::Number(n)) => makepad::trim_num(*n),
+            Some(NodeValue::Token(t)) => t.clone(),
+            _ => String::new(),
+        };
+        let json = serde_json::json!({ "e": event, "k": node.key, "v": value });
+        Some(format!("l0:{json}"))
+    }
+
     fn element(node: &UiNode, depth: usize, out: &mut String) {
+        // A tappable node is WRAPPED. A `card`, `chip` or `image` carrying
+        // `tapto` renders and does nothing — the attribute is dropped before it
+        // reaches the UI — so only a container carries a tap.
+        if let Some(target) = tap_target(node) {
+            // The wrapper sizes like what it wraps: a Chip is intrinsic and sits
+            // in a row of chips, and a filling wrapper makes the first one eat
+            // the row.
+            let f = if node.kind == "Chip" {
+                "l0_tap_fit"
+            } else {
+                "l0_tap"
+            };
+            let _ = write!(out, "{f}({target:?}, ");
+            element_untapped(node, depth, out);
+            out.push(')');
+            return;
+        }
+        element_untapped(node, depth, out);
+    }
+
+    fn element_untapped(node: &UiNode, depth: usize, out: &mut String) {
         let Some(f) = kit_fn(&node.kind) else {
             let _ = write!(out, "l0_unsupported({:?})", node.kind);
             return;
