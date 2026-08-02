@@ -6182,6 +6182,11 @@ pub mod kit {
             "Chip" => "l0_chip",
             "Photo" => "l0_photo",
             "WeatherIcon" => "l0_weathericon",
+            "TempBar" => "l0_tempbar",
+            "SunArc" => "l0_sunarc",
+            "MoonPhase" => "l0_moonphase",
+            "AqiContour" => "l0_aqicontour",
+            "StockPlot" => "l0_stockplot",
             "TextHero" => "l0_hero",
             "TextTitle" => "l0_title",
             "TextBody" => "l0_body",
@@ -6248,6 +6253,21 @@ pub mod kit {
         };
         let json = serde_json::json!({ "e": event, "k": node.key, "v": value });
         Some(format!("l0:{json}"))
+    }
+
+    /// A visualisation's argument, as the kit takes it.
+    ///
+    /// A missing one is `0` rather than an omission: these functions have fixed
+    /// arity, and a card that failed to supply a bound would otherwise not
+    /// parse. Zero at least draws something visibly wrong, where a parse error
+    /// takes the whole card down.
+    fn scalar_of(node: &UiNode, name: &str) -> String {
+        match arg(node, name) {
+            Some(NodeValue::Number(n)) => makepad::trim_num(*n),
+            Some(NodeValue::Text(t)) => format!("{t:?}"),
+            Some(NodeValue::Token(t)) => format!("{t:?}"),
+            _ => "0".into(),
+        }
     }
 
     fn element(node: &UiNode, depth: usize, out: &mut String) {
@@ -6340,6 +6360,21 @@ pub mod kit {
             }
             "TextStat" => {
                 let _ = write!(out, "{f}({}, {})", makepad::valued(node), direction(node));
+            }
+            // The five data visualisations. Each takes its declared arguments in
+            // the catalog's order — no defaults, because a bar drawn against a
+            // range nobody supplied is a bar drawn against zero, and it looks
+            // like data.
+            "TempBar" | "SunArc" | "MoonPhase" | "AqiContour" | "StockPlot" => {
+                let params: &[&str] = match node.kind.as_str() {
+                    "TempBar" => &["lo", "hi", "min", "max"],
+                    "SunArc" => &["rise", "set", "now"],
+                    "MoonPhase" => &["phase", "illum"],
+                    "AqiContour" => &["lat", "lon", "span"],
+                    _ => &["symbol", "range"],
+                };
+                let args: Vec<String> = params.iter().map(|p| scalar_of(node, p)).collect();
+                let _ = write!(out, "{f}({})", args.join(", "));
             }
             // A hero is sized by the caller, because only the lowering knows
             // what will be DRAWN — a live value's text is not in the DSL.
