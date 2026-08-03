@@ -4323,10 +4323,25 @@ impl Realizer<'_> {
         else {
             return;
         };
-        let Some(collection) = scope.lookup(path) else {
-            // A source that has not resolved yet renders nothing rather than an
-            // empty row; pending is the runtime's to surface, not ours to invent.
-            return;
+        let collection = match scope.lookup(path) {
+            Some(c) => c,
+            // No data for this collection. If it is a SOURCE that declared how
+            // many it wants, realize that many placeholder items: the card said
+            // `sys.movers(count: 10)`, so ten rows is what it asked for, and a
+            // backend that answers the source itself fills them in.
+            //
+            // Without this a card rendered with no data blob has no rows at all,
+            // so nothing inside the loop is ever lowered — and a backend that
+            // could have answered every field never gets asked. The count is the
+            // one thing it cannot infer.
+            None => match self.declared_count(path) {
+                Some(n) => {
+                    serde_json::Value::Array(vec![serde_json::Value::Object(Default::default()); n])
+                }
+                // Not a counted source: pending is the runtime's to surface, not
+                // ours to invent.
+                None => return,
+            },
         };
         let Some(items) = collection.as_array() else {
             self.sink.push(
@@ -4439,6 +4454,26 @@ impl Realizer<'_> {
     /// to look it up. An argument that cannot be resolved drops the binding
     /// entirely — a fetch with a hole in it is worse than no fetch, since it
     /// would silently request the wrong thing.
+    /// How many items a source said it wants, if it is a source and it said.
+    ///
+    /// `sys.movers(count: 10)` is the card declaring its own row count. That is
+    /// the one fact a backend answering the source cannot supply for itself —
+    /// it can answer field 0, field 1 and so on, but not how many to ask for.
+    ///
+    /// Bounded by the realization limit, because the count comes from a
+    /// generated card and a card asking for ten thousand rows should get the
+    /// cap rather than the request.
+    fn declared_count(&self, path: &str) -> Option<usize> {
+        let declaration = self.card.sources.iter().find(|s| s.name == path)?;
+        let (_, arg) = declaration.args.iter().find(|(n, _)| n == "count")?;
+        match arg {
+            SourceArg::Number(n) if *n >= 1.0 => {
+                Some((*n as usize).min(self.limits.max_collection))
+            }
+            _ => None,
+        }
+    }
+
     fn source_binding(&self, path: &str, scope: &ValueScope) -> Option<SourceBinding> {
         // Inside a `for`, a path is rooted at the BINDER: `m.ticker`, not
         // `movers.0.ticker`. The binder's frame records which collection it
