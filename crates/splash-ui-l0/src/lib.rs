@@ -2400,6 +2400,7 @@ pub mod catalog {
         ("sys.moonphase", &["lat", "lon"]),
         ("sys.photo", &["query"]),
         ("sys.locale", &[]),
+        ("sys.places", &["lat", "lon", "category", "count", "fields"]),
         ("sys.news", &["count", "offset", "fields"]),
         ("sys.news_item", &["id", "fields"]),
         ("sys.movers", &["count", "fields"]),
@@ -4732,8 +4733,41 @@ pub mod makepad {
                 };
                 format!("{:?}", format!("{glyph}{body}{unit}{suffix}"))
             }
-            None => expr_of(node, "text"),
+            // A `text:` argument decorates too. It did not, and every caption
+            // in `activity.card` read "300 m" where the card said
+            // "300 m away · quiet green space". Nothing caught it because every
+            // `suffix` in the original three cards pairs with `value:`, and only
+            // that path applied the decoration.
+            None => decorate(expr_of(node, "text"), &glyph, unit, &suffix),
         }
+    }
+
+    /// Wrap an already-emitted text in its glyph, unit and suffix.
+    ///
+    /// The text may be a literal (`"300 m"`) or a live call, so the decoration
+    /// is concatenated in the DSL rather than in Rust — `"a" + call + "b"` works
+    /// for both, and quoting a call would draw it instead of evaluating it.
+    fn decorate(body: String, glyph: &str, unit: &str, suffix: &str) -> String {
+        let head = format!("{glyph}");
+        let tail = format!("{unit}{suffix}");
+        if head.is_empty() && tail.is_empty() {
+            return body;
+        }
+        // A plain quoted literal can be spliced directly, which keeps the common
+        // case readable rather than emitting `"" + "300 m" + " away"`.
+        if body.starts_with('"') && body.ends_with('"') && !body[1..body.len() - 1].contains('"') {
+            let inner = &body[1..body.len() - 1];
+            return format!("{:?}", format!("{head}{inner}{tail}"));
+        }
+        let mut out = String::new();
+        if !head.is_empty() {
+            out.push_str(&format!("{head:?} + "));
+        }
+        out.push_str(&body);
+        if !tail.is_empty() {
+            out.push_str(&format!(" + {tail:?}"));
+        }
+        out
     }
 
     /// How large a hero should be, given what it will DRAW.
@@ -5108,11 +5142,9 @@ pub mod makepad {
                     Some(NodeValue::Token(_)) => " width: Fit",
                     _ => "",
                 };
-                let body = if arg(node, "value").is_some() || arg(node, "glyph").is_some() {
-                    valued(node)
-                } else {
-                    expr_of(node, "text")
-                };
+                // Always through `valued`: it falls back to `text:` and
+                // decorates either way.
+                let body = valued(node);
                 // A hero is sized for the ONE dominant value. "18°" fits at 62;
                 // "$184.20" clipped off the right edge on device. Scaling to fit
                 // is the runtime's call — the card says "this is the hero", not
@@ -6368,11 +6400,10 @@ pub mod kit {
             // said at all. `tint` is §1.1's instructive case for exactly this:
             // red-versus-green is presentation, but the SIGN is meaning.
             "TextTitle" | "TextBody" | "TextCaption" | "TextValue" if direction(node) != 0 => {
-                let body = if arg(node, "value").is_some() || arg(node, "glyph").is_some() {
-                    makepad::valued(node)
-                } else {
-                    makepad::expr_of(node, "text")
-                };
+                // Always through `valued`: it falls back to `text:` and
+                // decorates either way. Branching here meant a `text:` carrying a
+                // `suffix:` skipped the decoration entirely.
+                let body = makepad::valued(node);
                 let _ = write!(out, "l0_tinted({f}({body}), {})", direction(node));
             }
             // The five data visualisations. Each takes its declared arguments in
@@ -6398,11 +6429,10 @@ pub mod kit {
             }
             // The remaining text roles take one string.
             _ => {
-                let body = if arg(node, "value").is_some() || arg(node, "glyph").is_some() {
-                    makepad::valued(node)
-                } else {
-                    makepad::expr_of(node, "text")
-                };
+                // Always through `valued`: it falls back to `text:` and
+                // decorates either way. Branching here meant a `text:` carrying a
+                // `suffix:` skipped the decoration entirely.
+                let body = makepad::valued(node);
                 let _ = write!(out, "{f}({body})");
             }
         }

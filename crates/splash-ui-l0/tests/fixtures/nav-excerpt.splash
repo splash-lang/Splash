@@ -1,0 +1,18 @@
+// name: nav-app
+let q = "{{state.q}}"
+let find = "{{state.find}}"
+let orig = "{{state.orig}}"
+let dest = "{{state.dest}}"
+let wp1 = "{{state.wp1}}"
+let wp2 = "{{state.wp2}}"
+let sel = "{{state.sel}}"
+let ss = {{state.sel}}
+let go = "{{state.go}}"
+let vw = "{{state.view}}"
+let md = "{{state.mode}}"
+let oq = "{{state.oq}}"
+
+fn tick() {
+    if dest != "0" { dlat = sys.coord(dest, "lat") }
+    vias = "" + sys.coord(wp1, "lat") + "," + sys.coord(wp1, "lon")
+}

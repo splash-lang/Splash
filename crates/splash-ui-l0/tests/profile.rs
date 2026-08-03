@@ -4352,3 +4352,85 @@ fn a_hero_is_sized_by_what_it_draws_not_by_what_it_emits() {
         "sized by the drawn value (7 glyphs -> 40pt), not the emitted 33:\n{hero}"
     );
 }
+
+/// A decoration applies to `text:`, not only to `value:`.
+///
+/// FOUND BY THE FIRST CARD OUTSIDE THE CORPUS. `activity.card` writes
+/// `TextCaption(text: p.distance, suffix: copy.park_why)` — the distance is
+/// already a formatted string from the host, so it arrives as text — and both
+/// lowerings dropped the suffix on the floor. Every row read "300 m" where the
+/// card said "300 m away · quiet green space".
+///
+/// Nothing caught it because every use of `suffix` in weather, news and stock
+/// pairs it with `value:`, and that path applies the decoration. The catalog
+/// declared `suffix` on the role and one of its two argument paths ignored it —
+/// "specified but not retained", once more.
+#[test]
+fn a_suffix_applies_to_text_as_well_as_value() {
+    const CARD: &str = r#"
+copy why { class: vocabulary, en: "away" }
+source parks sys.places(lat: 1.0, lon: 2.0, category: "park", count: 1, fields: [id, name, distance])
+view root Surface { for p, i in parks key p.id { TextCaption(text: p.distance, suffix: copy.why) } }
+"#;
+    let data = serde_json::json!({
+        "parks": [{"id": "a", "name": "N", "distance": "300 m"}],
+        "env": {"locale": {"lang": "en"}}
+    });
+    let report = realize(CARD, &data, RealizeLimits::default());
+    assert!(report.diagnostics.is_empty(), "{:#?}", report.diagnostics);
+    let root = report.root.expect("root");
+
+    for (name, dsl) in [
+        ("makepad", makepad::lower(&root)),
+        ("kit", splash_ui_l0::kit::lower(&root)),
+    ] {
+        assert!(
+            dsl.contains("300 m away"),
+            "{name} dropped the suffix from a text-valued caption:\n{dsl}"
+        );
+    }
+}
+
+/// The boundary §1.0 draws, asserted rather than described.
+///
+/// `nav`'s shipping card is a program: 30 `let` bindings, 83 assignments, 128
+/// conditionals, 606 arithmetic operators and a `fn tick()` that recomputes
+/// route geometry every frame. The classifier must place it at L2 and refuse it,
+/// and it must do so for the RIGHT reason — a profile that accepted it, or that
+/// rejected it as unparseable, would be wrong in opposite directions.
+#[test]
+fn a_card_that_computes_is_classified_beyond_l0() {
+    const NAV: &str = include_str!("fixtures/nav-excerpt.splash");
+    let report = check_ui_l0_named("nav", NAV);
+    assert!(!report.valid, "a program must not pass as a card");
+    assert_eq!(
+        report.level,
+        Level::L2,
+        "`fn` and `let` put this at L2, not merely 'invalid'"
+    );
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("`let`")),
+        "the diagnostic must name what is beyond L0: {:#?}",
+        report.diagnostics
+    );
+}
+
+/// And `activity` — the first card L0 was NOT designed against — is L0.
+///
+/// Weather, news and stock shaped every role and capability the profile has, so
+/// their acceptance proves little. This one came from a spec written for another
+/// framework and needed one catalog entry.
+#[test]
+fn a_card_from_outside_the_corpus_is_admitted() {
+    const ACTIVITY: &str = include_str!("fixtures/activity.card");
+    let report = check_ui_l0_named("activity", ACTIVITY);
+    assert!(
+        report.valid,
+        "activity must be admissible: {:#?}",
+        report.diagnostics
+    );
+    assert_eq!(report.level, Level::L0);
+}

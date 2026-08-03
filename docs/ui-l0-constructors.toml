@@ -227,6 +227,17 @@ args = ["query"]
 [sources."sys.locale"]
 args = []
 
+# Nearby venues of one category, around a point. The card names WHERE and WHAT
+# KIND; the host answers with a collection.
+#
+# `sys.places` in the app-card framework is indexed — `sys.places(lat, lon, cat,
+# i, "name")` — with a companion `sys.placesnum` for the count and a `-9999`
+# sentinel while the fetch is in flight. Neither survives into L0 and neither
+# should: a card iterates a declared collection here, and §5.9's `$state` says
+# "not yet" without a magic number standing in for it.
+[sources."sys.places"]
+args = ["lat", "lon", "category", "count", "fields"]
+
 [sources."sys.news"]
 args = ["count", "offset", "fields"]
 

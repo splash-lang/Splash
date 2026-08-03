@@ -26,6 +26,52 @@ wrong in an interesting direction: **L0 has no expression form, so there is noth
 evaluate.** Realization is a pure walk over the parsed tree with data substituted. The
 reference implementation contains no reference to the VM whatsoever.
 
+### 1.0 What Level 0 is NOT for
+
+Measured, on the app cards this system already ships. Three of them — weather,
+news, stock — are the profile's reference corpus, so "L0 expresses them" is close
+to circular; they shaped every role and capability it has. The interesting
+results are the others.
+
+**`activity` generalises.** It came from a spec written for a different framework
+and needed one catalog entry (`sys.places`) and no profile change. Two of its
+requirements came out *better* than the source: the loading guard is
+`when parks.$state == .pending` rather than a `-9999` sentinel that also has to
+mean "no data", and its venue list is a declared collection rather than indexed
+capability calls. It also found a real defect on its first run — `suffix` applied
+to `value:` and silently not to `text:`, because every use of it in the original
+three pairs with `value:`.
+
+**`nav` does not, and cannot.** The profile's own classifier puts its shipping
+card at **L2**, and inspection says the same thing more bluntly. That one card
+contains 30 `let` bindings, 83 assignments, 128 conditionals, 606 arithmetic and
+concatenation operators, 190 capability calls, and a `fn tick()` that recomputes
+route geometry every frame — reassigning coordinates, rebuilding an OSRM
+waypoint string, re-resolving an origin whose search has not landed yet.
+
+**That is a program, not a card.** The gap is not a missing role or an
+uncatalogued capability; adding `Map` and eight `sys.*` entries would not close
+it. `nav` *computes*, and L0 has no expression form at all — which is the single
+property everything else in this profile is built on. §1 says confinement is
+structural because there is nothing to evaluate; `nav` is what that costs.
+
+So the boundary is:
+
+| | |
+|---|---|
+| **L0 suits** | a card that *displays* declared data, branches on it, and writes declared state on a tap |
+| **L0 cannot express** | a card that computes derived values, or drives its own animation loop |
+
+A card of the second kind is not a defect in the profile and must not be forced
+into one. It is L1 or L2 by the §7 classifier, and the honest answer for it is a
+different level — not a wider L0.
+
+**One gap this did surface.** `activity`'s spec wants an empty state — "Nothing
+close by" when a collection has no members — and L0 cannot say it. There is no
+length, no count, and no emptiness predicate, so a guard cannot distinguish an
+empty list from a full one. Every list-shaped card wants this. It is §8's
+question 10.
+
 ### 1.1 A card names roles, not appearance
 
 **L0 decides what a thing IS. It does not decide what it looks like, and it never names a
@@ -899,6 +945,7 @@ construct and keep the widest.
 | ~~6~~ | ~~An explicit state migration~~ — **settled in §5.8.** `keep: true` opts a cell out of the schema-change reset, and only while that field's own shape is unchanged |
 | ~~7~~ | ~~The closed token sets per constructor argument~~ — **settled**: `docs/ui-l0-constructors.toml` is the normative catalog, and tests assert the two agree in both directions — constructor names and shared token sets, and for source capabilities the arguments too |
 | **8** | **What, if anything, is durable.** Card state resets with the card; §5.8 previously claimed a card-state migration that does not exist. `units` and `city` look like preferences a user expects to survive a restart. Answering needs a storage contract, a migration story, and a decision about what a user is entitled to get back — none of which belongs under a state mechanism |
+| **10** | **How a card says a collection is empty.** `activity` wants "Nothing close by" when a list has no members, and L0 has no length, no count and no emptiness predicate — a guard cannot tell an empty collection from a full one, so the card silently renders nothing where it should say something. Every list-shaped card wants this. The narrow fix is a predicate against a collection's emptiness, NOT a `.count` — a count is a number, and a number in a card is one operator away from arithmetic |
 | **9** | **Whether component-local state (§5.10 kind 2) moves to the component kit.** The corpus says it would cost little — six kind-1 declarations against one kind-2. §5.10.1 says it cannot move alone: identity, mount/unmount and invalidation must move with it, and that protocol is unwritten. Open until the protocol exists, not until the split looks tidy |
 
 Questions 1–7 are settled; 8 and 9 were opened by working through where state lives. What
