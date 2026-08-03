@@ -3953,7 +3953,7 @@ fn realize_inner(
     // then its declared initial. Without this, an event that wrote card state
     // would apply and be invisible at the next realization — and a guard on a
     // state with no value at all would take the wrong branch on first render.
-    let mut frames: Vec<(String, serde_json::Value, Option<(String, usize)>)> = Vec::new();
+    let mut frames: Vec<Frame> = Vec::new();
     for state in &card.states {
         let value = store
             .and_then(|s| s.get(CARD_STATE_KEY, &state.path))
@@ -3986,6 +3986,24 @@ fn realize_inner(
 }
 
 /// Bindings introduced by loops and component props, innermost last.
+/// A name bound in scope: what it is called, what it holds, and — for a loop
+/// binder — where the item came from.
+///
+/// Named rather than left as a bare tuple because it grew a third element and
+/// clippy was right that four nested types in a signature stop being readable.
+type Frame = (String, serde_json::Value, Option<ItemOrigin>);
+
+/// Which collection a loop binder iterates, and at what index.
+///
+/// `ItemOrigin`, not `Provenance` — that name is taken by §4's copy class, and
+/// two unrelated meanings for one word in the same file is how a reader ends up
+/// tracing the wrong thing.
+///
+/// This is what lets a backend answer a source from inside a loop: a path there
+/// is rooted at the BINDER, so `m.ticker` has to be rewritten to
+/// `movers.0.ticker` before it can be recognised as a source at all.
+type ItemOrigin = (String, usize);
+
 struct ValueScope<'a> {
     /// A bound name, its value, and — for a loop binder — WHERE the item came
     /// from: the source it iterates and the item's index.
@@ -3994,7 +4012,7 @@ struct ValueScope<'a> {
     /// a loop. `m.ticker` is rooted at the binder, not at `movers`, so without
     /// this every row in a list falls back to the seeded blob while the detail
     /// view beside it goes live — which is exactly what happened.
-    frames: Vec<(String, serde_json::Value, Option<(String, usize)>)>,
+    frames: Vec<Frame>,
     data: &'a serde_json::Value,
     copies: &'a [CopyDecl],
 }
