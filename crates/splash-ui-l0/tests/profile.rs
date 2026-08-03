@@ -4434,3 +4434,54 @@ fn a_card_from_outside_the_corpus_is_admitted() {
     );
     assert_eq!(report.level, Level::L0);
 }
+
+/// `Map` and `Field` — the two roles nav needed — are admissible and behave.
+///
+/// Added after looking at what the shipping nav card actually does with its map:
+/// it calls `sys.navroute` itself, hand-builds a marker string, and pushes both
+/// in through imperative setters. That is the card doing the WIDGET's job, and
+/// the identical mistake `AqiContour` and `StockPlot` were corrected for. `Map`
+/// takes a TRIP; the widget fetches the route.
+///
+/// `Field` is the other half: a card with no way to receive typed text cannot
+/// have a search box. The typed value goes to declared state through a declared
+/// transition, so it arrives by the same total path a tap does.
+#[test]
+fn a_card_can_name_a_trip_and_take_typed_text() {
+    const CARD: &str = r#"
+state dest  { shape: text, initial: "" }
+state query { shape: text, initial: "" }
+event set_dest { dest: set($value) }
+source place sys.geocode(name: query)
+copy find { class: vocabulary, en: "Where to?" }
+view root Surface {
+  Field(text: query, placeholder: copy.find, on_commit: set_dest)
+  Map(mode: .drive, from: place, to: place, zoom: 16)
+}
+"#;
+    let report = check_ui_l0_named("trip", CARD);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert_eq!(report.level, Level::L0, "neither role needs an expression");
+
+    // A mode outside the declared set is refused — the token set is closed, so a
+    // card cannot invent a camera behaviour the widget has no answer for.
+    let bad = CARD.replace("mode: .drive", "mode: .helicopter");
+    assert!(
+        !check_ui_l0_named("trip", &bad).valid,
+        "an uncatalogued map mode must be refused"
+    );
+
+    // And the trip reaches the realized tree, so a backend can act on it.
+    let data = serde_json::json!({
+        "place": {"lat": 37.3, "lon": -121.9, "name": "San Jose"},
+        "query": "", "dest": "", "env": {"locale": {"lang": "en"}}
+    });
+    let root = realize(CARD, &data, RealizeLimits::default())
+        .root
+        .expect("realizes");
+    let dsl = splash_ui_l0::kit::lower(&root);
+    assert!(
+        dsl.contains("l0_unsupported(\"Map\")") || dsl.contains("l0_map"),
+        "Map must reach the lowering as itself or as a named marker:\n{dsl}"
+    );
+}

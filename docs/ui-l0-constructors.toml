@@ -33,6 +33,33 @@ pad = { kind = "token", tokens = ["page", "tight", "none"] }
 src = { kind = "path" }
 pad = { kind = "token", tokens = ["page", "tight", "none"] }
 
+# A map. The card names the TRIP; the widget fetches its own route.
+#
+# The same correction `AqiContour` and `StockPlot` already took, and for the same
+# reason. The shipping nav card calls `sys.navroute` itself, hand-builds a marker
+# string, and pushes both into the widget through imperative setters from inside
+# a per-frame `tick()` — which is the card doing the widget's job, and is most of
+# why that card classifies at L2. A route is not a card's to compute.
+[Map]
+mode = { kind = "token", tokens = ["plan", "drive", "flat"] }
+from = { kind = "path" }
+to   = { kind = "path" }
+via  = { kind = "path" }
+zoom = { kind = "number" }
+
+# A text field — the one role that lets a card receive something the user typed.
+#
+# `text` is a path into declared card state, never a free binding, and
+# `on_commit` carries the typed value as `$value` to a declared transition. So
+# text enters through the same total, declared path a tap does, and §4's
+# `user-copy` class already names what it is. Without this, a card cannot have a
+# search box, which is the other half of why nav could not be written here.
+[Field]
+text        = { kind = "path" }
+placeholder = { kind = "data" }
+on_commit   = { kind = "event" }
+width       = { kind = "width" }
+
 [Panel]
 
 [Card]

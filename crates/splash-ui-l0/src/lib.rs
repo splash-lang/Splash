@@ -2272,6 +2272,11 @@ pub mod catalog {
         "date",
     ];
     pub const WIDTH: &[&str] = &["fill", "fit", "day", "rank", "temp"];
+
+    /// How a map presents a trip. These are the shipping widget's own modes:
+    /// `plan` shows the whole route, `drive` follows the vehicle, and `flat` is
+    /// the same route without the 2.5D camera.
+    pub const MAP_MODE: &[&str] = &["plan", "drive", "flat"];
     pub const ALIGN: &[&str] = &["start", "center", "end", "baseline"];
     pub const PAD: &[&str] = &["page", "tight", "none"];
     pub const ICON_SIZE: &[&str] = &["hero", "row", "tile"];
@@ -2284,6 +2289,39 @@ pub mod catalog {
     pub const CONSTRUCTORS: &[(&str, Args)] = &[
         ("Surface", &[("pad", Token(PAD))]),
         ("Photo", &[("src", Path), ("pad", Token(PAD))]),
+        // A map. The card names the TRIP; the widget fetches its own route.
+        //
+        // The same correction `AqiContour` and `StockPlot` already took. The
+        // shipping nav card calls `sys.navroute` itself, hand-builds a marker
+        // string and pushes both in through imperative setters — which is the
+        // card doing the widget's job, and is most of why that card classifies
+        // at L2. A route is not a card's to compute.
+        (
+            "Map",
+            &[
+                ("mode", Token(MAP_MODE)),
+                ("from", Path),
+                ("to", Path),
+                ("via", Path),
+                ("zoom", Number),
+            ],
+        ),
+        // A text field. The ONE role that lets a card receive something the user
+        // typed.
+        //
+        // `text` is where the value lives — declared card state, never a free
+        // binding — and `on_commit` carries it as `$value` to a declared
+        // transition. So typed text enters through the same total, declared path
+        // as a tap, and §4's `user-copy` class already names what it is.
+        (
+            "Field",
+            &[
+                ("text", Path),
+                ("placeholder", ArgKind::Data),
+                ("on_commit", Event),
+                ("width", TokenOrPath(WIDTH)),
+            ],
+        ),
         ("Panel", &[]),
         ("Card", &[("on_tap", Event), ("value", Any)]),
         ("Col", &[("align", Token(ALIGN)), ("gap", Number)]),

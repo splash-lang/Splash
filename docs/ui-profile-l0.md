@@ -42,29 +42,49 @@ capability calls. It also found a real defect on its first run — `suffix` appl
 to `value:` and silently not to `text:`, because every use of it in the original
 three pairs with `value:`.
 
-**`nav` does not, and cannot.** The profile's own classifier puts its shipping
-card at **L2**, and inspection says the same thing more bluntly. That one card
-contains 30 `let` bindings, 83 assignments, 128 conditionals, 606 arithmetic and
-concatenation operators, 190 capability calls, and a `fn tick()` that recomputes
-route geometry every frame — reassigning coordinates, rebuilding an OSRM
-waypoint string, re-resolving an origin whose search has not landed yet.
+**`nav` does not — and the reason is not what it first looks like.** The
+classifier puts its shipping card at **L2**, and the card is indeed a program:
+30 `let` bindings, 83 assignments, 128 conditionals, 606 arithmetic and
+concatenation operators, and a `fn tick()` that recomputes route geometry every
+frame.
 
-**That is a program, not a card.** The gap is not a missing role or an
-uncatalogued capability; adding `Map` and eight `sys.*` entries would not close
-it. `nav` *computes*, and L0 has no expression form at all — which is the single
-property everything else in this profile is built on. §1 says confinement is
-structural because there is nothing to evaluate; `nav` is what that costs.
+**But most of that is compensation, not requirement.** Of tick's 157 lines, 61
+re-resolve values after a fetch lands and 32 build a URL parameter by string
+concatenation. Its own comments say why, seven times: *"top-level dlat/dlon
+freeze at build"*, *"the top-level origin resolution FREEZES at build time —
+before oq's search lands"*, *"GPS may land AFTER build, so (re)resolve it here
+each tick"*. The card recomputes everything every frame because it has no way to
+say **this value depends on that fetch**. Three more lines exist to disambiguate
+a `-9999` sentinel that means loading *or* failed.
 
-So the boundary is:
+L0 supplies exactly those: declared sources with a dependency graph,
+`<source>.$state` as four distinct states rather than a sentinel, and source
+arguments the host assembles instead of the card concatenating a URL.
+
+**And the map is composable.** Its card-facing surface is already declarative —
+about ten parameters, `nav_mode`, `zoom`, `nav_route_width`, `nav_period`, no
+callbacks — and `nav_period` means the widget owns its own animation, so the
+moving vehicle is not the card's concern either. What the card does wrongly is
+call `sys.navroute` itself, hand-build a marker string, and push both in through
+imperative setters. **That is the card doing the widget's job**, and it is the
+identical mistake `AqiContour` and `StockPlot` were already corrected for: the
+catalog's own note on that correction says supplying the data *"put a GPU uniform
+layout into the authoring language — it is not a widget contract, it is an ABI"*.
+
+So `Map` is now a role, taking a trip rather than a route, and `Field` is now a
+role, because a card with no way to receive typed text cannot have a search box —
+which was the other half of why nav could not be written here.
+
+**An earlier version of this section said the gap was structural** and that a
+card like `nav` is L1 or L2 "not a reason to widen L0". That was too strong, and
+wrong in the direction that stops work: it read a card's accumulated workarounds
+as evidence about the language. The honest position is narrower —
 
 | | |
 |---|---|
-| **L0 suits** | a card that *displays* declared data, branches on it, and writes declared state on a tap |
+| **L0 suits** | a card that displays declared data, branches on it, and writes declared state on a tap or a commit |
 | **L0 cannot express** | a card that computes derived values, or drives its own animation loop |
-
-A card of the second kind is not a defect in the profile and must not be forced
-into one. It is L1 or L2 by the §7 classifier, and the honest answer for it is a
-different level — not a wider L0.
+| **Not yet decided** | whether `nav` rewritten against declared sources and a `Map` role fits inside the first row — which is a card to write, not an argument to have |
 
 **One gap this did surface.** `activity`'s spec wants an empty state — "Nothing
 close by" when a collection has no members — and L0 cannot say it. There is no
