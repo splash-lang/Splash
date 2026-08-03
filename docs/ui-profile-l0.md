@@ -33,6 +33,36 @@ news, stock — are the profile's reference corpus, so "L0 expresses them" is cl
 to circular; they shaped every role and capability it has. The interesting
 results are the others.
 
+**Not every app wants a card at all**, and an earlier version of this section
+counted as though they did. `youtube` and `web` are FIXED APPS: a person authored
+the UI once, and the model supplies only an intent — which video, which song,
+which query. Nothing about them is a limitation of L0, because authoring UI is
+the wrong tool for them. The AMA routes an intent to the app; the app resolves it.
+
+So the corpus divides two ways, and only the first row is L0's business:
+
+| | who authors the UI | what the model supplies | example |
+|---|---|---|---|
+| **LLM-authored card** | the model, per request | the whole card | weather, news, stock, activity, nav, weather-activity |
+| **Fixed app** | a person, once | an intent | youtube, web |
+
+**Five of the six LLM-authored cards are written and admitted at L0.** The sixth,
+`weather-activity`, is a composition of two that already are, and every capability
+it names is catalogued — its `sys.weathernum` / `sys.placesnum` / `sys.aqinum` are
+the index-and-count companions that a declared collection and `$state` replace.
+It is not counted as proven, because it has not been written.
+
+That is the number that means something. "Five of eight" would be counting two
+fixed apps as failures of a language they were never meant to use.
+
+**And the split is what §4 wants anyway.** `apps/youtube/app.md` currently tells
+the model *"YOU choose the videos — the card cannot search YouTube by itself"*, so
+it emits video IDs from memory. Those are FACTS, and a wrong one is a dead embed
+or the wrong upload — exactly what the no-facts rule exists to prevent, and the
+same failure `activity`'s "never invent a venue" and `StockPlot`'s symbol-not-a-
+series both avoid. An app that takes an intent and resolves it against the real
+service has no way to assert a fact that is not true.
+
 **`activity` generalises.** It came from a spec written for a different framework
 and needed one catalog entry (`sys.places`) and no profile change. Two of its
 requirements came out *better* than the source: the loading guard is
