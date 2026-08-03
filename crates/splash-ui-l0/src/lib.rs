@@ -4748,7 +4748,7 @@ pub mod makepad {
     /// is concatenated in the DSL rather than in Rust — `"a" + call + "b"` works
     /// for both, and quoting a call would draw it instead of evaluating it.
     fn decorate(body: String, glyph: &str, unit: &str, suffix: &str) -> String {
-        let head = format!("{glyph}");
+        let head = glyph.to_string();
         let tail = format!("{unit}{suffix}");
         if head.is_empty() && tail.is_empty() {
             return body;
