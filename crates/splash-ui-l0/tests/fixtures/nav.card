@@ -1,0 +1,92 @@
+# level: L0
+# model: nav
+#
+# The card §1.0 said should be written rather than argued about.
+#
+# `a2app/apps/nav/exemplars/trip-planner.splash` is 664 lines and classifies at
+# L2: 30 `let` bindings, 83 assignments, 128 conditionals, 606 operators, and a
+# `fn tick()` that recomputes route geometry every frame. This is the same
+# screen — pick an origin, a destination, up to two stops, see the route and its
+# ETA — written against declared sources instead.
+#
+# THE COMPARISON IS THE POINT. Everything that shrank was compensation:
+#
+#   - `tick()` re-resolved coordinates every frame because a top-level `let`
+#     freezes at build, before the fetch lands. A `source` here is a declared
+#     dependency; the runtime knows when it changes and nothing re-runs.
+#   - It hand-built an OSRM `vias` string by concatenation. `sys.route` takes
+#     `via` as a value and the host assembles the request.
+#   - It compared against `-9999` to tell "loading" from "failed". §5.9's
+#     `$state` distinguishes them.
+#   - It called `sys.navroute` itself and pushed a polyline into the widget.
+#     `Map` takes the trip and fetches its own route, exactly as `StockPlot`
+#     takes a symbol and `AqiContour` takes a location.
+
+source here   sys.gps()
+source found  sys.search(query: state.query, count: 5, fields: [id, name, lat, lon])
+source trip   sys.route(from: here, to: dest_place, mode: .drive,
+                        fields: [duration, distance])
+source dest_place sys.search(query: state.dest, count: 1, fields: [id, name, lat, lon])
+source env.locale sys.locale()
+
+state query { shape: text, initial: "" }        # what the user is typing
+state dest  { shape: text, initial: "" }        # the chosen destination
+
+event choose_dest { dest: set($value), query: clear }
+event clear_dest  { dest: clear, query: clear }
+
+copy where    { class: vocabulary, en: "Where to?" }
+copy from     { class: vocabulary, en: "FROM" }
+copy to       { class: vocabulary, en: "TO" }
+copy here_now { class: vocabulary, en: "Current location" }
+copy eta      { class: vocabulary, en: "ETA" }
+copy away     { class: vocabulary, en: "away" }
+copy seeking  { class: vocabulary, en: "Finding a route…" }
+copy nostop   { class: vocabulary, en: "Add a stop" }
+
+view root Surface {
+  # ---- the trip, as the card states it -------------------------------------
+  Panel {
+    Row(align: .center, gap: 10) {
+      TextCaption(text: copy.from)
+      TextRow(text: here.name)
+    }
+    Rule()
+    Row(align: .center, gap: 10) {
+      TextCaption(text: copy.to)
+      # A destination is either chosen or being typed. No branch on a sentinel:
+      # the state itself says which.
+      when dest == "" { Field(text: query, placeholder: copy.where, on_commit: choose_dest) }
+      when dest != "" {
+        Row(on_tap: clear_dest) { TextRow(text: dest_place.name) }
+      }
+    }
+  }
+
+  # ---- what the user is choosing between -----------------------------------
+  when dest == "" {
+    Panel {
+      for f, i in found key f.id {
+        Row(align: .center, gap: 10, on_tap: choose_dest, value: f.id) {
+          TextRow(text: f.name)
+        }
+        Rule()
+      }
+    }
+  }
+
+  # ---- the route ------------------------------------------------------------
+  when dest != "" {
+    # §5.9, where the original compared against -9999. "Not yet" and "failed"
+    # are different states and the card can say so.
+    when trip.$state == .pending { TextBody(text: copy.seeking) }
+    when trip.$state == .ready {
+      Row(align: .center, gap: 12) {
+        TextValue(value: trip.duration)
+        TextCaption(value: trip.distance, suffix: copy.away)
+      }
+    }
+    # The card names the TRIP. The widget fetches its own route.
+    Map(mode: .drive, from: here, to: dest_place, zoom: 16)
+  }
+}

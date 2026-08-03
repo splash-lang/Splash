@@ -262,6 +262,23 @@ args = []
 # sentinel while the fetch is in flight. Neither survives into L0 and neither
 # should: a card iterates a declared collection here, and §5.9's `$state` says
 # "not yet" without a magic number standing in for it.
+# The device's own position. No arguments: a card does not get to ask where
+# something else is.
+[sources."sys.gps"]
+args = []
+
+# Free-text place search, for what a `Field` collected. The query is a path into
+# declared state, so the card cannot search for something it did not first
+# receive from the user.
+[sources."sys.search"]
+args = ["query", "count", "fields"]
+
+# A trip's facts — duration, distance, the step list. The ROUTE ITSELF is the
+# `Map` widget's to fetch; this is what the card needs to write on the screen
+# beside it, and asking twice is cheaper than making the card carry a polyline.
+[sources."sys.route"]
+args = ["from", "to", "via", "mode", "fields"]
+
 [sources."sys.places"]
 args = ["lat", "lon", "category", "count", "fields"]
 

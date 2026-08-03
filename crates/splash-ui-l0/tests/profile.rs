@@ -4485,3 +4485,44 @@ view root Surface {
         "Map must reach the lowering as itself or as a named marker:\n{dsl}"
     );
 }
+
+/// The nav card §1.0 said to write instead of argue about.
+///
+/// The shipping trip planner is 664 lines of Splash DSL and classifies at L2.
+/// This is the same screen — origin, destination, live search results, route and
+/// ETA — in 54 lines of L0, and it is admitted.
+///
+/// That settles the question the earlier §1.0 got wrong. nav's complexity was
+/// mostly compensation: a `tick()` re-resolving values because a top-level `let`
+/// freezes before the fetch lands, a hand-built URL parameter, a `-9999` sentinel
+/// meaning loading *or* failed, and a polyline the card fetched and pushed into
+/// the widget. Declared sources, `$state`, source arguments and a `Map` that
+/// takes a trip remove all four.
+#[test]
+fn the_nav_trip_planner_is_expressible_at_l0() {
+    const NAV: &str = include_str!("fixtures/nav.card");
+    let report = check_ui_l0_named("nav", NAV);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert_eq!(report.level, Level::L0);
+
+    // It must actually use the two roles that made it possible — otherwise this
+    // passes for a card that quietly dropped the map and the search box.
+    assert!(NAV.contains("Map(mode:"), "the card must name a trip");
+    assert!(NAV.contains("Field(text:"), "the card must take typed text");
+
+    // And it must be SMALL. The claim is not merely that L0 can express this
+    // screen but that most of the original was working around missing
+    // machinery — a 600-line L0 card would disprove that as surely as a
+    // rejection would.
+    let lines = NAV
+        .lines()
+        .filter(|l| {
+            let t = l.trim();
+            !t.is_empty() && !t.starts_with('#')
+        })
+        .count();
+    assert!(
+        lines < 100,
+        "the point is that it is small; this is {lines} lines"
+    );
+}

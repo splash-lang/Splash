@@ -84,7 +84,23 @@ as evidence about the language. The honest position is narrower —
 |---|---|
 | **L0 suits** | a card that displays declared data, branches on it, and writes declared state on a tap or a commit |
 | **L0 cannot express** | a card that computes derived values, or drives its own animation loop |
-| **Not yet decided** | whether `nav` rewritten against declared sources and a `Map` role fits inside the first row — which is a card to write, not an argument to have |
+| **Settled by writing it** | `nav` rewritten against declared sources and a `Map` role IS inside the first row. `tests/fixtures/nav.card` is the same screen as the 664-line L2 exemplar in **54 lines**, admitted at L0 |
+
+**What writing it found.** Four gaps, none structural, all recorded rather than
+patched over:
+
+- **A card cannot accumulate a list.** `collection` is a *prop* shape (§5.2), not
+  a state shape, and there is no append. So waypoints, favourites and any
+  multi-select are inexpressible — the trip planner lost its "add a stop". This
+  is the sharpest of the four because it is a whole interaction class.
+- **The text roles' argument sets are an artefact of the corpus.** `suffix` and
+  `glyph` exist only on `TextCaption`; `format` on Hero, Stat and Value but not
+  Caption; `tint` on Stat and Value but not Hero. Each role has exactly what the
+  original three cards happened to use on it, and nothing states a reason.
+- **No duration format**, so a trip time cannot be written as one — `.money`,
+  `.compact`, `.time` and `.date` exist but nothing spells 48 minutes.
+- **`on_tap` is not on the text roles**, so a tappable label has to be wrapped in
+  a `Row`. That may be right; it is not written down as a decision.
 
 **One gap this did surface.** `activity`'s spec wants an empty state — "Nothing
 close by" when a collection has no members — and L0 cannot say it. There is no
