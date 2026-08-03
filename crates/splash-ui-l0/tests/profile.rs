@@ -4526,3 +4526,43 @@ fn the_nav_trip_planner_is_expressible_at_l0() {
         "the point is that it is small; this is {lines} lines"
     );
 }
+
+/// A source answered by the backend must survive a loop.
+///
+/// Inside a `for`, a path is rooted at the BINDER — `m.ticker`, not
+/// `movers.0.ticker` — so the binding logic did not recognise it and every row
+/// of the stock list fell back to the seeded value while the detail view beside
+/// it went live. On screen that reads as a stale list, not as a missing feature.
+///
+/// The loop frame records which collection it iterates and at what index, which
+/// is what lets the lowering rewrite the path and emit the call.
+#[test]
+fn a_live_source_survives_a_loop() {
+    let data = serde_json::json!({
+        "movers": [{ "ticker": "NVDA", "name": "Nvidia", "last": 1.0, "change": 0.5, "pct": 2.0 },
+                   { "ticker": "AAPL", "name": "Apple", "last": 2.0, "change": -0.5, "pct": -1.0 }],
+        "quote": {}, "selected": "", "range": "m1", "env": { "locale": {} },
+        "copy": { "movers": "Top Movers" }
+    });
+    let root = realize(STOCK, &data, RealizeLimits::default())
+        .root
+        .expect("realizes");
+    let dsl = splash_ui_l0::kit::lower(&root);
+
+    // Row 0 and row 1 must each call for their OWN index — one call reused, or
+    // an index that does not advance, is the failure this catches.
+    assert!(
+        dsl.contains(r#"sys.movers(0, "symbol")"#),
+        "the first row must be live:\n{dsl}"
+    );
+    assert!(
+        dsl.contains(r#"sys.movers(1, "symbol")"#),
+        "and the second must ask for index 1:\n{dsl}"
+    );
+    // The seeded tickers must be GONE, or the card shows a stale value beside a
+    // live one and nothing says which is which.
+    assert!(
+        !dsl.contains("\"NVDA\"") && !dsl.contains("\"AAPL\""),
+        "a live call must replace the seeded literal:\n{dsl}"
+    );
+}

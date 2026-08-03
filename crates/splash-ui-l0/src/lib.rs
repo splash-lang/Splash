@@ -3953,7 +3953,7 @@ fn realize_inner(
     // then its declared initial. Without this, an event that wrote card state
     // would apply and be invisible at the next realization — and a guard on a
     // state with no value at all would take the wrong branch on first render.
-    let mut frames: Vec<(String, serde_json::Value)> = Vec::new();
+    let mut frames: Vec<(String, serde_json::Value, Option<(String, usize)>)> = Vec::new();
     for state in &card.states {
         let value = store
             .and_then(|s| s.get(CARD_STATE_KEY, &state.path))
@@ -3962,7 +3962,7 @@ fn realize_inner(
             .or_else(|| state.initial.clone())
             .or_else(|| state.initial_path.as_ref().and_then(|p| data_path(data, p)))
             .unwrap_or_else(|| initial_for(&state.shape));
-        frames.push((state.path.clone(), value));
+        frames.push((state.path.clone(), value, None));
     }
     let mut scope = ValueScope {
         frames,
@@ -3987,7 +3987,14 @@ fn realize_inner(
 
 /// Bindings introduced by loops and component props, innermost last.
 struct ValueScope<'a> {
-    frames: Vec<(String, serde_json::Value)>,
+    /// A bound name, its value, and — for a loop binder — WHERE the item came
+    /// from: the source it iterates and the item's index.
+    ///
+    /// The provenance is what lets a backend answer a source itself from inside
+    /// a loop. `m.ticker` is rooted at the binder, not at `movers`, so without
+    /// this every row in a list falls back to the seeded blob while the detail
+    /// view beside it goes live — which is exactly what happened.
+    frames: Vec<(String, serde_json::Value, Option<(String, usize)>)>,
     data: &'a serde_json::Value,
     copies: &'a [CopyDecl],
 }
@@ -4044,8 +4051,8 @@ impl ValueScope<'_> {
             return Some(serde_json::Value::String(text.1.clone()));
         }
 
-        let mut current = match self.frames.iter().rev().find(|(n, _)| n == root) {
-            Some((_, v)) => v.clone(),
+        let mut current = match self.frames.iter().rev().find(|(n, _, _)| n == root) {
+            Some((_, v, _)) => v.clone(),
             None => self.data.get(root)?.clone(),
         };
         for segment in segments {
@@ -4240,7 +4247,7 @@ impl Realizer<'_> {
                 // data and letting the host capture an unfilled prop.
                 (None, _) => param.default.clone().unwrap_or(serde_json::Value::Null),
             };
-            scope.frames.push((param.name.clone(), value));
+            scope.frames.push((param.name.clone(), value, None));
             bound += 1;
         }
         let instance_key = format!("{key}/{}", component.name);
@@ -4272,6 +4279,7 @@ impl Realizer<'_> {
                 live.or_else(|| state.initial.clone())
                     .or(from_path)
                     .unwrap_or_else(|| initial_for(&state.shape)),
+                None,
             ));
             bound += 1;
         }
@@ -4358,13 +4366,22 @@ impl Realizer<'_> {
 
             let mut bound = 0usize;
             if let Some(binder) = element.binders.first() {
-                scope.frames.push((binder.clone(), item.clone()));
+                // The provenance a live call needs: `m.ticker` is rooted at
+                // the binder, so without this every row falls back to the
+                // seeded blob while the detail beside it goes live.
+                scope.frames.push((
+                    binder.clone(),
+                    item.clone(),
+                    Some((path.to_string(), index)),
+                ));
                 bound += 1;
             }
             if let Some(index_binder) = element.binders.get(1) {
-                scope
-                    .frames
-                    .push((index_binder.clone(), serde_json::Value::from(index + 1)));
+                scope.frames.push((
+                    index_binder.clone(),
+                    serde_json::Value::from(index + 1),
+                    None,
+                ));
                 bound += 1;
             }
 
@@ -4405,6 +4422,29 @@ impl Realizer<'_> {
     /// entirely — a fetch with a hole in it is worse than no fetch, since it
     /// would silently request the wrong thing.
     fn source_binding(&self, path: &str, scope: &ValueScope) -> Option<SourceBinding> {
+        // Inside a `for`, a path is rooted at the BINDER: `m.ticker`, not
+        // `movers.0.ticker`. The binder's frame records which collection it
+        // iterates and at what index, so rewrite through it first.
+        //
+        // Without this every row of a list falls back to the seeded value while
+        // the detail view beside it goes live — which is precisely what the
+        // stock card did, and it looks like the list is simply stale.
+        let (root, rest) = path.split_once('.').unwrap_or((path, ""));
+        let rewritten = scope
+            .frames
+            .iter()
+            .rev()
+            .find(|(n, _, prov)| n == root && prov.is_some())
+            .and_then(|(_, _, prov)| prov.as_ref())
+            .map(|(collection, index)| {
+                if rest.is_empty() {
+                    format!("{collection}.{index}")
+                } else {
+                    format!("{collection}.{index}.{rest}")
+                }
+            });
+        let path = rewritten.as_deref().unwrap_or(path);
+
         // `env.locale.lang` roots at the source `env.locale`, not at `env`, so
         // match the LONGEST declared name that prefixes the path.
         let declaration = self
@@ -4622,6 +4662,30 @@ pub mod makepad {
                     _ => return None,
                 };
                 Some(format!("sys.stock({symbol:?}, {key:?})"))
+            }
+            // A mover, by index. `sys.movers` takes the row's position rather
+            // than a ticker, so the loop index has to reach here — which it does
+            // because a binding inside a `for` carries the item's index in its
+            // field path.
+            //
+            // Every field below was checked against a live screener response,
+            // not against the helper's accepted-key list. That distinction is
+            // why `open` is absent from `sys.quote` above: the key is accepted
+            // there and the value is not in the payload, so emitting the call
+            // drew `$—` where the seeded blob held a real price.
+            "sys.movers" => {
+                let (index, field) = binding.field.split_once('.')?;
+                index.parse::<u32>().ok()?;
+                let key = match field {
+                    "ticker" => "symbol",
+                    "last" => "price",
+                    "pct" => "changepct",
+                    "volume" => "vol",
+                    "mktcap" => "marketcap",
+                    f @ ("name" | "change" | "high" | "low" | "open") => f,
+                    _ => return None,
+                };
+                Some(format!("sys.movers({index}, {key:?})"))
             }
             _ => None,
         }
