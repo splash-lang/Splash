@@ -26,6 +26,11 @@ wrong in an interesting direction: **L0 has no expression form, so there is noth
 evaluate.** Realization is a pure walk over the parsed tree with data substituted. The
 reference implementation contains no reference to the VM whatsoever.
 
+**This paragraph is about L0 and does not extend to L1.** L1 has an expression form and
+therefore an evaluator; §9.7 states what the confinement argument becomes there, and it is a
+narrower claim than this one. Citing "nothing to evaluate" for a card requires first
+establishing that the card is L0.
+
 ### 1.0 What Level 0 is NOT for
 
 Measured, on the app cards this system already ships. Three of them — weather,
@@ -1199,9 +1204,10 @@ an instance key survives without any change to the VM, and `docs/scoped-state.md
 for it.
 
 L1 and L2 **as capability levels** — the levels this document's §7 classifies, not the layers
-above — remain specified only as "what L0 excludes". Neither is implemented, and the classifier
-can name them but not check them. That is unchanged and unrelated to the kit work; the two
-senses of "L1" are easy to conflate and this paragraph previously did.
+above — are a separate matter from the kit work; the two senses of "L1" are easy to conflate and
+this paragraph previously did. L2 remains specified only as "what L0 excludes", is unimplemented,
+and is refused before parsing. L1 is no longer in that state: **§9 specifies the one construct
+the checker admits**, and the rest of L1 is still only what L0 excludes.
 
 An earlier version of this paragraph said `StockPlot` and `AqiContour` "lower without their data
 arrays". They have no data arrays: both name what to plot and fetch it themselves, and the
@@ -1246,3 +1252,175 @@ this document lacks is a defect here rather than in the cards. Two of the settle
 from that rule rather than from argument — question 1 was answered by noticing both branching
 cards had already written the complementary-guard form without anyone specifying it, and
 question 7 by the cards exhausting the token sets in the course of being written.
+
+---
+
+## 9. Level 1 — the expression form
+
+**Status: the construct below is implemented; this section specifies it and nothing else.**
+
+This is **not a complete L1 profile.** L1 was specified as "what L0 excludes", and the checker
+then grew the ability to admit one construct — an arithmetic expression — while that sentence
+was still the whole of the definition. So the checker blessed a level no document described.
+This section closes exactly that gap and no more: everything else about L1 remains "what L0
+excludes", and a second construct will need its own specification before it is admitted.
+
+Written after the implementation, which is the wrong order and is why §9.8 is as long as it is.
+
+### 9.1 Admission
+
+A card is admitted at L1 by **declaring it**:
+
+```
+# level: L1
+```
+
+Without the header the same card is refused, and refused with a level diagnostic rather than a
+syntax error. §7's rule is unchanged — a record needing a wider grammar is rejected until the
+level is explicitly raised, and escalation is never silent.
+
+**L2 is still refused before parsing.** Imperative widget commands are a *different* grammar
+rather than a wider one, and nothing below the classifier parses them, so admitting a declared
+L2 card would produce a parse failure dressed as an acceptance.
+
+**Over-declaration is accepted, and this deviates from §7.** §7 derives a card's level as the
+maximum any record requires. For L1 the *declared* level wins instead: a card that says
+`# level: L1` and uses no expression is reported L1, not L0. Over-declaring is the conservative
+direction — it asks a host for more than the card needs, never less — but the consequence is
+that a reported level is not always a derived one, and a host comparing the two will not learn
+that a card outgrew its own header downwards.
+
+### 9.2 The grammar
+
+One production is extended. `operand` was a literal, a path or a comparison; it gains a binary
+arithmetic form:
+
+```
+operand   = term , { add-op , term } ;
+term      = atom , { mul-op , atom } ;
+atom      = literal | path | predicate ;
+add-op    = "+" | "-" ;
+mul-op    = "*" | "/" | "%" ;
+```
+
+Multiplicative operators bind tighter than additive ones and both associate left, so
+`temp * 9 / 5 + 32` means what it reads as. Nesting is bounded at parse by the same limit every
+other nested construct uses (`DEFAULT_MAX_SYNTAX_NESTING`, 128).
+
+**There is no grouping.** Parentheses are not in the production above, so precedence is fixed
+and cannot be overridden: `(a + b) * c` is not writable at L1. **There is no unary minus inside
+an expression** either — a negative literal is admitted where a literal is admitted, and `n * -1`
+is not. Both are limits of what was implemented rather than decisions, and both are recorded in
+§9.8.
+
+**The specified position is an argument value**, which is where the motivating cards need one:
+
+```
+TextHero(value: shares * quote.last)
+```
+
+That is the only position this section admits. What the implementation additionally parses is a
+defect and is recorded in §9.8.
+
+### 9.3 §4's no-facts rule, one level up
+
+L0 keeps §4 structurally: a literal in a value position is refused outright, which is decidable
+because a `view` is a typed tree. **L1 cannot use that check**, because at L1 a literal in a value
+position is often legitimate — a coefficient. `temp * 9 / 5 + 32` is a formula, and `9`, `5` and
+`32` are not claims about the world.
+
+So the rule changes shape rather than relaxing:
+
+> **An expression must read at least one declared source or state.**
+
+`shares * quote.last` reads two and is a computation. `1547 * 3.2` reads nothing: it states a
+fact wearing arithmetic, and is refused. Every path an expression reads — at any depth — is
+checked against declared names exactly as a bare binding is, so an expression cannot launder an
+undeclared name past the check that a plain path would fail.
+
+This is the whole of the §4 argument at L1, and it is weaker than L0's in a way worth naming.
+L0's version is *structural*: there is no position in which a fabricated number can appear.
+L1's is a *predicate on the operand set*: a card that reads one real value and combines it with
+invented coefficients passes. `quote.last * 0 + 1547` reads a source, computes, and produces a
+fabricated number. **The rule bounds what an expression may be made of; it does not bound what
+an expression may produce**, and closing that needs an argument this section does not have.
+
+### 9.4 Evaluation
+
+Both operands must resolve to numbers. When either does not, the expression is **missing** —
+rendered as the em dash a missing binding already renders as, and never as a zero. A zero would
+be a fabricated number, which is the failure the level is closest to.
+
+| Case | Result |
+|---|---|
+| An operand does not resolve, or is not a number | Missing |
+| Division or remainder by zero | Missing |
+| A result that is not finite | Missing |
+| A comparison as an operand | Missing |
+
+Evaluation is one pass over a tree already bounded at parse. It performs no name resolution — the
+operands were resolved before it runs — makes no call, and cannot reach a capability, a component
+or the host.
+
+### 9.5 Lowering
+
+A backend receives the **shape** of an expression, not the number realization computed:
+each operand is either a live capability call or a constant, and each join carries its operator.
+Every join is parenthesised on the way out, so the target VM's own precedence rules cannot
+change what the card meant.
+
+This is not an optimisation. A value computed at realization is the answer for whatever data the
+host happened to seed, and a live card is seeded with nothing — so lowering the computed number
+would put arithmetic over absent data on the screen, which is §5.11's defect one level up.
+
+### 9.6 What L1 does not change
+
+**Termination.** §6's five conditions are untouched and still sufficient. An expression is a
+finite tree bounded at parse, evaluated in one pass with no calls, no recursion into the card
+and no iteration, so it contributes constant work per node and cannot raise an event.
+
+**Reconciliation.** Every path an expression reads is registered as a dependency. Under-approximating
+here would show stale data, which §5.9 is explicit about.
+
+**Everything in §§1–5, 7 and 8** applies unchanged. L1 is L0 plus this production.
+
+### 9.7 What this costs the confinement argument
+
+L0's confinement claim is structural in the strongest available sense: there is no expression
+form, so there is nothing to evaluate, so realization never enters an evaluator at all.
+
+**That claim does not survive L1, and no wording should suggest it does.** L1 has an evaluator.
+What replaces the L0 claim is narrower and should be stated as what it is:
+
+> A closed arithmetic evaluator over already-resolved values — five total operators over
+> floating-point numbers, no name resolution at evaluation time, no operand that can name a
+> capability, no host surface reachable from it, over a tree bounded at parse.
+
+That is still a strong property, and it is a *different* property. "No execution machinery in the
+path" is an L0 property. Any argument that cites it for a card must first establish the card is
+L0, which is precisely what the level in the report is for.
+
+### 9.8 Known defects and limits
+
+Recorded rather than patched over, in the order they would bite.
+
+- **A guard's right-hand side escapes both checks.** `when n == nosuch * 2` is *accepted*: an
+  expression in a guard is not checked against declared names and is not subject to §9.3's
+  must-read rule, and its operands are not registered as dependencies. The same guard with a bare
+  path — `when n == nosuch` — is correctly refused, so the hole is the expression form
+  specifically. Realization *does* evaluate it. This section admits expressions in argument
+  positions only; the implementation parses one here and then checks nothing, which is the worst
+  of the three possible behaviours. **This is a defect, not a limit.**
+- **Comparison and arithmetic have no defined relative precedence.** `active: x == a + b` parses
+  as `(x == a) + b` rather than as a comparison against a sum, and evaluates to missing. Nothing
+  rejects it.
+- **No grouping and no unary minus**, per §9.2. `(a + b) * c` is inexpressible, which is the
+  first thing an author will reach for after a formula that does not match the fixed precedence.
+- **The no-facts rule bounds operands, not results** (§9.3). A fabricated number can be computed
+  from one real reading and invented coefficients.
+- **Arithmetic is the only construct.** No comparison chain, no conditional, no string
+  operation, no aggregate over a collection. §8 question 10 — how a card says a collection is
+  empty — is *not* answered here, and a count is still one operator away from the arithmetic
+  this section admits, which is the reason it was left alone.
+- **`Form` is unchanged**, so a transition still cannot compute. `set(shares * 2)` is not
+  admitted, and §6's condition 3 continues to hold for the reason it did at L0.
