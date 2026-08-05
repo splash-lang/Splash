@@ -7549,6 +7549,36 @@ pub mod kit {
         }
     }
 
+    /// The tint argument, as a LIVE call where the backend can answer it.
+    ///
+    /// `direction` reads the realized value, which is the seeded one. Once
+    /// `value:` went live the two disagreed on screen: the top-movers list drew
+    /// `+29.45%` in red because the seed behind that row was negative, and
+    /// `+29.20%` in green two rows down because that one was positive. Four
+    /// positive rows, two of them red — two numbers describing one move,
+    /// side by side, contradicting each other. That is precisely what §4 exists
+    /// to prevent, and making values live without making tints live is what
+    /// turned a hidden staleness into a visible contradiction.
+    ///
+    /// No kit change is needed: `l0_tint` branches on `dir > 0` / `dir < 0`, so
+    /// it takes the SIGN of whatever it is handed and a raw change value works
+    /// exactly as `1` or `-1` did.
+    ///
+    /// `None` means "do not tint at all" — no `tint:` was declared. A declared
+    /// tint the backend cannot answer still falls back to the realized sign,
+    /// which is the same choice every other binding makes.
+    fn tint_expr(node: &UiNode) -> Option<String> {
+        if let Some((_, binding)) = node.bindings.iter().find(|(n, _)| n == "tint") {
+            if let Some(call) = makepad::vm_call(binding) {
+                return Some(call);
+            }
+        }
+        match direction(node) {
+            0 => None,
+            d => Some(d.to_string()),
+        }
+    }
+
     fn children(node: &UiNode, depth: usize, out: &mut String) {
         out.push_str("[\n");
         for (i, child) in node.children.iter().enumerate() {
@@ -7816,7 +7846,10 @@ pub mod kit {
                 let _ = write!(out, "{f}({}, {size:?})", scalar_of(node, "cond"));
             }
             "TextStat" => {
-                let _ = write!(out, "{f}({}, {})", makepad::valued(node), direction(node));
+                // `l0_stat` takes the direction as a parameter rather than
+                // composing it, so an untinted stat passes the neutral `0`.
+                let dir = tint_expr(node).unwrap_or_else(|| "0".to_owned());
+                let _ = write!(out, "{f}({}, {dir})", makepad::valued(node));
             }
             // Five text roles may carry a tint, and the stock LIST tints a
             // `TextValue` while the detail tints a `TextStat`. Lowering only the
@@ -7824,12 +7857,13 @@ pub mod kit {
             // percentages rendered white, and "this one fell" stopped being
             // said at all. `tint` is §1.1's instructive case for exactly this:
             // red-versus-green is presentation, but the SIGN is meaning.
-            "TextTitle" | "TextBody" | "TextCaption" | "TextValue" if direction(node) != 0 => {
+            "TextTitle" | "TextBody" | "TextCaption" | "TextValue" if tint_expr(node).is_some() => {
                 // Always through `valued`: it falls back to `text:` and
                 // decorates either way. Branching here meant a `text:` carrying a
                 // `suffix:` skipped the decoration entirely.
                 let body = makepad::valued(node);
-                let _ = write!(out, "l0_tinted({f}({body}), {})", direction(node));
+                let dir = tint_expr(node).unwrap_or_else(|| "0".to_owned());
+                let _ = write!(out, "l0_tinted({f}({body}), {dir})");
             }
             // The five data visualisations. Each takes its declared arguments in
             // the catalog's order — no defaults, because a bar drawn against a

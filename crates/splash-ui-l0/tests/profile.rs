@@ -5344,3 +5344,54 @@ view root Surface { when n == m * 2 { Rule() } }
 "#;
     assert!(check_ui_l0_named("g", HONEST).valid, "{}", why(HONEST));
 }
+
+/// A tint must be as live as the number it tints.
+///
+/// FOUND ON A PHONE, not in a test. The top-movers list drew four positive
+/// rows and coloured two of them red: `+29.45%` red, `+29.20%` green,
+/// `+26.47%` red. The percentages were live calls and the tints were resolved
+/// from the seeded blob, whose signs happened to run `+ - + -`. Two numbers
+/// describing one move, side by side, contradicting each other — which is the
+/// failure §4 exists to prevent.
+///
+/// This was not introduced by making values live; it was REVEALED by it. Before
+/// that both were seeded, so both were stale together and agreed. Half a fix is
+/// what turned a hidden staleness into a visible contradiction, and that is the
+/// general lesson: a value and its decoration must resolve from the same place.
+#[test]
+fn a_tint_is_as_live_as_the_value_it_tints() {
+    let data = serde_json::json!({
+        "movers": [
+            {"ticker":"NVDA","name":"Nvidia","last":1.0,"change":0.5,"pct":2.0},
+            {"ticker":"AAPL","name":"Apple","last":2.0,"change":-0.5,"pct":-1.0}],
+        "quote": {}, "series": {}, "selected": "", "range": "m1",
+        "env": {"locale": {}}, "copy": {"movers": "Top Movers"}
+    });
+    let root = realize(STOCK, &data, RealizeLimits::default())
+        .root
+        .expect("realizes");
+    let dsl = splash_ui_l0::kit::lower(&root);
+
+    // The tint is a CALL, at the row's own index — not the seeded sign.
+    for row in 0..2 {
+        let want = format!(r#"sys.movers({row}, "change""#);
+        assert!(
+            dsl.contains(&want),
+            "row {row} must tint from a live call:\n{dsl}"
+        );
+    }
+    // And the seeded signs must be gone. `-1` was what the second row lowered
+    // to, and it is exactly what made a rising stock render red.
+    assert!(
+        !dsl.contains("l0_tinted(l0_value(sys.movers(1, \"changepct\", \"\")), -1)"),
+        "a seeded tint beside a live value is the defect:\n{dsl}"
+    );
+    // A row's tint and its value must read the SAME row. One shared index, or
+    // an index that does not advance, is how they disagree in the first place.
+    let first =
+        dsl.find(r#"l0_tinted(l0_value(sys.movers(1, "changepct", "")), sys.movers(1, "change""#);
+    assert!(
+        first.is_some(),
+        "value and tint must come from one row:\n{dsl}"
+    );
+}
