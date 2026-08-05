@@ -2468,6 +2468,28 @@ fn compare(left: Option<serde_json::Value>, cmp: &str, right: Option<serde_json:
         // branch; an unresolvable comparison is now simply false.
         return false;
     };
+    // Two NUMBERS compare numerically, whatever JSON shape they arrived in.
+    //
+    // `==` was `serde_json::Value` equality, which distinguishes `1` from `1.0`.
+    // So `when here.ok == 1` took its branch when the host injected a float and
+    // silently did not when it injected an integer — the same guard, the same
+    // card, the same value, deciding differently on a representation the card
+    // cannot see. It cost the nav map: the card was correct, the checker accepted
+    // it, and the map simply was not in the realized tree.
+    //
+    // The ordering operators already coerced through `as_f64`; only equality did
+    // not, which is the half nobody tested.
+    if let (Some(a), Some(b)) = (left.as_f64(), right.as_f64()) {
+        return match cmp {
+            "==" => a == b,
+            "!=" => a != b,
+            "<" => a < b,
+            "<=" => a <= b,
+            ">" => a > b,
+            ">=" => a >= b,
+            _ => false,
+        };
+    }
     match cmp {
         "==" => left == right,
         "!=" => left != right,
@@ -5907,8 +5929,19 @@ pub mod makepad {
             // `geocode`/`geocodenum` uses, and for the same reason: a coordinate
             // fed to another call has to arrive as a number.
             "sys.search" => {
-                let (index, field) = binding.field.split_once('.')?;
-                index.parse::<u32>().ok()?;
+                // An UNINDEXED read is row 0.
+                //
+                // A `count: 1` search is one place, and a card reads it as a
+                // record — `dest_place.name`, not `dest_place.0.name`. Requiring
+                // the index meant the nav card's destination fell back to the
+                // seed and rendered an em dash beside a correct card: the model
+                // had put "Osaka Castle" in the initial state, the checker
+                // accepted it, and the one thing missing was this arm's ability
+                // to answer the spelling the card used.
+                let (index, field) = match binding.field.split_once('.') {
+                    Some((i, f)) if i.parse::<u32>().is_ok() => (i, f),
+                    _ => ("0", binding.field.as_str()),
+                };
                 let query = arg("query")?;
                 match field {
                     "lat" | "lon" => Some(format!("sys.searchnum({query:?}, {index}, {field:?})")),

@@ -6090,3 +6090,58 @@ fn grouping_overrides_precedence() {
         "and grouping overrides that"
     );
 }
+
+/// Two numbers compare numerically, whatever JSON shape they arrived in.
+///
+/// `==` was `serde_json::Value` equality, which distinguishes `1` from `1.0`. So
+/// `when here.ok == 1` took its branch when the host injected a float and
+/// silently did not when it injected an integer — the same guard, the same card,
+/// the same value, deciding differently on a representation the card cannot see.
+///
+/// It cost the nav map. The card was correct, the checker accepted it, the
+/// destination was live, and the `Map` was simply not in the realized tree. The
+/// ordering operators already coerced through `as_f64`; only equality did not,
+/// which is the half nobody tested.
+#[test]
+fn a_number_compares_numerically_whatever_shape_it_arrived_in() {
+    const CARD: &str = r#"
+source here sys.gps()
+copy yes { class: vocabulary, en: "SHOWN" }
+view root Surface {
+  when here.ok == 1 { TextRow(text: copy.yes) }
+  TextCaption(value: here.lat)
+}
+"#;
+    for shape in [
+        serde_json::json!(1),
+        serde_json::json!(1.0),
+        serde_json::json!(1.00),
+    ] {
+        let data = serde_json::json!({
+            "here": { "lat": 34.9, "lon": 135.7, "ok": shape },
+            "env": { "locale": {} }, "copy": { "yes": "SHOWN" }
+        });
+        let root = realize(CARD, &data, RealizeLimits::default())
+            .root
+            .expect("realizes");
+        let dsl = splash_ui_l0::kit::lower(&root);
+        assert!(
+            dsl.contains("SHOWN"),
+            "ok={shape} must satisfy `== 1`:\n{dsl}"
+        );
+    }
+    // And a genuine mismatch still fails, in both shapes.
+    for shape in [serde_json::json!(0), serde_json::json!(0.0)] {
+        let data = serde_json::json!({
+            "here": { "lat": 34.9, "lon": 135.7, "ok": shape },
+            "env": { "locale": {} }, "copy": { "yes": "SHOWN" }
+        });
+        let root = realize(CARD, &data, RealizeLimits::default())
+            .root
+            .expect("realizes");
+        assert!(
+            !splash_ui_l0::kit::lower(&root).contains("SHOWN"),
+            "ok={shape} must not satisfy `== 1`"
+        );
+    }
+}
