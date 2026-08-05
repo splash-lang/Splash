@@ -5470,30 +5470,32 @@ view root Surface { TextHero(value: now.temp * 9) }
 // of this test reported nine false positives, because `unit: .money` reaches the
 // output as `$` and `tint:` as a direction rather than as the value.
 
-/// Two distinct values for one attribute, as written in a card.
-fn two_values(kind: &splash_ui_l0::catalog::ArgKind) -> Option<(String, String)> {
+/// Every distinct value worth trying for one attribute, as written in a card.
+///
+/// ALL of a token set, not a chosen pair. The first token is usually the default
+/// and a default legitimately emits nothing, and two different tokens can
+/// legitimately lower to the same thing — `.plan` and `.drive` both mean the
+/// static route preview, because a chase camera needs a per-frame position L0
+/// cannot supply. The caller requires only that SOME pair differs.
+fn probe_values(kind: &splash_ui_l0::catalog::ArgKind) -> Option<Vec<String>> {
     use splash_ui_l0::catalog::ArgKind::*;
     Some(match kind {
-        // Every token, not a chosen pair: the first is usually the DEFAULT and
-        // a default legitimately emits nothing, so `start`-vs-`baseline` would
-        // report a working `align` as inert. The caller requires only that SOME
-        // token changes the output.
         Token(set) | TokenOrPath(set) => {
             if set.len() < 2 {
                 return None;
             }
-            (format!(".{}", set[0]), format!(".{}", set[1]))
+            set.iter().map(|t| format!(".{t}")).collect()
         }
         // Small and adjacent: a column count only shows up against a child
         // count, so 11-vs-4242 chunked four children into one row either way and
         // reported a working `cols:` as inert.
-        Number => ("1".into(), "3".into()),
-        Text | Any => ("\"P1\"".into(), "\"P4242\"".into()),
+        Number => vec!["1".into(), "3".into()],
+        Text | Any => vec!["\"P1\"".into(), "\"P4242\"".into()],
         // Bound paths, so §4 is satisfied. The two differ in SIGN as well as
         // magnitude: `tint` lowers to a DIRECTION, so two positive values are
         // indistinguishable and the probe would call a working tint inert.
-        Path | Data => ("sa".into(), "sc".into()),
-        Event => ("ev_a".into(), "ev_b".into()),
+        Path | Data => vec!["sa".into(), "sc".into()],
+        Event => vec!["ev_a".into(), "ev_b".into()],
         // A predicate has no second form to vary that is not also a different
         // shape; `a_predicate_argument_evaluates_to_a_boolean` covers it.
         Bool => return None,
@@ -5521,21 +5523,6 @@ const INERT: &[(&str, &str)] = &[
     ("Map", "from"),
     ("Map", "to"),
     ("Map", "via"),
-    // `unit` reaches NEITHER backend as a token: `.c` and `.f` both lower to
-    // `value + "°"`, byte for byte. So the weather card's units toggle — the one
-    // interaction it advertises, wired through state, dispatch and re-render —
-    // changes nothing on screen, and the temperature is always Celsius because
-    // the live call asks open-meteo for `current.temperature_2m` with no unit.
-    //
-    // The spec says "do not convert: the runtime formats by the unit token".
-    // The runtime never receives the unit token. Closing it is a DESIGN decision
-    // rather than a patch: either the unit travels to the helper (so the fetch
-    // asks for the right one) or the card is allowed to convert, and the second
-    // is what L0 has no expression form for.
-    ("TextHero", "unit"),
-    ("TextCaption", "unit"),
-    ("TextValue", "unit"),
-    ("Tile", "unit"),
     // A text input is not wrapped by the width composer — the `Field` branch
     // returns before it — so a field cannot be told how wide to be.
     ("Field", "width"),
@@ -5548,7 +5535,7 @@ fn changing_a_declared_attribute_must_change_the_lowering() {
 
     for (role, args) in splash_ui_l0::catalog::CONSTRUCTORS {
         for (attr, kind) in *args {
-            let Some((first, second)) = two_values(kind) else {
+            let Some(candidates) = probe_values(kind) else {
                 continue;
             };
             // Every OTHER attribute is filled too, so the role is instantiated
@@ -5565,7 +5552,9 @@ fn changing_a_declared_attribute_must_change_the_lowering() {
                 // and the converse: probing `text` while `value` is filled asks
                 // which wins, not whether `text` reaches anything.
                 .filter(|(n, _)| !(*attr == "text" && *n == "value"))
-                .filter_map(|(n, k)| two_values(k).map(|(v, _)| format!("{n}: {v}")))
+                .filter_map(|(n, k)| {
+                    probe_values(k).and_then(|v| v.first().map(|f| format!("{n}: {f}")))
+                })
                 .collect();
             let build = |value: &str| {
                 let mut all = vec![format!("{attr}: {value}")];
@@ -5602,16 +5591,16 @@ fn changing_a_declared_attribute_must_change_the_lowering() {
                     makepad::lower(&root)
                 ))
             };
-            let (a, b) = (build(&first), build(&second));
-            let (Some(la), Some(lb)) = (lower(&a), lower(&b)) else {
-                // A probe the checker refuses proves nothing about the lowering.
-                // Skipped rather than failed: several roles constrain their
-                // arguments against each other in ways this generator does not
-                // model, and a false failure here would train people to ignore
-                // the list.
+            // A probe the checker refuses proves nothing about the lowering, so
+            // it contributes no output rather than a failure: several roles
+            // constrain their arguments against each other in ways this
+            // generator does not model, and a false failure would train people
+            // to ignore the list.
+            let outputs: Vec<String> = candidates.iter().filter_map(|v| lower(&build(v))).collect();
+            if outputs.len() < 2 {
                 continue;
-            };
-            if la == lb {
+            }
+            if outputs.iter().all(|o| *o == outputs[0]) {
                 inert.push((role.to_string(), attr.to_string()));
             }
         }
@@ -5804,9 +5793,14 @@ view root Surface {
         !mk.contains("no makepad lowering for Map"),
         "the role must lower at all:\n{mk}"
     );
-    // The camera is the widget's own vocabulary, not L0's token.
+    // The camera is the widget's own vocabulary, not L0's token — and `.drive`
+    // lowers to the STATIC preview. A chase camera follows a vehicle, following
+    // needs a position updated every frame, and L0 has no loop to supply one; the
+    // widget handed a route and no position animates along it on a timer, drawing
+    // motion the user is not making. §4 does not stop applying because the
+    // invented value is a camera pose.
     assert!(
-        mk.contains("nav_mode: \"3d\"") && mk.contains("zoom: 16"),
+        mk.contains("nav_mode: \"plan\"") && mk.contains("zoom: 16"),
         "the declared mode and zoom must reach the widget:\n{mk}"
     );
     // Every coordinate LIVE, from the source each endpoint names — a device fix
@@ -5832,7 +5826,7 @@ view root Surface {
         "the kit must lower the role, not report it unsupported:\n{kit}"
     );
     assert!(
-        kit.contains("l0_map(\"3d\", 16, sys.gps(\"lat\"), sys.gps(\"lon\"), sys.navroute("),
+        kit.contains("l0_map(\"plan\", 16, sys.gps(\"lat\"), sys.gps(\"lon\"), sys.navroute("),
         "the kit passes the mode, the zoom, the centre and the live route:\n{kit}"
     );
     // And none of the seeded numbers may appear as a literal.
@@ -5842,4 +5836,75 @@ view root Surface {
             "{seeded} is the seeded coordinate and must not be lowered:\n{mk}"
         );
     }
+}
+
+/// Token pairs a card TOGGLES between must be distinguishable in the lowering.
+///
+/// `changing_a_declared_attribute_must_change_the_lowering` asks whether SOME
+/// pair of an attribute's tokens differs, which is the right question for
+/// "does this attribute reach a backend at all" and the wrong one for a pair a
+/// card cycles. `unit` passes that check because `.pct` lowers to `%` and
+/// `.money` to `$` — while `.c` and `.f`, the two a weather card actually
+/// toggles, are byte-identical.
+///
+/// The general test got STRONGER and lost this case. Both are needed.
+#[test]
+fn a_token_pair_a_card_toggles_must_change_the_lowering() {
+    // (role, attribute, first, second). Each pair is one a shipping card cycles.
+    const PAIRS: &[(&str, &str, &str, &str)] = &[("TextHero", "unit", "c", "f")];
+    // Pairs that are still indistinguishable. May only shrink.
+    //
+    // `.c` vs `.f`: both lower to `value + "°"`, so the weather card's units
+    // toggle — the one interaction it advertises, wired through state, dispatch
+    // and a re-render — changes nothing on screen, and every temperature is
+    // Celsius because the live call asks open-meteo for `current.temperature_2m`
+    // with no unit at all.
+    //
+    // The weather spec says "do not convert: the runtime formats by the unit
+    // token". The runtime never receives the token. Closing it is a DESIGN
+    // decision rather than a patch: either the unit travels to the helper, so the
+    // fetch asks for the right one, or the card converts — and converting is
+    // exactly what L0 has no expression form for.
+    const IDENTICAL: &[(&str, &str)] = &[("TextHero", "unit")];
+
+    let mut same: Vec<(String, String)> = Vec::new();
+    for (role, attr, first, second) in PAIRS {
+        let card = |tok: &str| {
+            format!(
+                "state held {{ shape: number, initial: 21 }}\n\
+                 view root Surface {{ {role}(value: held, {attr}: .{tok}) }}\n"
+            )
+        };
+        let data = serde_json::json!({ "held": 21.0, "env": { "locale": {} }, "copy": {} });
+        let lower = |src: &str| -> String {
+            let root = realize(src, &data, RealizeLimits::default())
+                .root
+                .expect("the probe realizes");
+            format!(
+                "{}\n{}",
+                splash_ui_l0::kit::lower(&root),
+                makepad::lower(&root)
+            )
+        };
+        if lower(&card(first)) == lower(&card(second)) {
+            same.push((role.to_string(), attr.to_string()));
+        }
+    }
+    let known: Vec<(String, String)> = IDENTICAL
+        .iter()
+        .map(|(r, a)| (r.to_string(), a.to_string()))
+        .collect();
+    let mut fresh: Vec<_> = same.iter().filter(|p| !known.contains(p)).collect();
+    fresh.sort();
+    assert!(
+        fresh.is_empty(),
+        "a card toggles between these tokens and the lowering cannot tell them \
+         apart, so the toggle changes nothing on screen: {fresh:#?}"
+    );
+    let mut fixed: Vec<_> = known.iter().filter(|p| !same.contains(p)).collect();
+    fixed.sort();
+    assert!(
+        fixed.is_empty(),
+        "these are distinguishable now — delete them from IDENTICAL: {fixed:#?}"
+    );
 }

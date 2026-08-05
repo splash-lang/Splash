@@ -5494,10 +5494,29 @@ pub mod makepad {
     /// defect this profile keeps finding.
     pub(super) fn map_mode(node: &UiNode) -> &'static str {
         match arg(node, "mode") {
-            Some(NodeValue::Token(t)) if t == "drive" => "3d",
-            Some(NodeValue::Token(t)) if t == "plan" => "plan",
-            // `flat` and an unstated mode are the same thing to the widget: the
-            // route, drawn without the 2.5D camera.
+            // `.drive` lowers to the STATIC preview, not to the chase camera,
+            // and this is a §4 argument rather than a performance one.
+            //
+            // A chase camera follows a vehicle, and following needs a position
+            // updated every frame. L0 has no loop to supply one — that is what
+            // `fn tick()` is for, and `fn tick()` is L2. Handed a route and no
+            // position, the widget animates along the polyline on a timer: it
+            // draws motion the user is not making. That is a fabricated fact in
+            // the one currency a map trades in, and §4 does not stop applying
+            // because the invented value is a camera pose.
+            //
+            // It is also what made the card stutter. The widget's own settle gate
+            // exists because a map that keeps asking for frames "was pinning the
+            // GPU at ~100%", and a follow mode is permanently in motion so it
+            // never settles. Measured at 69% CPU and 1.9 GB resident on a
+            // OnePlus 6 for one card holding one map.
+            //
+            // So both modes that MOVE are lowered to the one that does not. When
+            // L0 gains a way to declare a live position, `.drive` can mean what
+            // it says.
+            Some(NodeValue::Token(t)) if t == "drive" || t == "plan" => "plan",
+            // `flat` and an unstated mode are the same thing to the widget: no
+            // nav shader at all, which also means no route ribbon.
             _ => "",
         }
     }
@@ -6235,7 +6254,7 @@ pub mod makepad {
                 };
                 let _ = write!(
                     out,
-                    "{p}MapView{{ width: Fill height: 452 nav_mode: {mode:?} zoom: {zoom} \
+                    "{p}MapView{{ width: Fill height: 812 nav_mode: {mode:?} zoom: {zoom} \
                      center_lat: {lat} center_lon: {lon}"
                 );
                 if poly != "\"\"" {

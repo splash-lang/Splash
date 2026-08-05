@@ -86,7 +86,14 @@ view root Surface {
         TextCaption(value: trip.distance, suffix: copy.away)
       }
     }
-    # The card names the TRIP. The widget fetches its own route.
-    Map(mode: .drive, from: here, to: dest_place, zoom: 16)
+    # The card names the TRIP, and GUARDS it on having a position.
+    #
+    # `sys.gps` answers -9999 with no fix, so an unguarded map is a map of an
+    # impossible place: it fits its camera to a garbage extent and loads tiles
+    # without bound. §5.9 exists for exactly this — "no fix yet" is a state the
+    # card can branch on, not a number to render.
+    when here.ok == 1 {
+      Map(mode: .drive, from: here, to: dest_place, zoom: 16)
+    }
   }
 }
