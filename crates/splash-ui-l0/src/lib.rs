@@ -2212,7 +2212,18 @@ impl<'a> Parser<'a> {
                         }
                         self.at += 1;
                         self.depth += 1;
-                        let rhs = self.parse_term();
+                        // The WHOLE right side, arithmetic included. This took a
+                        // term, so a comparison bound TIGHTER than `+`: at L1
+                        // `active: x == a + b` parsed as `(x == a) + b`, which is
+                        // arithmetic on a boolean — it evaluated to missing, and
+                        // nothing rejected it, so the card rendered blank with no
+                        // diagnostic. A comparison is the loosest thing in an
+                        // operand, which is what makes `x == a + b` mean what it
+                        // reads as.
+                        //
+                        // The recursion is bounded by the depth guard above, the
+                        // same one every other nested construct uses.
+                        let rhs = self.parse_operand();
                         self.depth -= 1;
                         return Operand::Predicate {
                             path,
@@ -4124,10 +4135,26 @@ fn check_arg(
         (Operand::Path(path), _) => check_path(path, scope, arg.line, arg.column, sink),
         (Operand::Predicate { path, rhs, .. }, _) => {
             check_path(path, scope, arg.line, arg.column, sink);
-            // The right operand is a binding too. Leaving it unchecked is how
-            // `when selected != absent` took its branch with `absent` undeclared.
-            if let Operand::Path(r) = rhs.as_ref() {
-                check_path(r, scope, arg.line, arg.column, sink);
+            // EVERY path in the right operand, not just a bare one. Leaving it
+            // unchecked is how `when selected != absent` took its branch with
+            // `absent` undeclared — and now that a comparison's right side can
+            // hold arithmetic, matching only `Path` would let `x == a + b` past
+            // with `a` and `b` undeclared.
+            let mut paths = Vec::new();
+            expr_paths(rhs, &mut paths);
+            // §9.3 applies to a comparison's right side too: `x == 3 * 4` computes
+            // a number from nothing and compares against it.
+            if matches!(rhs.as_ref(), Operand::Expr { .. }) && paths.is_empty() {
+                sink.push(
+                    arg.line,
+                    arg.column,
+                    "an expression must read a declared source or state: every operand here \
+                     is a literal, which states a fact rather than computing one (profile §4)"
+                        .to_string(),
+                );
+            }
+            for p in paths {
+                check_path(&p, scope, arg.line, arg.column, sink);
             }
         }
         // §4's no-facts rule, one level up.

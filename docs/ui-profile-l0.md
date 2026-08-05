@@ -1414,9 +1414,14 @@ Recorded rather than patched over, in the order they would bite.
   reaching a view only through a source argument. **A guard is still not a position this section
   admits an expression in** — the implementation parses one and now checks it correctly, which is
   a narrower gap between the two than it was, and still a gap.
-- **Comparison and arithmetic have no defined relative precedence.** `active: x == a + b` parses
-  as `(x == a) + b` rather than as a comparison against a sum, and evaluates to missing. Nothing
-  rejects it.
+- ~~**Comparison and arithmetic have no defined relative precedence.**~~ **Fixed.** A
+  comparison's right side took a TERM, so it bound tighter than `+`: `active: x == a + b` parsed
+  as `(x == a) + b` — arithmetic over a boolean — evaluated to missing, and nothing rejected it,
+  so the card was accepted, drew blank, and gave no diagnostic. A comparison is now the loosest
+  thing in an operand, which is what makes `x == a + b` mean what it reads as. Its right side is
+  also checked like any other operand, since it can now hold arithmetic: an undeclared name in it
+  is refused, and §9.3 reaches it, so `x == 3 * 4` compares against a fabricated number and is
+  refused too.
 - **No grouping and no unary minus**, per §9.2. `(a + b) * c` is inexpressible, which is the
   first thing an author will reach for after a formula that does not match the fixed precedence.
 - **The no-facts rule bounds operands, not results** (§9.3). A fabricated number can be computed

@@ -5908,3 +5908,79 @@ fn a_token_pair_a_card_toggles_must_change_the_lowering() {
         "these are distinguishable now — delete them from IDENTICAL: {fixed:#?}"
     );
 }
+
+/// A comparison is the LOOSEST thing in an operand, so `x == a + b` means what
+/// it reads as.
+///
+/// A comparison's right side took a TERM, so it bound tighter than `+`: at L1
+/// `active: x == a + b` parsed as `(x == a) + b` — arithmetic over a boolean. It
+/// evaluated to missing and nothing rejected it, so the card was accepted, drew
+/// blank, and gave no diagnostic. That is the worst failure shape available: a
+/// card that is wrong, valid, and silent.
+#[test]
+fn a_comparison_binds_looser_than_arithmetic() {
+    const CARD: &str = r#"# level: L1
+state k { shape: number, initial: 5 }
+state a { shape: number, initial: 2 }
+state b { shape: number, initial: 3 }
+copy yes { class: vocabulary, en: "MATCHED" }
+view root Surface {
+  when k == a + b { TextRow(text: copy.yes) }
+}
+"#;
+    assert!(
+        check_ui_l0_named("c", CARD).valid,
+        "{:#?}",
+        check_ui_l0_named("c", CARD).diagnostics
+    );
+    // The comparison is against the SUM, so the branch turns on 5 == 2 + 3.
+    for (k, taken) in [(5.0, true), (6.0, false)] {
+        let data = serde_json::json!({
+            "k": k, "a": 2.0, "b": 3.0,
+            "env": { "locale": {} }, "copy": { "yes": "MATCHED" }
+        });
+        let root = realize(CARD, &data, RealizeLimits::default())
+            .root
+            .expect("realizes");
+        let dsl = splash_ui_l0::kit::lower(&root);
+        assert_eq!(
+            dsl.contains("MATCHED"),
+            taken,
+            "k={k} compared against a + b:\n{dsl}"
+        );
+    }
+
+    // And the right side is CHECKED like any other operand, now that it can hold
+    // arithmetic: an undeclared name in it is refused rather than resolving to
+    // nothing and deciding the branch on that absence.
+    let why = |c: &str| {
+        check_ui_l0_named("c", c)
+            .diagnostics
+            .iter()
+            .map(|d| d.message.clone())
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    const UNDECLARED: &str = r#"# level: L1
+source q sys.quote(ticker: "N", fields: [last])
+state k { shape: number, initial: 2 }
+view root Surface { Chip(text: "c", active: k == nope + q.last) }
+"#;
+    assert!(
+        why(UNDECLARED).contains("not a declared name"),
+        "{}",
+        why(UNDECLARED)
+    );
+    // §9.3 reaches here too: a comparison against a computed literal compares
+    // against a fabricated number.
+    const FABRICATED: &str = r#"# level: L1
+source q sys.quote(ticker: "N", fields: [last])
+state k { shape: number, initial: 2 }
+view root Surface { Chip(text: "c", active: k == 3 * 4) TextRow(text: q.last) }
+"#;
+    assert!(
+        why(FABRICATED).contains("must read a declared"),
+        "{}",
+        why(FABRICATED)
+    );
+}
