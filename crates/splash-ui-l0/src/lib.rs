@@ -5467,7 +5467,18 @@ pub mod makepad {
     pub(super) fn render_expr(part: &ExprPart) -> Option<String> {
         match part {
             ExprPart::Const(v) => Some(v.clone()),
-            ExprPart::Call(binding) => vm_call(binding),
+            // A live call is COERCED. Every `sys.*` helper answers with a
+            // string, because a string is what a card renders and what
+            // concatenation composes — `"$" + sys.stock(…)` is how every live
+            // value reaches the screen. Arithmetic needs the other thing, and
+            // string subtraction evaluates to NaN: measured on device, an L1
+            // card drew "≈NaN°" in every row while every other value on the same
+            // row was correct.
+            //
+            // The coercion is emitted here rather than assumed of the helpers,
+            // because L1 can ask for arithmetic over any numeric field of any
+            // capability and the helpers cannot all change shape for it.
+            ExprPart::Call(binding) => vm_call(binding).map(|c| format!("sys.num({c})")),
             ExprPart::Bin(lhs, op, rhs) => Some(format!(
                 "({} {op} {})",
                 render_expr(lhs)?,

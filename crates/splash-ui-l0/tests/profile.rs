@@ -5400,3 +5400,53 @@ fn a_tint_is_as_live_as_the_value_it_tints() {
         "value and tint must come from one row:\n{dsl}"
     );
 }
+
+/// An L1 operand that is a live call is COERCED to a number.
+///
+/// FOUND ON A PHONE. Every `sys.*` helper answers with a string — that is what a
+/// card renders and what concatenation composes, so `"$" + sys.stock(…)` is how
+/// every live value reaches the screen. Arithmetic needs the other thing, and
+/// string subtraction evaluates to NaN: the composed city card drew `≈NaN°` in
+/// every row while the temperature and humidity beside it were correct.
+///
+/// So §9.5's claim — that a backend receives the shape and evaluates the
+/// arithmetic against data arriving later — was true of the shape and false of
+/// the arithmetic, and nothing in the crate could have caught it: the DSL was
+/// well-formed and the operands were the right calls.
+#[test]
+fn an_l1_operand_that_is_a_live_call_is_coerced_to_a_number() {
+    const CARD: &str = r#"# level: L1
+source q sys.quote(ticker: "NVDA", fields: [last, open])
+view root Surface { TextHero(value: q.last - q.open) }
+"#;
+    let data = serde_json::json!({ "q": { "last": 5.0, "open": 4.0 }, "env": { "locale": {} } });
+    let root = realize(CARD, &data, RealizeLimits::default())
+        .root
+        .expect("realizes");
+    let dsl = splash_ui_l0::kit::lower(&root);
+    assert!(
+        dsl.contains("sys.num(sys.stock("),
+        "a live operand must be coerced, or the VM subtracts strings:\n{dsl}"
+    );
+    // Both sides, and the tree's shape preserved around them.
+    assert_eq!(
+        dsl.matches("sys.num(").count(),
+        2,
+        "each live operand is coerced once:\n{dsl}"
+    );
+    // A constant needs no coercion — it is already a number in the DSL.
+    const COEFF: &str = r#"# level: L1
+source now sys.weather(lat: 1.0, lon: 2.0, fields: [temp])
+view root Surface { TextHero(value: now.temp * 9) }
+"#;
+    let d2 = serde_json::json!({ "now": { "temp": 10.0 }, "env": { "locale": {} } });
+    let r2 = realize(COEFF, &d2, RealizeLimits::default())
+        .root
+        .expect("realizes");
+    let dsl2 = splash_ui_l0::kit::lower(&r2);
+    assert_eq!(
+        dsl2.matches("sys.num(").count(),
+        1,
+        "only the call is coerced, not the coefficient:\n{dsl2}"
+    );
+}
