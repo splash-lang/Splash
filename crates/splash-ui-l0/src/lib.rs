@@ -2472,6 +2472,115 @@ pub mod catalog {
     pub fn source(name: &str) -> Option<&'static [&'static str]> {
         SOURCES.iter().find(|(n, _)| *n == name).map(|(_, a)| *a)
     }
+
+    /// What each capability can ANSWER: the field names a card may request from
+    /// it, and — for the ones that take no `fields:` — read off it.
+    ///
+    /// Until this existed the word "field" meant something different in four
+    /// places and none was checked against another: the card's `fields:` list,
+    /// the shapes `Record`/`Collection` which carried no fields at all, the
+    /// adapter's hand-written key translation, and whatever the upstream JSON
+    /// happens to contain. A card could request a field that does not exist and
+    /// get an em dash, which reads on screen as data that has not arrived yet.
+    ///
+    /// These are L0's OWN names, not any backend's. `sys.weather` reaches
+    /// open-meteo by raw JSON path and `sys.quote` reaches Yahoo through keys
+    /// like `regularMarketPrice`; translating is the adapter's job, and putting
+    /// backend spellings here would make the profile depend on one host.
+    ///
+    /// WHAT THIS DOES NOT CATCH. A field can be declared here, accepted by the
+    /// checker, and still unanswerable by a given backend — `sys.quote` has an
+    /// arm for `open` that resolves a key absent from the response it fetches,
+    /// which rendered `$—` over a real price. Closing that needs a conformance
+    /// test per backend asserting it answers everything declared here. This
+    /// table is what such a test would check against; it is not the test.
+    pub const ANSWERS: &[(&str, &[&str])] = &[
+        (
+            "sys.geocode",
+            &[
+                "lat",
+                "lon",
+                "name",
+                "country",
+                "admin1",
+                "timezone",
+                "population",
+            ],
+        ),
+        (
+            "sys.weather",
+            &[
+                "temp",
+                "feels",
+                "hi",
+                "lo",
+                "cond",
+                "humidity",
+                "wind",
+                "pressure",
+                "uv",
+                "visibility",
+                "precip",
+                "dayname",
+                "days",
+            ],
+        ),
+        ("sys.daylight", &["rise", "set", "now"]),
+        ("sys.airquality", &["aqi", "pm25", "pm10", "ozone"]),
+        ("sys.moonphase", &["phase", "illumination", "name"]),
+        // A photo is a URL, not a record. No field is readable off it.
+        ("sys.photo", &[]),
+        ("sys.locale", &["lang", "temp_unit"]),
+        ("sys.gps", &["lat", "lon", "accuracy", "ok"]),
+        ("sys.search", &["id", "name", "lat", "lon", "distance"]),
+        ("sys.route", &["duration", "distance", "steps"]),
+        (
+            "sys.places",
+            &["id", "name", "distance", "lat", "lon", "category"],
+        ),
+        (
+            "sys.news",
+            &["id", "title", "author", "points", "comments", "url"],
+        ),
+        (
+            "sys.news_item",
+            &["id", "title", "author", "points", "comments", "url"],
+        ),
+        (
+            "sys.movers",
+            &[
+                "ticker", "name", "last", "change", "pct", "open", "high", "low", "prev", "volume",
+                "mktcap", "pe", "currency", "exchange",
+            ],
+        ),
+        (
+            "sys.quote",
+            &[
+                "ticker", "name", "last", "change", "pct", "open", "high", "low", "prev", "volume",
+                "mktcap", "pe", "currency", "exchange",
+            ],
+        ),
+        ("sys.series", &["points", "min", "max"]),
+    ];
+
+    /// Extra scalars `aggregate:` may ask a capability to compute over the rows
+    /// it returns. Separate from `ANSWERS` because they sit at a different level
+    /// — `week.min_lo` is a property of the WEEK, not of a day.
+    pub const AGGREGATES: &[(&str, &[&str])] = &[
+        ("sys.weather", &["min_lo", "max_hi"]),
+        ("sys.series", &["min", "max"]),
+    ];
+
+    pub fn answers(name: &str) -> Option<&'static [&'static str]> {
+        ANSWERS.iter().find(|(n, _)| *n == name).map(|(_, a)| *a)
+    }
+
+    pub fn aggregates(name: &str) -> &'static [&'static str] {
+        AGGREGATES
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map_or(&[], |(_, a)| *a)
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────── validation ──
@@ -2989,6 +3098,41 @@ fn validate_sources(card: &Card, sink: &mut Diagnostics) {
             );
             continue;
         };
+        // A requested field must be one the capability ANSWERS.
+        //
+        // `fields:` was accepted as any list of words, so a card could ask for
+        // something that does not exist and the host would return nothing for
+        // it — an em dash, which is what a value still in flight looks like too.
+        // A capability with no vocabulary declared is left alone rather than
+        // treated as answering nothing.
+        for (name, arg) in &source.args {
+            let SourceArg::List(requested) = arg else {
+                continue;
+            };
+            let (known, what) = match name.as_str() {
+                "fields" => (catalog::answers(&source.helper), "answer"),
+                "aggregate" => (Some(catalog::aggregates(&source.helper)), "aggregate"),
+                _ => continue,
+            };
+            let Some(known) = known else { continue };
+            for field in requested {
+                if !known.iter().any(|k| k == field) {
+                    sink.push(
+                        source.line,
+                        1,
+                        format!(
+                            "{} cannot {what} {field:?}. It {}",
+                            source.helper,
+                            if known.is_empty() {
+                                "returns a value with no fields at all".to_owned()
+                            } else {
+                                format!("offers: {}", known.join(", "))
+                            }
+                        ),
+                    );
+                }
+            }
+        }
         for (name, arg) in &source.args {
             // The VALUE is a binding too. Checking only the argument's name let
             // a source carry any path to the host — the helper was constrained
@@ -3129,6 +3273,45 @@ struct Scope {
     /// Card state, tracked separately so reading it from a component is a
     /// specific diagnostic rather than "unknown name".
     forbidden_state: Vec<String>,
+    /// For a root backed by a source that declared `fields:`, the names a
+    /// reader may name off it.
+    ///
+    /// A card ALREADY says what it needs — `fields: [ticker, name, last]` — and
+    /// nothing compared the views against it. `m.tickr` type-checked, so did
+    /// `m.marketcap`, a field the host was never asked to fetch. Both render an
+    /// em dash, which is indistinguishable from data that has not arrived.
+    ///
+    /// A root with no entry is unchecked: `sys.gps` and `sys.locale` take no
+    /// field list, and a component prop is a record whose shape the card cannot
+    /// see from here.
+    fields: Vec<(String, Vec<String>)>,
+}
+
+/// What each source was asked for, as the names a reader may then name.
+///
+/// `fields:` and `aggregate:` both land in one set. They describe different
+/// levels — `fields:` on a multi-day forecast describes the DAYS while
+/// `aggregate:` describes the record around them — and separating them needs a
+/// per-capability schema this does not have. Pooling them accepts a read at the
+/// wrong level and still rejects a name the card never asked for, which is the
+/// defect that ships.
+fn declared_fields(card: &Card) -> Vec<(String, Vec<String>)> {
+    let list = |source: &SourceDecl, want: &str| -> Option<Vec<String>> {
+        source.args.iter().find_map(|(n, a)| match a {
+            SourceArg::List(v) if n == want => Some(v.clone()),
+            _ => None,
+        })
+    };
+    card.sources
+        .iter()
+        .filter_map(|s| {
+            // No `fields:` at all means the capability does not take one —
+            // `sys.gps`, `sys.locale`. Unchecked rather than checked as empty.
+            let mut names = list(s, "fields")?;
+            names.extend(list(s, "aggregate").unwrap_or_default());
+            Some((s.name.clone(), names))
+        })
+        .collect()
 }
 
 impl Scope {
@@ -3151,6 +3334,7 @@ impl Scope {
             copies: card.copies.clone(),
             events,
             forbidden_state: Vec::new(),
+            fields: declared_fields(card),
         }
     }
 
@@ -3178,6 +3362,35 @@ impl Scope {
             copies: card.copies.clone(),
             events,
             forbidden_state: card.states.iter().map(|s| root_of(&s.path)).collect(),
+            // A component sees the card's sources, so a read off one is checked
+            // here too. Its own props are not: a `record` prop's shape is
+            // whatever the caller passes, and §5.2 does not make the caller
+            // declare it.
+            fields: declared_fields(card),
+        }
+    }
+
+    /// Whether `root` names something whose fields are known, and if so whether
+    /// `field` is one of them.
+    fn field_is_declared(&self, root: &str, field: &str) -> Option<bool> {
+        let (_, names) = self.fields.iter().find(|(r, _)| r == root)?;
+        Some(names.iter().any(|n| n == field))
+    }
+
+    /// Record that a source exposes a nested collection under `field`.
+    ///
+    /// Derived from the card rather than declared: `for d, i in week.days` is
+    /// what says a forecast has `days`. Without this the loop over it would be
+    /// rejected by the very rule that makes the read of `d.dayname` safe.
+    fn note_structural(&mut self, path: &str) {
+        let (root, field) = match path.split_once('.') {
+            Some(parts) => parts,
+            None => return,
+        };
+        if let Some((_, names)) = self.fields.iter_mut().find(|(r, _)| r == root) {
+            if !names.iter().any(|n| n == field) {
+                names.push(field.to_owned());
+            }
         }
     }
 
@@ -3244,7 +3457,21 @@ fn walk(
                 ..
             }) = element.args.first()
             {
+                // `for d, i in week.days` says a forecast HAS days. Register it
+                // before checking, or the rule that makes `d.dayname` safe
+                // rejects the loop that introduces `d`.
+                scope.note_structural(p);
                 check_path(p, scope, *line, *column, sink);
+                // The item binder answers for whatever the collection's source
+                // was asked for. `i` is the index and has no fields, so only the
+                // first binder is bound.
+                if let Some(binder) = element.binders.first() {
+                    if let Some((_, names)) =
+                        scope.fields.iter().find(|(r, _)| *r == root_of(p)).cloned()
+                    {
+                        scope.fields.push((binder.clone(), names));
+                    }
+                }
             }
         }
         "when" => {
@@ -3760,6 +3987,39 @@ fn check_path(path: &str, scope: &Scope, line: usize, column: usize, sink: &mut 
 
     // The whole path, so a declared name can be matched by its own segments.
     if scope.knows(path) {
+        // Known root, but is the FIELD one the card asked for?
+        //
+        // A card declares `fields: [ticker, name, last]` and nothing compared
+        // the views against it, so `m.tickr` and `m.marketcap` both passed —
+        // one a typo, one a field the host was never asked to fetch. Each
+        // renders an em dash, which on screen is indistinguishable from data
+        // still in flight.
+        if let Some((root, rest)) = path.split_once('.') {
+            // A numeric segment is an INDEX into a collection, not a field:
+            // `lead.0.title` takes the first story and reads its title. Treating
+            // it as a field rejected every indexed read in the news card.
+            let mut segments = rest
+                .split('.')
+                .skip_while(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()));
+            let field = segments.next().unwrap_or("");
+            // Only the first field segment: deeper paths reach into a record
+            // whose own shape needs the per-capability schema.
+            if !field.is_empty() && !field.starts_with('$') && !field.starts_with('[') {
+                if let Some(false) = scope.field_is_declared(root, field) {
+                    let (_, names) = scope.fields.iter().find(|(r, _)| r == root).unwrap();
+                    sink.push(
+                        line,
+                        column,
+                        format!(
+                            "{root:?} was not asked for {field:?}. A source answers only the \
+                             fields its declaration requests, so this renders as missing — \
+                             add it to `fields:` or read one of: {}",
+                            names.join(", ")
+                        ),
+                    );
+                }
+            }
+        }
         return;
     }
     if scope.forbidden_state.contains(&root) {

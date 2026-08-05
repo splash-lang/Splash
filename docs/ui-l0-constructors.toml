@@ -238,24 +238,32 @@ tokens  = ["fill", "fit", "day", "rank", "temp"]
 
 [sources."sys.geocode"]
 args = ["name"]
+answers = ["lat", "lon", "name", "country", "admin1", "timezone", "population"]
 
 [sources."sys.weather"]
 args = ["lat", "lon", "days", "fields", "aggregate"]
+answers = ["temp", "feels", "hi", "lo", "cond", "humidity", "wind", "pressure", "uv", "visibility", "precip", "dayname", "days"]
+aggregates = ["min_lo", "max_hi"]
 
 [sources."sys.daylight"]
 args = ["lat", "lon"]
+answers = ["rise", "set", "now"]
 
 [sources."sys.airquality"]
 args = ["lat", "lon"]
+answers = ["aqi", "pm25", "pm10", "ozone"]
 
 [sources."sys.moonphase"]
 args = ["lat", "lon"]
+answers = ["phase", "illumination", "name"]
 
 [sources."sys.photo"]
 args = ["query"]
+answers = []
 
 [sources."sys.locale"]
 args = []
+answers = ["lang", "temp_unit"]
 
 # Nearby venues of one category, around a point. The card names WHERE and WHAT
 # KIND; the host answers with a collection.
@@ -269,36 +277,46 @@ args = []
 # something else is.
 [sources."sys.gps"]
 args = []
+answers = ["lat", "lon", "accuracy", "ok"]
 
 # Free-text place search, for what a `Field` collected. The query is a path into
 # declared state, so the card cannot search for something it did not first
 # receive from the user.
 [sources."sys.search"]
 args = ["query", "count", "fields"]
+answers = ["id", "name", "lat", "lon", "distance"]
 
 # A trip's facts — duration, distance, the step list. The ROUTE ITSELF is the
 # `Map` widget's to fetch; this is what the card needs to write on the screen
 # beside it, and asking twice is cheaper than making the card carry a polyline.
 [sources."sys.route"]
 args = ["from", "to", "via", "mode", "fields"]
+answers = ["duration", "distance", "steps"]
 
 [sources."sys.places"]
 args = ["lat", "lon", "category", "count", "fields"]
+answers = ["id", "name", "distance", "lat", "lon", "category"]
 
 [sources."sys.news"]
 args = ["count", "offset", "fields"]
+answers = ["id", "title", "author", "points", "comments", "url"]
 
 [sources."sys.news_item"]
 args = ["id", "fields"]
+answers = ["id", "title", "author", "points", "comments", "url"]
 
 [sources."sys.movers"]
 # `symbols` names the universe to rank; omitted means the whole market. Without
 # it a themed request ("top AI movers") could only render market-wide gainers
 # under a themed title.
 args = ["count", "fields", "symbols"]
+answers = ["ticker", "name", "last", "change", "pct", "open", "high", "low", "prev", "volume", "mktcap", "pe", "currency", "exchange"]
 
 [sources."sys.quote"]
 args = ["ticker", "fields"]
+answers = ["ticker", "name", "last", "change", "pct", "open", "high", "low", "prev", "volume", "mktcap", "pe", "currency", "exchange"]
 
 [sources."sys.series"]
 args = ["ticker", "range", "points", "fields", "aggregate"]
+answers = ["points", "min", "max"]
+aggregates = ["min", "max"]

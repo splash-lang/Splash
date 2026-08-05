@@ -2091,6 +2091,73 @@ fn the_source_catalog_matches_the_toml_spec() {
     }
 }
 
+/// The field vocabularies must agree between Rust and the TOML too.
+///
+/// The TOML is what the agent-facing catalog is GENERATED from, so a vocabulary
+/// that lives only in Rust is one the model writing cards never sees — it would
+/// be refused for naming a field the documentation never offered it. The
+/// arguments have been checked both ways since they existed; the fields are new
+/// and need the same discipline or they drift the first time one is added.
+#[test]
+fn the_field_vocabularies_match_the_toml_spec() {
+    const TOML: &str = include_str!("../../../docs/ui-l0-constructors.toml");
+
+    let mut documented: Vec<(String, String, Vec<String>)> = Vec::new();
+    let mut current: Option<String> = None;
+    for line in TOML.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("[sources.\"") {
+            current = rest.strip_suffix("\"]").map(|s| s.to_string());
+        } else if line.starts_with('[') {
+            current = None;
+        } else if let Some(name) = &current {
+            for (key, label) in [("answers = [", "answers"), ("aggregates = [", "aggregates")] {
+                if let Some(rest) = line.strip_prefix(key) {
+                    documented.push((
+                        name.clone(),
+                        label.to_string(),
+                        rest.trim_end_matches(']')
+                            .split(',')
+                            .map(|f| f.trim().trim_matches('"').to_string())
+                            .filter(|f| !f.is_empty())
+                            .collect(),
+                    ));
+                }
+            }
+        }
+    }
+
+    // Every capability declares a vocabulary, even an empty one: silence would
+    // be indistinguishable from "not written down yet", and the checker treats
+    // an absent vocabulary as "do not check".
+    assert_eq!(
+        documented.iter().filter(|(_, k, _)| k == "answers").count(),
+        catalog::ANSWERS.len(),
+        "every capability must document its answerable fields"
+    );
+
+    for (name, kind, fields) in &documented {
+        let rust: &[&str] = match kind.as_str() {
+            "answers" => catalog::answers(name)
+                .unwrap_or_else(|| panic!("{name:?} documents fields but Rust declares none")),
+            _ => catalog::aggregates(name),
+        };
+        assert_eq!(
+            rust,
+            fields.as_slice(),
+            "{kind} for {name:?} disagree between Rust and the TOML"
+        );
+    }
+    for (name, fields) in catalog::ANSWERS {
+        assert!(
+            documented
+                .iter()
+                .any(|(n, k, f)| n == name && k == "answers" && f == fields),
+            "{name:?} answers {fields:?} in Rust and the TOML does not say so"
+        );
+    }
+}
+
 // ─── parse-then-discard: forms recognised but whose values were dropped ──────
 //
 // Every one of these parsed cleanly and then lost the value. That is the single
@@ -4691,6 +4758,79 @@ fn a_live_source_survives_a_loop() {
     assert!(
         !dsl.contains("\"NVDA\"") && !dsl.contains("\"AAPL\""),
         "a live call must replace the seeded literal:\n{dsl}"
+    );
+}
+
+/// A read must name a field the card ASKED FOR.
+///
+/// A source answers `fields:` and nothing else, so a view that names anything
+/// outside that list renders an em dash — which on screen is indistinguishable
+/// from a value still in flight. Two ways to get there and both used to pass:
+/// misspell a field, or read one that is real but was never requested.
+///
+/// This needs no per-capability schema. The card already says what it needs;
+/// nothing compared the two halves of the card against each other.
+#[test]
+fn a_read_must_name_a_field_the_source_was_asked_for() {
+    let card = |body: &str| {
+        format!(
+            "# level: L0\n# model: stock\n\
+             source movers sys.movers(count: 3, fields: [ticker, name, last])\n\
+             view root Surface {{\n  for m, i in movers key m.ticker {{\n    Row {{ {body} }}\n  }}\n}}\n"
+        )
+    };
+    let why = |src: &str| -> String {
+        check_ui_l0_named("card", src)
+            .diagnostics
+            .iter()
+            .map(|d| d.message.clone())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+
+    // The honest case still passes.
+    assert!(
+        check_ui_l0_named("card", &card("TextRow(text: m.ticker)")).valid,
+        "a requested field must be readable"
+    );
+
+    // A typo. The field does not exist anywhere.
+    let typo = why(&card("TextRow(text: m.tickr)"));
+    assert!(
+        typo.contains("tickr") && typo.contains("ticker"),
+        "a misspelled field must be refused and the alternatives offered: {typo}"
+    );
+
+    // Real field, never requested — the subtler half, and the one a spell-check
+    // would miss. `sys.movers` can answer `marketcap`; this card did not ask.
+    let unasked = why(&card("TextValue(value: m.marketcap)"));
+    assert!(
+        unasked.contains("marketcap"),
+        "a field the card never requested must be refused: {unasked}"
+    );
+
+    // An INDEX is not a field. `lead.0.title` takes the first story and reads
+    // its title, and treating `0` as a field rejected every indexed read in the
+    // news card — a false positive that would have made the rule unshippable.
+    const INDEXED: &str = "# level: L0\n# model: news\n\
+        source lead sys.news(count: 1, fields: [title, author])\n\
+        view root Surface { TextTitle(text: lead.0.title) }\n";
+    assert!(
+        check_ui_l0_named("card", INDEXED).valid,
+        "an indexed read must survive: {}",
+        why(INDEXED)
+    );
+
+    // A source that takes no field list is not checked as if it had an empty
+    // one — `sys.locale` has no `fields:` argument at all.
+    const NO_FIELDS: &str = "# level: L0\n# model: weather\n\
+        source env.locale sys.locale()\n\
+        state u { shape: text, initial: env.locale.temp_unit }\n\
+        view root Surface { TextRow(text: u) }\n";
+    assert!(
+        check_ui_l0_named("card", NO_FIELDS).valid,
+        "a capability with no field list must stay unchecked: {}",
+        why(NO_FIELDS)
     );
 }
 
