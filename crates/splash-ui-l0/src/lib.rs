@@ -6189,13 +6189,25 @@ pub mod makepad {
                 let _ = writeln!(out, "{p}}}");
             }
             "Grid" => {
-                // Two columns, emitted as rows of two so the existing layout
-                // engine needs no grid primitive.
+                // Emitted as rows of `cols` so the existing layout engine needs
+                // no grid primitive.
+                //
+                // The column count was hardcoded to two, which is what every
+                // card in the corpus asks for — so `cols:` was accepted by the
+                // catalog, checked, and then ignored, and a `Grid(cols: 3)`
+                // rendered as pairs with nothing saying it had been overruled.
+                // Found by the conformance test rather than by a card.
+                let cols = match arg(node, "cols") {
+                    Some(NodeValue::Number(n)) if *n >= 1.0 => *n as usize,
+                    // A grid that did not say is a grid of two, which is what
+                    // the corpus means by a detail grid.
+                    _ => 2,
+                };
                 let _ = writeln!(
                     out,
                     "{p}View{{ width: Fill height: Fit flow: Down spacing: 8"
                 );
-                for pair in node.children.chunks(2) {
+                for pair in node.children.chunks(cols) {
                     let _ = writeln!(
                         out,
                         "{p}  View{{ width: Fill height: Fit flow: Right spacing: 8"

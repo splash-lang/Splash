@@ -5450,3 +5450,315 @@ view root Surface { TextHero(value: now.temp * 9) }
         "only the call is coerced, not the coefficient:\n{dsl2}"
     );
 }
+
+// ─── the catalog, made executable ─────────────────────────────────────────────
+//
+// The catalog says what a card MAY say. Nothing connected it to what a backend
+// DOES with what was said, so "the profile accepts it" and "the screen shows it"
+// were independent facts — and the gap was invisible, because a test asserts
+// what the code does, and the code was the thing dropping the attribute.
+//
+// Measured cost of relying on discipline instead: `width`, `align`, a numeric
+// `cond`, `tint`, every scalar argument, and the whole `Map` role were each
+// admitted by the catalog and then silently dropped or frozen by a lowering.
+// Six were found by looking at a phone rather than by any test.
+//
+// The check is DIFFERENTIAL rather than by marker: build two cards that differ
+// only in one attribute's value and require the lowered output to differ. That
+// asks the only question worth asking — "does changing this change the screen?"
+// — and needs no knowledge of how each attribute renders. A marker-based version
+// of this test reported nine false positives, because `unit: .money` reaches the
+// output as `$` and `tint:` as a direction rather than as the value.
+
+/// Two distinct values for one attribute, as written in a card.
+fn two_values(kind: &splash_ui_l0::catalog::ArgKind) -> Option<(String, String)> {
+    use splash_ui_l0::catalog::ArgKind::*;
+    Some(match kind {
+        // Every token, not a chosen pair: the first is usually the DEFAULT and
+        // a default legitimately emits nothing, so `start`-vs-`baseline` would
+        // report a working `align` as inert. The caller requires only that SOME
+        // token changes the output.
+        Token(set) | TokenOrPath(set) => {
+            if set.len() < 2 {
+                return None;
+            }
+            (format!(".{}", set[0]), format!(".{}", set[1]))
+        }
+        // Small and adjacent: a column count only shows up against a child
+        // count, so 11-vs-4242 chunked four children into one row either way and
+        // reported a working `cols:` as inert.
+        Number => ("1".into(), "3".into()),
+        Text | Any => ("\"P1\"".into(), "\"P4242\"".into()),
+        // Bound paths, so §4 is satisfied. The two differ in SIGN as well as
+        // magnitude: `tint` lowers to a DIRECTION, so two positive values are
+        // indistinguishable and the probe would call a working tint inert.
+        Path | Data => ("sa".into(), "sc".into()),
+        Event => ("ev_a".into(), "ev_b".into()),
+        // A predicate has no second form to vary that is not also a different
+        // shape; `a_predicate_argument_evaluates_to_a_boolean` covers it.
+        Bool => return None,
+    })
+}
+
+/// Attributes the catalog admits whose value changes NOTHING in either lowering.
+///
+/// This list may only shrink, and shrinking it is a deliberate edit. A new entry
+/// means an attribute was added to the catalog and to no lowering — a card that
+/// is accepted, renders, and is wrong.
+const INERT: &[(&str, &str)] = &[
+    // Dropped by both. Every card in the corpus passes `.page`, which is also
+    // the hardcoded default, so this is invisible today and wrong the first time
+    // a card asks for `.tight`.
+    ("Surface", "pad"),
+    ("Photo", "pad"),
+    // THE WHOLE ROLE. `Map` is admitted, checked, and lowered by neither
+    // backend: the kit emits `l0_unsupported("Map")` and makepad emits
+    // "no makepad lowering for Map". So `tests/fixtures/nav.card` — which §1.0
+    // cites as settling its central argument, "the same screen as the 664-line
+    // L2 exemplar in 54 lines" — draws an error box where the map goes. Admitted
+    // at L0 is true; the same screen is not. Closing it needs a kit function and
+    // a node kind, which live in other repos.
+    ("Map", "from"),
+    ("Map", "to"),
+    ("Map", "via"),
+    ("Map", "mode"),
+    ("Map", "zoom"),
+    // `unit` reaches NEITHER backend as a token: `.c` and `.f` both lower to
+    // `value + "°"`, byte for byte. So the weather card's units toggle — the one
+    // interaction it advertises, wired through state, dispatch and re-render —
+    // changes nothing on screen, and the temperature is always Celsius because
+    // the live call asks open-meteo for `current.temperature_2m` with no unit.
+    //
+    // The spec says "do not convert: the runtime formats by the unit token".
+    // The runtime never receives the unit token. Closing it is a DESIGN decision
+    // rather than a patch: either the unit travels to the helper (so the fetch
+    // asks for the right one) or the card is allowed to convert, and the second
+    // is what L0 has no expression form for.
+    ("TextHero", "unit"),
+    ("TextCaption", "unit"),
+    ("TextValue", "unit"),
+    ("Tile", "unit"),
+    // A text input is not wrapped by the width composer — the `Field` branch
+    // returns before it — so a field cannot be told how wide to be.
+    ("Field", "width"),
+];
+
+#[test]
+fn changing_a_declared_attribute_must_change_the_lowering() {
+    const CONTAINERS: &[&str] = &["Surface", "Photo", "Panel", "Card", "Col", "Row", "Grid"];
+    let mut inert: Vec<(String, String)> = Vec::new();
+
+    for (role, args) in splash_ui_l0::catalog::CONSTRUCTORS {
+        for (attr, kind) in *args {
+            let Some((first, second)) = two_values(kind) else {
+                continue;
+            };
+            // Every OTHER attribute is filled too, so the role is instantiated
+            // the way a card would instantiate it — several roles refuse a
+            // partial argument set, and a probe that omits them tests nothing.
+            let has_value = args.iter().any(|(n, _)| *n == "value");
+            let others: Vec<String> = args
+                .iter()
+                .filter(|(n, _)| n != attr)
+                // `valued()` prefers `value:` over `text:` deliberately, so a
+                // probe that fills both is asking which one wins, not whether
+                // `text` reaches anything.
+                .filter(|(n, _)| !(has_value && *n == "text"))
+                // and the converse: probing `text` while `value` is filled asks
+                // which wins, not whether `text` reaches anything.
+                .filter(|(n, _)| !(*attr == "text" && *n == "value"))
+                .filter_map(|(n, k)| two_values(k).map(|(v, _)| format!("{n}: {v}")))
+                .collect();
+            let build = |value: &str| {
+                let mut all = vec![format!("{attr}: {value}")];
+                all.extend(others.iter().cloned());
+                let arglist = format!("({})", all.join(", "));
+                // Four children, because a column count is only observable
+                // against something to divide: one child chunks into one row
+                // whatever `cols:` says, which reported a working `cols` inert.
+                let body = if CONTAINERS.contains(role) {
+                    " { Rule() Rule() Rule() Rule() }"
+                } else {
+                    ""
+                };
+                let head = "state sa { shape: number, initial: 11 }\n\
+                            state sb { shape: number, initial: 4242 }\n\
+                            state sc { shape: number, initial: -7 }\n\
+                            event ev_a { sa: set(1) }\n\
+                            event ev_b { sa: set(2) }\n";
+                if *role == "Surface" || *role == "Photo" {
+                    format!("{head}view root {role}{arglist} {{ Rule() Rule() Rule() Rule() }}\n")
+                } else {
+                    format!("{head}view root Surface {{ {role}{arglist}{body} }}\n")
+                }
+            };
+            let data = serde_json::json!({ "env": { "locale": {} }, "copy": {} });
+            let lower = |card: &str| -> Option<String> {
+                if !check_ui_l0_named("probe", card).valid {
+                    return None;
+                }
+                let root = realize(card, &data, RealizeLimits::default()).root?;
+                Some(format!(
+                    "{}\n{}",
+                    splash_ui_l0::kit::lower(&root),
+                    makepad::lower(&root)
+                ))
+            };
+            let (a, b) = (build(&first), build(&second));
+            let (Some(la), Some(lb)) = (lower(&a), lower(&b)) else {
+                // A probe the checker refuses proves nothing about the lowering.
+                // Skipped rather than failed: several roles constrain their
+                // arguments against each other in ways this generator does not
+                // model, and a false failure here would train people to ignore
+                // the list.
+                continue;
+            };
+            if la == lb {
+                inert.push((role.to_string(), attr.to_string()));
+            }
+        }
+    }
+
+    let known: Vec<(String, String)> = INERT
+        .iter()
+        .map(|(r, a)| (r.to_string(), a.to_string()))
+        .collect();
+    let mut fresh: Vec<_> = inert.iter().filter(|p| !known.contains(p)).collect();
+    fresh.sort();
+    assert!(
+        fresh.is_empty(),
+        "changing these attributes changed NOTHING in either lowering — the \
+         catalog admits them, the checker accepts them, and the screen ignores \
+         them: {fresh:#?}"
+    );
+    let mut fixed: Vec<_> = known.iter().filter(|p| !inert.contains(p)).collect();
+    fixed.sort();
+    assert!(
+        fixed.is_empty(),
+        "these now reach a lowering — delete them from INERT: {fixed:#?}"
+    );
+}
+
+/// A bound attribute must lower to a LIVE CALL where the backend can answer it.
+///
+/// The companion to the reachability check, and the half that caught more. An
+/// attribute can reach a lowering and still be wrong: `tint`, every scalar, a
+/// `value:` and a tap payload all reached the output as the number REALIZATION
+/// happened to see — right by accident against a seed blob, and on a live card,
+/// which carries no blob, frozen or empty.
+///
+/// That failure is worse than a drop, because a drop leaves a gap and this
+/// leaves a plausible number. It is what put a stale `$181` open under a live
+/// `$207` price, and a red `+29.45%` beside a green `+29.20%`.
+///
+/// DIFFERENTIAL, and it has to be: the same attribute is bound once to a source
+/// the backend answers and once to a state cell holding the same number. A
+/// lowering that emits the call distinguishes them; one that reaches for the
+/// realized value cannot, and produces identical output. An earlier version of
+/// this test asserted only that SOME call appeared anywhere in the output — with
+/// every argument bound, that passed even with `tint` deliberately broken.
+#[test]
+fn a_bound_attribute_must_lower_to_a_live_call() {
+    use splash_ui_l0::catalog::ArgKind;
+    const CONTAINERS: &[&str] = &["Surface", "Photo", "Panel", "Card", "Col", "Row", "Grid"];
+    // Lowered by neither backend, so there is no call to look for. Tracked in
+    // INERT rather than counted twice.
+    const SKIP_ROLES: &[&str] = &["Map"];
+
+    let mut stale: Vec<(String, String)> = Vec::new();
+    let mut checked = 0usize;
+    for (role, args) in splash_ui_l0::catalog::CONSTRUCTORS {
+        if SKIP_ROLES.contains(role) {
+            continue;
+        }
+        for (attr, kind) in *args {
+            if !matches!(kind, ArgKind::Path | ArgKind::Data) {
+                continue;
+            }
+            // `one` is what varies: the attribute under test binds a SOURCE in
+            // the first card and a STATE in the second. Everything else stays
+            // source-bound in both, so any difference is this attribute's.
+            let build = |one: &str| {
+                let all: Vec<String> = args
+                    .iter()
+                    .filter_map(|(n, k)| match k {
+                        ArgKind::Path | ArgKind::Data if n == attr => Some(format!("{n}: {one}")),
+                        ArgKind::Path | ArgKind::Data => Some(format!("{n}: q.last")),
+                        ArgKind::Text => Some(format!("{n}: q.name")),
+                        ArgKind::Token(set) | ArgKind::TokenOrPath(set) => {
+                            Some(format!("{n}: .{}", set[0]))
+                        }
+                        ArgKind::Number => Some(format!("{n}: 2")),
+                        _ => None,
+                    })
+                    .collect();
+                let arglist = format!("({})", all.join(", "));
+                let body = if CONTAINERS.contains(role) {
+                    " { Rule() }"
+                } else {
+                    ""
+                };
+                let head = "source q sys.quote(ticker: \"NVDA\", fields: [last, name])\n\
+                            state held { shape: number, initial: 1 }\n";
+                if *role == "Surface" || *role == "Photo" {
+                    format!("{head}view root {role}{arglist} {{ Rule() }}\n")
+                } else {
+                    format!("{head}view root Surface {{ {role}{arglist}{body} }}\n")
+                }
+            };
+            // The state's initial IS the seeded source value, so the two cards
+            // realize to the same number and only the LOWERING can tell them
+            // apart.
+            let data = serde_json::json!({
+                "q": { "last": 1.0, "name": "seeded" }, "held": 1.0,
+                "env": { "locale": {} }, "copy": {}
+            });
+            let lower = |card: &str| -> Option<String> {
+                if !check_ui_l0_named("probe", card).valid {
+                    return None;
+                }
+                let root = realize(card, &data, RealizeLimits::default()).root?;
+                Some(format!(
+                    "{}\n{}",
+                    splash_ui_l0::kit::lower(&root),
+                    makepad::lower(&root)
+                ))
+            };
+            let (Some(live), Some(from_state)) = (lower(&build("q.last")), lower(&build("held")))
+            else {
+                continue;
+            };
+            checked += 1;
+            if live == from_state {
+                stale.push((role.to_string(), attr.to_string()));
+            }
+        }
+    }
+    assert!(
+        checked >= 20,
+        "the probe generator built almost nothing ({checked} attributes) — a \
+         vacuous pass here is worse than a failure"
+    );
+
+    let known: Vec<(String, String)> = STALE
+        .iter()
+        .map(|(r, a)| (r.to_string(), a.to_string()))
+        .collect();
+    let mut fresh: Vec<_> = stale.iter().filter(|p| !known.contains(p)).collect();
+    fresh.sort();
+    assert!(
+        fresh.is_empty(),
+        "these are bound to a capability the backend ANSWERS and still lower to \
+         the realized value — on a live card, which carries no seed blob, they \
+         render frozen or empty: {fresh:#?}"
+    );
+    let mut fixed: Vec<_> = known.iter().filter(|p| !stale.contains(p)).collect();
+    fixed.sort();
+    assert!(
+        fixed.is_empty(),
+        "these now lower to a call — delete them from STALE: {fixed:#?}"
+    );
+}
+
+/// Bound attributes that still lower to the realized value. Must only shrink.
+const STALE: &[(&str, &str)] = &[];
