@@ -430,9 +430,27 @@ Remaining:
   a shared helper definition. That mapping is what would end the duplication of
   `sys.*` across four hosts, where every divergence so far has produced a
   device-visible bug.
-- **Reconciliation is derived but not applied.** `record_dependencies`,
+- **Reconciliation is derived and deliberately not applied.** `record_dependencies`,
   `dirty_records` and `patch_points` compute what a state write invalidates;
-  realization still rebuilds the tree rather than patching those points.
+  realization still rebuilds the tree rather than patching those points. **Measured
+  on a OnePlus 6, that costs nothing worth recovering**: 30 taps each triggering a
+  complete rebuild of the weather card — 62 nodes, 28 live calls, the whole kit
+  script re-evaluated, the widget tree discarded and rebuilt — take the same wall
+  clock as 30 taps on a dead region, with the difference inside the ±25 ms noise of
+  the method and negative on one run. The parts assumed expensive are not: realize
+  plus lower is 0.14–0.22 ms, and the `sys.*` helpers are URL-cached, so a rebuild's
+  live calls are cache hits rather than fetches. A 62-node card and an 11-node card
+  cost the same, which is the tell that the fixed overhead dominates. So the tree
+  work is free at these card sizes, and patching would save nothing measurable while
+  costing the renderer a per-record addressing scheme it does not have.
+
+  What *was* worth fixing is the work that accomplished nothing: a transition
+  writing the value already in the cell reported a change, so tapping the selected
+  chip rebuilt the card to redraw the identical screen. That is fixed. The
+  dependency tracking was also completed — three under-approximations, each of which
+  would have put a stale value on screen — but on its own merits: they were live
+  defects in `dirty_records` and in the checker regardless of whether patching ever
+  ships. Revisit if a card ever gets large enough to move the number.
 - **`makepad::lower` is in the wrong crate.** It belongs in a backend crate, not
   in `splash-core`, which otherwise names no renderer.
 - **L1 is implemented ahead of its specification.** A card declaring `level: L1`
