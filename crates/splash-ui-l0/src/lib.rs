@@ -5641,6 +5641,40 @@ pub mod makepad {
             // LIVE card does not have -- so every venue row rendered an em dash
             // and the card looked like a fetch that never landed. Measured:
             // "list museums in Kyoto" produced eight rows of "—".
+            // The device's last-known fix, read synchronously from the platform
+            // global. No network, so unlike every other arm here it cannot be
+            // pending — but it CAN be absent, and the VM answers -9999 for a
+            // number with no fix rather than an em dash. A card guards with
+            // `ok` before trusting the coordinates.
+            //
+            // On Android this is fed by the platform LocationListener, which is
+            // the same path that currently crashes the shipping activity with a
+            // missing `LocationListener$-CC` desugaring class. So this arm makes
+            // the card correct and does not by itself make GPS usable.
+            "sys.gps" => {
+                let key = match binding.field.as_str() {
+                    "accuracy" => "acc",
+                    f @ ("lat" | "lon" | "ok") => f,
+                    _ => return None,
+                };
+                Some(format!("sys.gps({key:?})"))
+            }
+            // Free-text PLACE search, indexed like `sys.places`. `searchnum`
+            // answers the numbers, `search` the words — the same split
+            // `geocode`/`geocodenum` uses, and for the same reason: a coordinate
+            // fed to another call has to arrive as a number.
+            "sys.search" => {
+                let (index, field) = binding.field.split_once('.')?;
+                index.parse::<u32>().ok()?;
+                let query = arg("query")?;
+                match field {
+                    "lat" | "lon" => Some(format!("sys.searchnum({query:?}, {index}, {field:?})")),
+                    "name" => Some(format!("sys.search({query:?}, {index}, \"name\")")),
+                    // `id` and `distance` have no answer in the helper, so they
+                    // fall back rather than emitting a call that returns "".
+                    _ => None,
+                }
+            }
             "sys.places" => {
                 let (index, field) = binding.field.split_once('.')?;
                 index.parse::<u32>().ok()?;
@@ -6127,6 +6161,69 @@ pub mod makepad {
                 );
                 children(node, depth, out);
                 let _ = writeln!(out, "{p}}}");
+            }
+            // The card names a TRIP; the widget draws the route.
+            //
+            // `Map` was admitted by the catalog and lowered by NEITHER backend,
+            // so `nav.card` — which §1.0 cites as settling its central argument,
+            // "the same screen as the 664-line L2 exemplar in 54 lines" — drew
+            // "no makepad lowering for Map" where the map goes. Admitted at L0
+            // was true; the same screen was not.
+            //
+            // `MapView` does not fetch its own route despite the catalog note
+            // saying so: `nav_polyline` is a live field it renders and does not
+            // populate. But `sys.navroute` answers the polyline, and the helper's
+            // own comment prescribes exactly this pairing — so the fetch is the
+            // card's declared source resolved into a call, which is the same
+            // shape every other live value takes.
+            "Map" => {
+                // Both endpoints are SOURCE names rather than coordinates, so
+                // each is asked for its own axis: `from: here` becomes
+                // `sys.gps("lat")` and `sys.gps("lon")`.
+                let coord = |name: &str, axis: &str| -> Option<String> {
+                    let (_, binding) = node.bindings.iter().find(|(n, _)| n == name)?;
+                    // A collection answers `0.lat` and a scalar source answers
+                    // `lat`; try the scalar spelling first.
+                    for field in [axis.to_owned(), format!("0.{axis}")] {
+                        let probe = SourceBinding {
+                            field,
+                            ..binding.clone()
+                        };
+                        if let Some(call) = vm_call(&probe) {
+                            return Some(call);
+                        }
+                    }
+                    None
+                };
+                // The widget's own vocabulary: 1 is the chase camera, 2 the
+                // north-up route preview, anything else a flat map.
+                let mode = match arg(node, "mode") {
+                    Some(NodeValue::Token(t)) if t == "drive" => "3d",
+                    Some(NodeValue::Token(t)) if t == "plan" => "plan",
+                    _ => "",
+                };
+                let zoom = match arg(node, "zoom") {
+                    Some(NodeValue::Number(n)) => trim_num(*n),
+                    _ => "15".to_owned(),
+                };
+                let _ = write!(
+                    out,
+                    "{p}MapView{{ width: Fill height: 240 nav_mode: {mode:?} zoom: {zoom}"
+                );
+                if let (Some(a), Some(o)) = (coord("from", "lat"), coord("from", "lon")) {
+                    let _ = write!(out, " center_lat: {a} center_lon: {o}");
+                    if let (Some(b), Some(p2)) = (coord("to", "lat"), coord("to", "lon")) {
+                        // `via` is carried by the helper's sixth argument and is
+                        // not emitted yet: it is a value the card supplies as a
+                        // list, and threading it needs the list rendered the way
+                        // `sys.route` renders it. Recorded rather than guessed.
+                        let _ = write!(
+                            out,
+                            " nav_polyline: sys.navroute({a}, {o}, {b}, {p2}, \"polyline\")"
+                        );
+                    }
+                }
+                let _ = writeln!(out, " }}");
             }
             "Photo" => {
                 // Overlay: photo, scrim, then the column. A `Fit` overlay takes

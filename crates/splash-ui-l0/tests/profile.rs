@@ -5511,18 +5511,16 @@ const INERT: &[(&str, &str)] = &[
     // a card asks for `.tight`.
     ("Surface", "pad"),
     ("Photo", "pad"),
-    // THE WHOLE ROLE. `Map` is admitted, checked, and lowered by neither
-    // backend: the kit emits `l0_unsupported("Map")` and makepad emits
-    // "no makepad lowering for Map". So `tests/fixtures/nav.card` — which §1.0
-    // cites as settling its central argument, "the same screen as the 664-line
-    // L2 exemplar in 54 lines" — draws an error box where the map goes. Admitted
-    // at L0 is true; the same screen is not. Closing it needs a kit function and
-    // a node kind, which live in other repos.
+    // `from`/`to`/`via` name SOURCES, and this check varies a state-bound value
+    // — which a `Map` correctly ignores, because a trip endpoint is a place and
+    // not a number. Their liveness is asserted by
+    // `a_bound_attribute_must_lower_to_a_live_call` instead, which binds a real
+    // capability. `via` is additionally not emitted yet: the helper carries it in
+    // a sixth argument and threading a card's list through needs the list
+    // rendered the way `sys.route` renders it.
     ("Map", "from"),
     ("Map", "to"),
     ("Map", "via"),
-    ("Map", "mode"),
-    ("Map", "zoom"),
     // `unit` reaches NEITHER backend as a token: `.c` and `.f` both lower to
     // `value + "°"`, byte for byte. So the weather card's units toggle — the one
     // interaction it advertises, wired through state, dispatch and re-render —
@@ -5661,8 +5659,10 @@ fn changing_a_declared_attribute_must_change_the_lowering() {
 fn a_bound_attribute_must_lower_to_a_live_call() {
     use splash_ui_l0::catalog::ArgKind;
     const CONTAINERS: &[&str] = &["Surface", "Photo", "Panel", "Card", "Col", "Row", "Grid"];
-    // Lowered by neither backend, so there is no call to look for. Tracked in
-    // INERT rather than counted twice.
+    // `Map` is checked by `a_map_lowers_a_live_route` instead. This generator
+    // binds every argument to one capability, and a trip endpoint is a PLACE —
+    // asking `sys.quote` for a latitude answers nothing, so the generic probe
+    // would report a working `Map` as stale.
     const SKIP_ROLES: &[&str] = &["Map"];
 
     let mut stale: Vec<(String, String)> = Vec::new();
@@ -5762,3 +5762,72 @@ fn a_bound_attribute_must_lower_to_a_live_call() {
 
 /// Bound attributes that still lower to the realized value. Must only shrink.
 const STALE: &[(&str, &str)] = &[];
+
+/// A `Map` draws a LIVE route between two declared places.
+///
+/// `Map` was admitted by the catalog and lowered by neither backend, so
+/// `nav.card` — which §1.0 cites as settling its central argument, "the same
+/// screen as the 664-line L2 exemplar in **54 lines**" — drew an error box where
+/// the map goes. Admitted at L0 was true; the same screen was not.
+///
+/// The catalog note said the widget fetches its own route. It does not:
+/// `nav_polyline` is a live field `MapView` renders and never populates. So the
+/// fetch is the card's declared source resolved into a call, which is the shape
+/// every other live value already takes — and the pairing the helper's own
+/// comment prescribes.
+#[test]
+fn a_map_lowers_a_live_route() {
+    const CARD: &str = r#"
+source here sys.gps()
+source dest sys.search(query: state.q, count: 1, fields: [name, lat, lon])
+state q { shape: text, initial: "SFO" }
+view root Surface {
+  TextRow(text: dest.0.name)
+  Map(mode: .drive, from: here, to: dest, zoom: 16)
+}
+"#;
+    let report = check_ui_l0_named("nav", CARD);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    // Seeded coordinates the lowering COULD fall back to. Reaching for them
+    // instead of emitting the calls is the defect.
+    let data = serde_json::json!({
+        "here": { "lat": 37.3, "lon": -122.0, "ok": 1 },
+        "dest": { "0": { "name": "X", "lat": 37.4, "lon": -121.9 } },
+        "q": "SFO", "env": { "locale": {} }, "copy": {}
+    });
+    let root = realize(CARD, &data, RealizeLimits::default())
+        .root
+        .expect("realizes");
+    let mk = makepad::lower(&root);
+
+    assert!(
+        !mk.contains("no makepad lowering for Map"),
+        "the role must lower at all:\n{mk}"
+    );
+    // The camera is the widget's own vocabulary, not L0's token.
+    assert!(
+        mk.contains("nav_mode: \"3d\"") && mk.contains("zoom: 16"),
+        "the declared mode and zoom must reach the widget:\n{mk}"
+    );
+    // Every coordinate LIVE, from the source each endpoint names — a device fix
+    // for the origin and a place search for the destination.
+    assert!(
+        mk.contains("center_lat: sys.gps(\"lat\")") && mk.contains("center_lon: sys.gps(\"lon\")"),
+        "the origin must centre the map on the live fix:\n{mk}"
+    );
+    assert!(
+        mk.contains("nav_polyline: sys.navroute("),
+        "the route must be fetched, not seeded:\n{mk}"
+    );
+    assert!(
+        mk.contains("sys.searchnum(\"SFO\", 0, \"lat\")"),
+        "the destination's coordinates come from the search that found it:\n{mk}"
+    );
+    // And none of the seeded numbers may appear as a literal.
+    for seeded in ["37.3", "-122", "37.4", "-121.9"] {
+        assert!(
+            !mk.contains(seeded),
+            "{seeded} is the seeded coordinate and must not be lowered:\n{mk}"
+        );
+    }
+}
