@@ -6587,7 +6587,10 @@ pub struct DispatchOutcome {
     /// Whether any transition committed. False means refused or unknown — see
     /// §3, a batch that does not fully resolve does not partially apply.
     pub applied: bool,
-    /// The state paths written, in the order the batch wrote them.
+    /// The state paths whose value MOVED, in the order the batch wrote them. A
+    /// transition that writes the value already there is committed and not
+    /// reported: a host rebuilds on any non-empty outcome, and rebuilding a card
+    /// to redraw the identical screen is the cost of tapping a selected chip.
     pub changed: Vec<String>,
     /// The declared sources those writes invalidate, following the dependency
     /// cascade. The host should refetch these before the next realization.
@@ -6699,7 +6702,9 @@ fn dispatch_writes(
     // left the earlier writes standing when a later one could not be computed —
     // a half-applied event, which is the thing atomicity exists to prevent.
     // Stage every write first, commit only if the whole batch resolves.
-    let mut staged: Vec<(String, serde_json::Value)> = Vec::new();
+    // (target, next, effective current) — the third is what decides whether this
+    // transition is a change at all.
+    let mut staged: Vec<(String, serde_json::Value, serde_json::Value)> = Vec::new();
     // §5.12 writes are staged alongside the cells, so §3's atomicity covers both:
     // a batch that sets a preference AND appends to a list must do neither if the
     // preference cannot be resolved.
@@ -6747,8 +6752,8 @@ fn dispatch_writes(
         let current = staged
             .iter()
             .rev()
-            .find(|(t, _)| *t == transition.target)
-            .map(|(_, v)| v.clone())
+            .find(|(t, _, _)| *t == transition.target)
+            .map(|(_, v, _)| v.clone())
             .or_else(|| store.get(instance_key, &transition.target).cloned())
             .or_else(|| declared_initial.clone())
             .unwrap_or_else(|| initial_for(&state.shape));
@@ -6793,18 +6798,37 @@ fn dispatch_writes(
             },
             _ => return (Vec::new(), Vec::new()),
         };
-        staged.push((transition.target.clone(), next));
+        staged.push((transition.target.clone(), next, current));
     }
 
-    // Commit, and report what was written. The targets are what a host needs
-    // to know which sources went stale -- discarding them is why §5.9's
-    // invalidation story had pieces that nothing joined.
+    // Commit, and report what CHANGED. The targets are what a host needs to know
+    // which sources went stale -- discarding them is why §5.9's invalidation
+    // story had pieces that nothing joined.
+    //
+    // A transition that writes the value already there is not a change, and
+    // reporting it as one is not free: a host rebuilds a card on any non-empty
+    // outcome, so tapping the already-selected chip cost a full realize, a full
+    // lowering, a full VM pass over every live call on the card, and a widget
+    // rebuild -- to arrive at the identical screen. Measured on the stock card,
+    // that is 11 nodes and every `sys.movers` call re-issued for nothing; the
+    // weather card is 62 nodes and 28 calls.
+    //
+    // The comparison is against the EFFECTIVE current value -- an earlier write
+    // in this same batch, else the stored cell, else the declared initial -- so
+    // a first tap that selects what was already the initial is a no-op too.
+    //
+    // The batch is still staged and validated in full before any of this: §3's
+    // atomicity is about whether a batch may partially apply, not about which of
+    // its transitions moved. A batch that sets one cell to a new value and
+    // another to the value it holds reports the first and rebuilds once.
     let mut written = Vec::new();
-    for (target, value) in staged {
+    for (target, value, previous) in staged {
+        let unchanged = value == previous;
         store.set(instance_key, &target, value);
-        if !written.contains(&target) {
-            written.push(target);
+        if unchanged || written.contains(&target) {
+            continue;
         }
+        written.push(target);
     }
     (written, durable)
 }

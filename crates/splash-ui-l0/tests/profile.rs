@@ -5165,3 +5165,71 @@ view root Surface { TextHero(value: shares * quote.last) }
         "the price must stay live and the multiply must reach the backend:\n{dsl}"
     );
 }
+
+/// A transition that writes the value already there is not a change.
+///
+/// A host rebuilds a card on any non-empty outcome, so reporting a no-op cost a
+/// full realize, a full lowering, a full VM pass over every live call, and a
+/// widget rebuild — to arrive at the identical screen. Tapping the chip that is
+/// already selected is the ordinary way to hit it, and it happens on every card
+/// with a range or filter row.
+///
+/// The comparison is against the EFFECTIVE current value — an earlier write in
+/// the same batch, else the stored cell, else the declared initial — so
+/// selecting what was already the initial is a no-op on the FIRST tap too,
+/// before any cell exists to compare against.
+#[test]
+fn writing_the_value_already_there_is_not_a_change() {
+    const CARD: &str = r#"
+# level: L0
+# model: t
+state range { shape: enum[d1, w1], initial: .d1 }
+event set_range { range: set($value) }
+view root Surface {
+  Chip(text: "1D", active: range == .d1, on_tap: set_range, value: "d1")
+  Chip(text: "1W", active: range == .w1, on_tap: set_range, value: "w1")
+}
+"#;
+    let data = serde_json::json!({ "env": { "locale": {} } });
+    let mut store = splash_ui_l0::InstanceStore::default();
+    let tap = |store: &mut splash_ui_l0::InstanceStore, v: &str| {
+        splash_ui_l0::dispatch_reporting(
+            CARD,
+            store,
+            "root",
+            "set_range",
+            Some(&serde_json::Value::String(v.into())),
+            &data,
+        )
+    };
+
+    // `d1` IS the declared initial and no cell exists yet, so the first tap on
+    // the already-selected chip changes nothing.
+    let out = tap(&mut store, "d1");
+    assert!(
+        !out.applied && out.changed.is_empty(),
+        "selecting the initial is a no-op: {out:?}"
+    );
+    // A real move still reports, and still invalidates.
+    let out = tap(&mut store, "w1");
+    assert!(
+        out.applied && out.changed.iter().any(|c| c == "range"),
+        "a real change must still report: {out:?}"
+    );
+    // And the same tap repeated is a no-op against the STORED cell.
+    let out = tap(&mut store, "w1");
+    assert!(
+        !out.applied && out.changed.is_empty(),
+        "re-tapping the selected chip is a no-op: {out:?}"
+    );
+    // The cell still holds `w1` — what changed is REPORTING, not storage. Asked
+    // behaviourally rather than by reading the store, because card state lives
+    // under its own fixed key (§5.1) and this is the property that matters:
+    // going back to `d1` is a real change, which it could not be if the no-op
+    // tap had reset or dropped the cell.
+    let out = tap(&mut store, "d1");
+    assert!(
+        out.applied && out.changed.iter().any(|c| c == "range"),
+        "the cell must still hold w1, so d1 is a move: {out:?}"
+    );
+}
