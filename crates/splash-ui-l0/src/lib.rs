@@ -6235,7 +6235,7 @@ pub mod makepad {
                 };
                 let _ = write!(
                     out,
-                    "{p}MapView{{ width: Fill height: 240 nav_mode: {mode:?} zoom: {zoom} \
+                    "{p}MapView{{ width: Fill height: 452 nav_mode: {mode:?} zoom: {zoom} \
                      center_lat: {lat} center_lon: {lon}"
                 );
                 if poly != "\"\"" {
