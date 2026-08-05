@@ -40,7 +40,7 @@ view list  Col {
              Panel {
                for m in movers key m.ticker {
                  Row(align: .center, on_tap: open_quote, value: m.ticker) {
-                   Col(gap: 2) {
+                   Col(gap: 2, width: .fill) {
                      TextRow(text: m.ticker)
                      TextCaption(text: m.name, width: .fill)
                    }

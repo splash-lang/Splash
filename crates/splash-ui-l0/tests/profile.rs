@@ -667,9 +667,14 @@ fn a_realized_card_lowers_to_renderable_dsl() {
         dsl.contains("\"Kyoto\""),
         "the bound city should be concrete"
     );
+    // Sources the backend can answer lower to LIVE calls. This asserted the
+    // opposite — that realization had resolved everything from the seeded blob —
+    // which was true only while `weather` and `photo` had no translation. A card
+    // that renders the seed is a card that shows what the host happened to hand
+    // it, not what is true now.
     assert!(
-        !dsl.contains("sys."),
-        "realization already resolved sources: {dsl}"
+        dsl.contains("sys.weather("),
+        "the forecast must be live, not seeded: {dsl}"
     );
 }
 
@@ -960,24 +965,27 @@ fn a_capability_the_backend_cannot_answer_keeps_its_seeded_value() {
     );
     assert!(dsl.contains("58.3"), "P/E keeps its seeded value:\n{dsl}");
 
-    // `open` is the one this test exists for. `sys.stock` ACCEPTS the key, so
-    // the mapping looked correct and the DSL was well-formed — but it resolves
-    // `regularMarketOpen`, which the Yahoo chart response does not carry, while
-    // `regularMarketDayHigh` and `…DayLow` beside it do. On device that rendered
-    // `$—` where the seeded blob held a real opening price.
+    // `open` USED to be in this test, as the case the fallback existed for.
+    // That was the wrong lesson. `sys.stock` accepted the key and resolved
+    // `regularMarketOpen`, which the Yahoo chart response does not carry — so
+    // the call drew `$—`, and excluding it left a SEEDED opening price sitting
+    // under a live one: $181 open beneath a $207 price on a +3% day, arithmetic
+    // that does not work and was the only thing on screen that said so.
     //
-    // A helper accepting a key is not evidence it can answer it, and no unit
-    // test could have found this: it took a screenshot.
+    // Falling back is right when nothing upstream can answer. It is not a way to
+    // paper over a helper reading the wrong key. The open IS in the response,
+    // under `indicators.quote.0.open.0`, so the helper was fixed and the call is
+    // emitted like any other.
     assert!(
-        !dsl.contains(r#"sys.stock("NVDA", "open")"#),
-        "open must not be emitted live — the field is absent upstream:\n{dsl}"
+        dsl.contains(r#"sys.stock("NVDA", "open")"#),
+        "open resolves upstream now and must be live:\n{dsl}"
     );
     assert!(
-        dsl.contains("$181"),
-        "open keeps its seeded value instead:\n{dsl}"
+        !dsl.contains("$181"),
+        "the seeded opening price must be gone, not sitting beside a live one:\n{dsl}"
     );
-    // High and low DO resolve, so they must still be live — otherwise the fix
-    // for `open` could quietly have been "stop emitting calls at all".
+    // High and low must still be live too — otherwise a regression here could
+    // pass by quietly emitting no calls at all.
     assert!(
         dsl.contains(r#"sys.stock("NVDA", "high")"#) && dsl.contains(r#"sys.stock("NVDA", "low")"#),
         "high and low resolve upstream and must stay live:\n{dsl}"
@@ -4384,8 +4392,12 @@ view root Surface { for p, i in parks key p.id { TextCaption(text: p.distance, s
         ("makepad", makepad::lower(&root)),
         ("kit", splash_ui_l0::kit::lower(&root)),
     ] {
+        // `sys.places` is answered live now, so the caption is the CALL plus
+        // the suffix rather than the seeded literal plus the suffix. What this
+        // test guards is that the suffix survives on a text-valued caption at
+        // all — it was silently dropped there while working on `value:`.
         assert!(
-            dsl.contains("300 m away"),
+            dsl.contains(r#"+ " away""#),
             "{name} dropped the suffix from a text-valued caption:\n{dsl}"
         );
     }
@@ -4486,6 +4498,121 @@ view root Surface {
     );
 }
 
+/// A declared `width` must REACH the kit — the profile's recurring defect.
+///
+/// The catalog admits `width` on five text roles, `check_ui_l0` accepted it, and
+/// the kit lowering dropped it: every text role went through one arm that
+/// emitted `f(body)` and nothing else. The news list asked for
+/// `TextRow(text: story.title, width: .fill)` and got a non-wrapping row, so
+/// every story title clipped mid-word — "A new approach to incremental c" — while
+/// the same card through `makepad::lower` wrapped correctly.
+///
+/// That is what makes this class hard to see: the card is right, the profile
+/// accepts it, one backend honours it, and the screen looks like a card whose
+/// titles are simply short.
+#[test]
+fn a_declared_width_must_reach_the_kit() {
+    const CARD: &str = r#"
+# level: L0
+# model: news
+source feed sys.news(count: 2, fields: [title, points])
+view root Surface {
+  Panel {
+    for s, i in feed key s.title {
+      Row {
+        TextRow(text: i, width: .rank)
+        TextRow(text: s.title, width: .fill)
+        TextCaption(value: s.points)
+      }
+    }
+  }
+}
+"#;
+    let data = serde_json::json!({
+        "feed": [{"title": "A new approach to incremental compilation", "points": 288}]
+    });
+    let root = realize(CARD, &data, RealizeLimits::default())
+        .root
+        .expect("realizes");
+    let dsl = splash_ui_l0::kit::lower(&root);
+
+    // `.fill` is what lets a long headline wrap rather than run off the edge.
+    assert!(
+        dsl.contains("l0_wide(l0_row_text("),
+        "width: .fill must wrap the role in the kit's filling helper:\n{dsl}"
+    );
+    // A fixed column passes the TOKEN — the theme owns how wide "rank" is, and a
+    // lowering that emitted a pixel count would be styling.
+    assert!(
+        dsl.contains("l0_colw(l0_row_text(") && dsl.contains(", \"rank\")"),
+        "a fixed-width token must reach the kit as the token:\n{dsl}"
+    );
+    // The caption declared no width, so it must not be wrapped at all: a
+    // default restated on every node is a default nobody can change.
+    let caption = dsl
+        .lines()
+        .find(|l| l.contains("l0_caption("))
+        .expect("the caption lowers");
+    assert!(
+        !caption.contains("l0_wide") && !caption.contains("l0_colw"),
+        "an undeclared width must emit no wrapper:\n{caption}"
+    );
+}
+
+/// `align` and a numeric `cond` must reach the kit — the same defect twice more.
+///
+/// Both were found by looking at the screen rather than at the tests, which is
+/// the point: the profile ACCEPTS an attribute it lists, so a lowering that
+/// drops one produces a card that is valid, renders, and is wrong. The weather
+/// card centres its header and draws a different icon per day; without these it
+/// rendered hard left with seven identical suns, and nothing failed.
+#[test]
+fn align_and_a_numeric_condition_must_reach_the_kit() {
+    const CARD: &str = r#"
+# level: L0
+# model: weather
+source now  sys.weather(lat: 35, lon: 135, fields: [temp, cond])
+source week sys.weather(lat: 35, lon: 135, days: 2, fields: [dayname, cond])
+view root Surface {
+  Col(align: .center) {
+    WeatherIcon(cond: now.cond, size: .hero)
+    TextHero(value: now.temp)
+  }
+  for d, i in week.days key d.dayname {
+    Row(align: .center) {
+      TextRow(text: d.dayname, width: .day)
+      WeatherIcon(cond: d.cond, size: .row)
+    }
+  }
+}
+"#;
+    let data = serde_json::json!({
+        "now": {"temp": 18, "cond": 2},
+        "week": {"days": [{"dayname": "Mon", "cond": 3}, {"dayname": "Tue", "cond": 0}]}
+    });
+    let root = realize(CARD, &data, RealizeLimits::default())
+        .root
+        .expect("realizes");
+    let dsl = splash_ui_l0::kit::lower(&root);
+
+    assert!(
+        dsl.contains("l0_aligned(l0_col(") && dsl.contains(", \"center\")"),
+        "align: .center must reach the kit:\n{dsl}"
+    );
+    // A NUMBER. Matching only text and tokens emptied every one of these.
+    assert!(
+        dsl.contains("l0_weathericon(2, \"hero\")"),
+        "a numeric cond and its size must both reach the kit:\n{dsl}"
+    );
+    // And the per-item conditions must DIFFER — one shared value for every row
+    // is exactly what the bug produced, and a test that only checked "a number
+    // arrives" would have passed on it.
+    assert!(
+        dsl.contains("l0_weathericon(3, \"row\")") && dsl.contains("l0_weathericon(0, \"row\")"),
+        "each loop item's own condition must reach the kit:\n{dsl}"
+    );
+}
+
 /// The nav card §1.0 said to write instead of argue about.
 ///
 /// The shipping trip planner is 664 lines of Splash DSL and classifies at L2.
@@ -4552,11 +4679,11 @@ fn a_live_source_survives_a_loop() {
     // Row 0 and row 1 must each call for their OWN index — one call reused, or
     // an index that does not advance, is the failure this catches.
     assert!(
-        dsl.contains(r#"sys.movers(0, "symbol")"#),
+        dsl.contains(r#"sys.movers(0, "symbol", "")"#),
         "the first row must be live:\n{dsl}"
     );
     assert!(
-        dsl.contains(r#"sys.movers(1, "symbol")"#),
+        dsl.contains(r#"sys.movers(1, "symbol", "")"#),
         "and the second must ask for index 1:\n{dsl}"
     );
     // The seeded tickers must be GONE, or the card shows a stale value beside a
@@ -4564,5 +4691,78 @@ fn a_live_source_survives_a_loop() {
     assert!(
         !dsl.contains("\"NVDA\"") && !dsl.contains("\"AAPL\""),
         "a live call must replace the seeded literal:\n{dsl}"
+    );
+}
+
+/// `signed_money` reaches the screen live, beside its own percentage.
+///
+/// The two describe ONE move. The percentage was live and the money was not, so
+/// the stock header rendered a fixture's `+$3.10` next to a live `+3.55%` —
+/// numbers that cannot both be true, on the same line, in the same colour.
+///
+/// The cause was a formatting one: `signed_money` puts the currency inside the
+/// sign (`+$7.13`) and a lowering can only PREPEND, so `"$" + "+7.13"` would
+/// have rendered `$+7.13`. Giving up and keeping the seeded value looked like
+/// the safe choice and was the wrong one — a stale number that still looks live
+/// is exactly what §4 exists to prevent.
+#[test]
+fn a_signed_money_change_is_live_not_seeded() {
+    let data = serde_json::json!({
+        "movers": [], "selected": "NVDA", "range": "m1", "env": {"locale":{}},
+        "quote": {"name":"NVIDIA","last":184.2,"change":3.1,"pct":1.7,"open":181.0,
+                  "high":185.6,"low":180.2,"volume":41200000.0,
+                  "mktcap":4520000000000.0,"pe":58.3},
+        "copy": {"movers":"Top Movers","open":"Open","high":"High","low":"Low",
+                 "volume":"Volume","mktcap":"Mkt Cap","pe":"P/E"}
+    });
+    let report = realize(STOCK, &data, RealizeLimits::default());
+    let dsl = makepad::lower(&report.root.expect("root"));
+
+    assert!(
+        dsl.contains(r#"sys.stock("NVDA", "changemoney")"#),
+        "the money change must be a live call:\n{dsl}"
+    );
+    // And nothing prepends a second currency symbol — the helper already put it
+    // where it belongs.
+    assert!(
+        !dsl.contains(r#""$" + sys.stock("NVDA", "changemoney")"#),
+        "the sign is inside the symbol; a prefix would render `$+7.13`:\n{dsl}"
+    );
+    // The seeded figure must be gone rather than sitting beside the live one.
+    assert!(
+        !dsl.contains("+$3.10"),
+        "the seeded money change must not survive:\n{dsl}"
+    );
+    // Its percentage stays live too — a regression that stopped emitting calls
+    // entirely would otherwise satisfy the assertions above.
+    assert!(
+        dsl.contains(r#"sys.stock("NVDA", "changepct")"#),
+        "the percentage beside it must stay live:\n{dsl}"
+    );
+}
+
+/// A list factored into a COMPONENT still lowers to live calls, at its own index.
+///
+/// `for s in feed { StoryRow(story: s) }` is the idiomatic way to write a list,
+/// and passing the binder into a component dropped the provenance that makes a
+/// row live — so every row rendered the seeded blob (an em dash, on a live card)
+/// while the lead story beside it, read directly, went live.
+#[test]
+fn a_list_through_a_component_stays_live() {
+    let data = serde_json::json!({"env": {"locale": {"lang": "en"}}, "selected": "",
+        "feed": [{"id":"a","title":"T","author":"x","points":1},
+                 {"id":"b","title":"U","author":"y","points":2}]});
+    let root = realize(NEWS, &data, RealizeLimits::default())
+        .root
+        .expect("realizes");
+    let dsl = splash_ui_l0::kit::lower(&root);
+    // `feed` declares offset: 1, so its first row is story 1 — not the lead.
+    assert!(
+        dsl.contains(r#"sys.news(1, "title")"#),
+        "row 0 of the feed is story 1:\n{dsl}"
+    );
+    assert!(
+        dsl.contains(r#"sys.news(2, "title")"#),
+        "and row 1 is story 2:\n{dsl}"
     );
 }

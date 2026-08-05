@@ -66,9 +66,12 @@ width       = { kind = "width" }
 on_tap = { kind = "event" }
 value  = { kind = "any" }
 
+# `width` says which column absorbs the leftover space. A row of columns has to
+# divide the line somehow, and only the card knows which one should yield.
 [Col]
 align = { kind = "token", tokens = ["start", "center", "end"] }
 gap   = { kind = "number" }
+width = { kind = "width" }
 
 [Row]
 align  = { kind = "token", tokens = ["start", "center", "end", "baseline"] }
@@ -289,7 +292,10 @@ args = ["count", "offset", "fields"]
 args = ["id", "fields"]
 
 [sources."sys.movers"]
-args = ["count", "fields"]
+# `symbols` names the universe to rank; omitted means the whole market. Without
+# it a themed request ("top AI movers") could only render market-wide gainers
+# under a themed title.
+args = ["count", "fields", "symbols"]
 
 [sources."sys.quote"]
 args = ["ticker", "fields"]

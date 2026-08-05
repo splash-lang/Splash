@@ -2324,7 +2324,21 @@ pub mod catalog {
         ),
         ("Panel", &[]),
         ("Card", &[("on_tap", Event), ("value", Any)]),
-        ("Col", &[("align", Token(ALIGN)), ("gap", Number)]),
+        // A column may say how WIDE, because a row of columns has to divide the
+        // line somehow and only the card knows which column is the one that
+        // should absorb what is left. A mover row is ticker-and-name beside a
+        // price: without this every column fits its own text, and a long company
+        // name wrapped to three lines beside acres of empty space
+        // ("Dolby Laboratori / es"). This is layout, not styling — it says which
+        // element yields, not how anything looks.
+        (
+            "Col",
+            &[
+                ("align", Token(ALIGN)),
+                ("gap", Number),
+                ("width", TokenOrPath(WIDTH)),
+            ],
+        ),
         (
             "Row",
             &[
@@ -2444,7 +2458,10 @@ pub mod catalog {
         ("sys.places", &["lat", "lon", "category", "count", "fields"]),
         ("sys.news", &["count", "offset", "fields"]),
         ("sys.news_item", &["id", "fields"]),
-        ("sys.movers", &["count", "fields"]),
+        // `symbols` names the UNIVERSE to rank. Without it the only universe is
+        // the market-wide day-gainers screener, so "top 10 AI movers" could only
+        // ever render generic gainers under an AI title -- which is what it did.
+        ("sys.movers", &["count", "fields", "symbols"]),
         ("sys.quote", &["ticker", "fields"]),
         (
             "sys.series",
@@ -4265,7 +4282,29 @@ impl Realizer<'_> {
                 // data and letting the host capture an unfilled prop.
                 (None, _) => param.default.clone().unwrap_or(serde_json::Value::Null),
             };
-            scope.frames.push((param.name.clone(), value, None));
+            // Carry the argument's PROVENANCE into the parameter.
+            //
+            // A loop binder records which collection it iterates and at what
+            // index, which is what lets a row lower to a live call. Passing that
+            // binder into a component — `for s in feed { StoryRow(story: s) }`,
+            // the idiomatic way to factor a list — pushed the parameter frame
+            // with `None`, so `story.title` inside the component had no
+            // provenance and fell back to the seeded blob. A live card has no
+            // blob, so every row rendered an em dash while the lead story beside
+            // it, read directly as `lead.0.title`, went live.
+            let provenance = match supplied.map(|a| &a.value) {
+                Some(Operand::Path(p)) | Some(Operand::Predicate { path: p, .. }) => {
+                    let root = p.split('.').next().unwrap_or(p);
+                    scope
+                        .frames
+                        .iter()
+                        .rev()
+                        .find(|(n, _, prov)| n == root && prov.is_some())
+                        .and_then(|(_, _, prov)| prov.clone())
+                }
+                _ => None,
+            };
+            scope.frames.push((param.name.clone(), value, provenance));
             bound += 1;
         }
         let instance_key = format!("{key}/{}", component.name);
@@ -4463,6 +4502,41 @@ impl Realizer<'_> {
     /// Bounded by the realization limit, because the count comes from a
     /// generated card and a card asking for ten thousand rows should get the
     /// cap rather than the request.
+    /// The live call for `<source>.<field>`, when the backend answers that
+    /// source itself. Used for a source argument that depends on another
+    /// source, which a live card cannot resolve from data.
+    fn nested_source_call(&self, path: &str, scope: &ValueScope) -> Option<String> {
+        let (owner, field) = path.split_once('.')?;
+        let declaration = self.card.sources.iter().find(|s| s.name == owner)?;
+        let mut args = Vec::new();
+        for (name, arg) in &declaration.args {
+            let resolved = match arg {
+                SourceArg::Text(t) => t.clone(),
+                SourceArg::Number(n) => makepad::trim_num(*n),
+                SourceArg::List(_) if name == "fields" => continue,
+                SourceArg::List(items) => items.join(","),
+                // A parent's own argument is usually card STATE — the weather
+                // fixture reads `sys.geocode(name: state.city)` — so it resolves
+                // from the scope like any other path. Returning None here
+                // instead meant the whole chain died at the first hop and every
+                // reading below it stayed seeded.
+                //
+                // One level only: a path that names yet another SOURCE is not
+                // resolved here, which is what keeps this from recursing.
+                SourceArg::Path(p) => {
+                    let key = p.strip_prefix("state.").unwrap_or(p);
+                    json_to_key(&scope.lookup(key)?)
+                }
+            };
+            args.push((name.clone(), resolved));
+        }
+        makepad::vm_call(&SourceBinding {
+            helper: declaration.helper.clone(),
+            args,
+            field: field.to_string(),
+        })
+    }
+
     fn declared_count(&self, path: &str) -> Option<usize> {
         let declaration = self.card.sources.iter().find(|s| s.name == path)?;
         let (_, arg) = declaration.args.iter().find(|(n, _)| n == "count")?;
@@ -4513,13 +4587,30 @@ impl Realizer<'_> {
                 SourceArg::Path(p) => {
                     // `state.x` in a source argument addresses card state; the
                     // view scope names it without the prefix.
-                    let looked_up = scope.lookup(p.strip_prefix("state.").unwrap_or(p))?;
-                    json_to_key(&looked_up)
+                    let key = p.strip_prefix("state.").unwrap_or(p);
+                    match scope.lookup(key) {
+                        Some(v) => json_to_key(&v),
+                        // A source argument that names ANOTHER SOURCE.
+                        //
+                        // `sys.places(lat: place.lat)` depends on `place`, and a
+                        // LIVE card carries no data blob — so the lookup found
+                        // nothing and `?` discarded the whole binding, leaving
+                        // every row an em dash. The dependency is exactly what
+                        // L0 declares, so resolve it the way the backend will:
+                        // emit the parent's own live call in the argument.
+                        None => self.nested_source_call(key, scope)?,
+                    }
                 }
                 SourceArg::Text(t) => t.clone(),
                 SourceArg::Number(n) => makepad::trim_num(*n),
-                // A field list is structural, not a value the backend passes on.
-                SourceArg::List(_) => continue,
+                // `fields:` is structural — which keys the card wants back — and
+                // is not passed on. Any OTHER list is a value: `symbols: [NVDA,
+                // AMD]` is the universe to rank, and the model writes it as a
+                // list because every other list-shaped argument is one. Dropping
+                // it silently left the card ranking the whole market under
+                // whatever title it had been given.
+                SourceArg::List(_) if name == "fields" => continue,
+                SourceArg::List(items) => items.join(","),
             };
             args.push((name.clone(), resolved));
         }
@@ -4682,7 +4773,7 @@ pub mod makepad {
     /// says `sys.quote(ticker:)` and the VM says `sys.stock(symbol, key)`. This
     /// table is the whole of the translation, and a helper or field missing from
     /// it means the seeded value is used — never a wrong call.
-    fn vm_call(binding: &SourceBinding) -> Option<String> {
+    pub(super) fn vm_call(binding: &SourceBinding) -> Option<String> {
         let arg = |name: &str| {
             binding
                 .args
@@ -4696,22 +4787,27 @@ pub mod makepad {
                 // What this helper can actually answer, verified against a live
                 // response rather than against its documentation.
                 //
-                // `open` is NOT here even though `sys.stock` accepts it: it
-                // resolves `regularMarketOpen`, and that key is absent from the
-                // Yahoo chart response while `regularMarketDayHigh`, `…DayLow`,
-                // `regularMarketPrice` and `chartPreviousClose` are all present.
-                // Emitting the call rendered `$—` on device where the seeded blob
-                // held a real opening price. Market cap and P/E are absent from
-                // the helper outright.
+                // `open` was excluded here for a while, because `sys.stock`
+                // resolved it from `regularMarketOpen` — a key absent from the
+                // Yahoo chart response — and emitting the call drew `$—` beside
+                // two live values. That was worked around at the wrong layer:
+                // falling back left a SEEDED opening price under a live one, and
+                // a stale number that looks real is worse than a visible gap.
+                // The helper reads the bar series now, so the call is emitted.
                 //
-                // This is the case the fallback exists for, and it took putting
-                // it on a phone to find — the DSL was well-formed and the unit
-                // tests were green.
+                // Market cap and P/E are still absent from the helper outright —
+                // the chart endpoint does not carry them — so those two fall back
+                // and always will until something fetches them.
+                //
+                // Every entry here is verified against a live response rather
+                // than against the helper's documentation, which is what the
+                // `open` episode cost: the DSL was well-formed and the unit tests
+                // were green, and only a phone showed the number was wrong.
                 let key = match binding.field.as_str() {
                     "last" => "price",
                     "pct" => "changepct",
                     "volume" => "vol",
-                    f @ ("name" | "change" | "high" | "low") => f,
+                    f @ ("name" | "change" | "changemoney" | "high" | "low" | "open") => f,
                     _ => return None,
                 };
                 Some(format!("sys.stock({symbol:?}, {key:?})"))
@@ -4726,6 +4822,122 @@ pub mod makepad {
             // why `open` is absent from `sys.quote` above: the key is accepted
             // there and the value is not in the payload, so emitting the call
             // drew `$—` where the seeded blob held a real price.
+            // A place NAME resolved to a fact. `geocodenum` for the numbers the
+            // other helpers take as arguments, `geocode` for the words.
+            "sys.geocode" => {
+                let name = arg("name")?;
+                match binding.field.as_str() {
+                    "lat" | "lon" => Some(format!("sys.geocodenum({name:?}, {:?})", binding.field)),
+                    "name" | "country" | "admin1" | "timezone" => {
+                        Some(format!("sys.geocode({name:?}, {:?})", binding.field))
+                    }
+                    _ => None,
+                }
+            }
+            // The forecast. L0 names a FIELD; open-meteo wants a path, and the
+            // daily ones are indexed by the row being drawn.
+            "sys.weather" => {
+                let lat = arg("lat")?;
+                let lon = arg("lon")?;
+                let (row, field) = match binding.field.split_once('.') {
+                    Some((i, f)) if i.parse::<u32>().is_ok() => (i, f),
+                    _ => ("0", binding.field.as_str()),
+                };
+                let path = match field {
+                    "temp" => "current.temperature_2m".to_string(),
+                    "feels" => "current.apparent_temperature".to_string(),
+                    "humidity" => "current.relative_humidity_2m".to_string(),
+                    "wind" => "current.wind_speed_10m".to_string(),
+                    "pressure" => "current.surface_pressure".to_string(),
+                    "hi" => format!("daily.temperature_2m_max.{row}"),
+                    "lo" => format!("daily.temperature_2m_min.{row}"),
+                    "uv" => format!("daily.uv_index_max.{row}"),
+                    "precip" => format!("daily.precipitation_probability_max.{row}"),
+                    // The condition is a WMO code the host turns into a word, so
+                    // the card never states weather it has not observed.
+                    "cond" => {
+                        return Some(format!(
+                            "sys.weatherword({lat}, {lon}, {:?})",
+                            format!("daily.weather_code.{row}")
+                        ))
+                    }
+                    "dayname" => return Some(format!("sys.dayname(\"en\", {row}, \"en\")")),
+                    _ => return None,
+                };
+                Some(format!("sys.weather({lat}, {lon}, {path:?})"))
+            }
+            // Sunrise and sunset are STRINGS in the forecast the weather helper
+            // already fetches; `sys.daylight` answers only the arc progress, so
+            // the three L0 fields come from two different helpers.
+            "sys.daylight" => {
+                let lat = arg("lat")?;
+                let lon = arg("lon")?;
+                match binding.field.as_str() {
+                    "rise" => Some(format!("sys.weather({lat}, {lon}, \"daily.sunrise.0\")")),
+                    "set" => Some(format!("sys.weather({lat}, {lon}, \"daily.sunset.0\")")),
+                    "now" => Some(format!("sys.daylight({lat}, {lon})")),
+                    _ => None,
+                }
+            }
+            "sys.moonphase" => match binding.field.as_str() {
+                // The VM spells it `illum`; L0 spells it out.
+                "illumination" => Some("sys.moonphase(\"illum\")".to_string()),
+                "name" | "phase" => Some(format!("sys.moonphase({:?})", binding.field)),
+                _ => None,
+            },
+            "sys.airquality" => {
+                let lat = arg("lat")?;
+                let lon = arg("lon")?;
+                let path = match binding.field.as_str() {
+                    "aqi" => "current.us_aqi",
+                    "pm25" => "current.pm2_5",
+                    "pm10" => "current.pm10",
+                    "ozone" => "current.ozone",
+                    _ => return None,
+                };
+                Some(format!("sys.airquality({lat}, {lon}, {path:?})"))
+            }
+            // A headline feed, indexed like the movers list.
+            "sys.news" => {
+                let (index, field) = binding.field.split_once('.')?;
+                let row: u32 = index.parse().ok()?;
+                // `offset` is why the feed starts BELOW the lead. Ignoring it
+                // made row 0 of "latest" the lead story again.
+                let offset: u32 = arg("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
+                let index = row + offset;
+                let key = match field {
+                    "comments" => "comments",
+                    f @ ("title" | "url" | "author" | "points" | "id") => f,
+                    _ => return None,
+                };
+                Some(format!("sys.news({index}, {key:?})"))
+            }
+            "sys.photo" => {
+                let query = arg("query")?;
+                Some(format!("sys.photo({query:?})"))
+            }
+            // The activity app's whole data surface. Missing from this table, a
+            // declared `sys.places` source fell to the seeded blob -- which a
+            // LIVE card does not have -- so every venue row rendered an em dash
+            // and the card looked like a fetch that never landed. Measured:
+            // "list museums in Kyoto" produced eight rows of "—".
+            "sys.places" => {
+                let (index, field) = binding.field.split_once('.')?;
+                index.parse::<u32>().ok()?;
+                let lat = arg("lat")?;
+                let lon = arg("lon")?;
+                let category = arg("category").unwrap_or_default();
+                // L0 says `distance`; the VM answers `dist`. Same translation
+                // job as `ticker`/`symbol` above.
+                let key = match field {
+                    "distance" => "dist",
+                    f @ ("name" | "lat" | "lon" | "category") => f,
+                    _ => return None,
+                };
+                Some(format!(
+                    "sys.places({lat}, {lon}, {category:?}, {index}, {key:?})"
+                ))
+            }
             "sys.movers" => {
                 let (index, field) = binding.field.split_once('.')?;
                 index.parse::<u32>().ok()?;
@@ -4735,10 +4947,16 @@ pub mod makepad {
                     "pct" => "changepct",
                     "volume" => "vol",
                     "mktcap" => "marketcap",
-                    f @ ("name" | "change" | "high" | "low" | "open") => f,
+                    f @ ("name" | "change" | "changemoney" | "high" | "low" | "open") => f,
                     _ => return None,
                 };
-                Some(format!("sys.movers({index}, {key:?})"))
+                let universe = binding
+                    .args
+                    .iter()
+                    .find(|(n, _)| n == "symbols")
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default();
+                Some(format!("sys.movers({index}, {key:?}, {universe:?})"))
             }
             _ => None,
         }
@@ -4880,6 +5098,29 @@ pub mod makepad {
             suffix,
             format: format_kind,
         } = decoration_of(node);
+        // A `value:` the backend can answer goes LIVE, exactly as `text:` does.
+        //
+        // This branch built its string from the REALIZED literal and never
+        // looked at the bindings, so every number on a card — temperature,
+        // high/low, price, distance — rendered whatever the host had seeded no
+        // matter how many capabilities were translated. Only `text:` went live,
+        // which is why a card could show a live city name above a stale
+        // temperature.
+        //
+        // NOT when the card declares a `format:`. Scaling and currency are
+        // applied HERE, to a realized number; a live call returns a string this
+        // side never sees, so going live would silently drop the format —
+        // measured, `compact` stopped turning 41200000 into "41.2M". A helper
+        // that formats its own output (`sys.movers` volume) already reads right;
+        // one that does not keeps the seeded value until the format can travel
+        // with the call.
+        if format_kind.is_none() {
+            if let Some((_, binding)) = node.bindings.iter().find(|(n, _)| n == "value") {
+                if let Some(call) = vm_call(binding) {
+                    return decorate(call, &glyph, unit, &suffix);
+                }
+            }
+        }
         match value {
             Some(NodeValue::Missing) => "\"—\"".into(),
             Some(v) => {
@@ -5006,9 +5247,25 @@ pub mod makepad {
         format_kind: Option<&str>,
     ) -> Option<String> {
         let (_, binding) = node.bindings.iter().find(|(n, _)| n == "value")?;
+        // `signed_money` puts the currency INSIDE the sign — `+$7.13` — and a
+        // prefix cannot express that: `"$" + "+7.13"` is `$+7.13`. This used to
+        // give up and keep the seeded value, which put a fixture's `+$3.10`
+        // beside a live `+3.55%`, two numbers describing one move and
+        // disagreeing. The helper composes the whole string, so the binding is
+        // redirected to the field that returns it already ordered.
+        let binding = &if format_kind == Some("signed_money") && binding.field == "change" {
+            SourceBinding {
+                field: "changemoney".to_owned(),
+                ..binding.clone()
+            }
+        } else {
+            binding.clone()
+        };
         let call = vm_call(binding)?;
         let prefix = match format_kind {
-            None | Some("signed_pct") => String::new(),
+            // Already whole: the helper returned the sign and the symbol in the
+            // right order, so nothing may be prepended.
+            None | Some("signed_pct") | Some("signed_money") => String::new(),
             Some("money") => "$".to_owned(),
             Some(_) => return None,
         };
@@ -6362,6 +6619,7 @@ pub mod kit {
     /// loses its temperature bars still looks complete (§1.1).
     fn kit_fn(role: &str) -> Option<&'static str> {
         Some(match role {
+            "Field" => "l0_field",
             "Surface" => "l0_surface",
             "Col" => "l0_col",
             "Row" => "l0_row",
@@ -6435,6 +6693,25 @@ pub mod kit {
         let Some(NodeValue::Event(event)) = arg(node, "on_tap") else {
             return None;
         };
+        // A payload bound to a source is emitted as a LIVE CALL, not as the
+        // value realization happened to see.
+        //
+        // The two disagree whenever the row's text is live and its payload is
+        // not, which is every card with no seed blob: the screen said `ATKR` and
+        // the tap carried `""`, so the write was refused and the row read as
+        // dead. Worse when a blob IS present and stale — the tap then carries a
+        // different company from the one the user is looking at.
+        //
+        // The result is a DSL EXPRESSION, so the caller emits it unquoted.
+        if let Some((_, binding)) = node.bindings.iter().find(|(n, _)| n == "value") {
+            if let Some(call) = makepad::vm_call(binding) {
+                let head = serde_json::json!({ "e": event, "k": node.key });
+                let head = head.to_string();
+                // `{"e":…,"k":…}` → `l0:{"e":…,"k":…,"v":"` + <call> + `"}`
+                let open = format!("l0:{},\"v\":\"", head.trim_end_matches('}'));
+                return Some(format!("{open:?} + {call} + {:?}", "\"}"));
+            }
+        }
         let value = match arg(node, "value") {
             Some(NodeValue::Text(t)) => t.clone(),
             Some(NodeValue::Number(n)) => makepad::trim_num(*n),
@@ -6442,7 +6719,7 @@ pub mod kit {
             _ => String::new(),
         };
         let json = serde_json::json!({ "e": event, "k": node.key, "v": value });
-        Some(format!("l0:{json}"))
+        Some(format!("{:?}", format!("l0:{json}")))
     }
 
     /// A visualisation's argument, as the kit takes it.
@@ -6460,20 +6737,79 @@ pub mod kit {
         }
     }
 
+    /// A declared width, as the kit call that applies it.
+    ///
+    /// Composed around the role rather than threaded into it, for the reason
+    /// `tint` is: `width` is optional on every text role, and a parameter on
+    /// all seven kit functions would have six passing a default forever.
+    ///
+    /// `fit` returns `None` because it is already this backend's default, and
+    /// emitting a wrapper for it would say the same thing twice. The fixed
+    /// tokens pass the TOKEN and not a pixel count: how wide a rank column is
+    /// is the theme's answer, and deciding here would put styling in the
+    /// lowering.
+    fn width_wrap(node: &UiNode) -> Option<(&'static str, String)> {
+        let Some(NodeValue::Token(t)) = arg(node, "width") else {
+            return None;
+        };
+        match t.as_str() {
+            "fill" => Some(("l0_wide(", ")".into())),
+            "rank" | "day" | "temp" => Some(("l0_colw(", format!(", {t:?})"))),
+            _ => None,
+        }
+    }
+
+    /// A `Field`'s commit target, carrying what the user typed.
+    ///
+    /// `on_commit` is not `on_tap` and must not be wrapped in a hit target: the
+    /// payload is the TEXT, which does not exist until the moment of commit, so
+    /// the target is assembled at that moment from the value the backend hands
+    /// back. `$$` is the placeholder the backend substitutes.
+    fn commit_target(node: &UiNode) -> Option<String> {
+        let Some(NodeValue::Event(event)) = arg(node, "on_commit") else {
+            return None;
+        };
+        let json = serde_json::json!({ "e": event, "k": node.key, "v": "$$" });
+        Some(format!("l0:{json}"))
+    }
+
     fn element(node: &UiNode, depth: usize, out: &mut String) {
+        // A `Field` carries its own commit target and must NOT be wrapped in a
+        // tap: a hit target over a text input eats the focus, and the payload
+        // here is what was typed rather than what the row was bound to.
+        if node.kind == "Field" {
+            let _ = write!(
+                out,
+                "l0_field({}, {}, {:?})",
+                makepad::expr_of(node, "text"),
+                makepad::expr_of(node, "placeholder"),
+                commit_target(node).unwrap_or_default()
+            );
+            return;
+        }
         // A tappable node is WRAPPED. A `card`, `chip` or `image` carrying
         // `tapto` renders and does nothing — the attribute is dropped before it
         // reaches the UI — so only a container carries a tap.
         if let Some(target) = tap_target(node) {
-            // The wrapper sizes like what it wraps: a Chip is intrinsic and sits
-            // in a row of chips, and a filling wrapper makes the first one eat
-            // the row.
-            let f = if node.kind == "Chip" {
-                "l0_tap_fit"
-            } else {
-                "l0_tap"
-            };
-            let _ = write!(out, "{f}({target:?}, ");
+            // The wrapper sizes like what it WRAPS.
+            //
+            // A filling wrapper around an intrinsic thing takes the whole line
+            // and the thing sits at its left edge. The first chip in a row of
+            // chips ate the row; then the weather card's hero temperature — a
+            // tappable `TextHero` inside a centred column — stopped centring,
+            // because what the column had to place was a full-width wrapper and
+            // not the six characters inside it. The place name and the icon
+            // centred correctly beside it, which is what made it look like a
+            // font problem rather than a layout one.
+            //
+            // A text role that ASKED to fill is not intrinsic, so it keeps the
+            // filling wrapper.
+            let asked_to_fill =
+                matches!(arg(node, "width"), Some(NodeValue::Token(t)) if t == "fill");
+            let intrinsic =
+                node.kind == "Chip" || (node.kind.starts_with("Text") && !asked_to_fill);
+            let f = if intrinsic { "l0_tap_fit" } else { "l0_tap" };
+            let _ = write!(out, "{f}({target}, ");
             element_untapped(node, depth, out);
             out.push(')');
             return;
@@ -6481,7 +6817,47 @@ pub mod kit {
         element_untapped(node, depth, out);
     }
 
+    /// A declared child alignment, as the kit call that applies it.
+    ///
+    /// `start` returns `None`: it is the default, and a wrapper that restated it
+    /// on every container would make the one container that asked for something
+    /// indistinguishable from the dozen that did not.
+    ///
+    /// Which AXIS this means is the kit's to decide, not the lowering's — a
+    /// column aligns horizontally and a row vertically, and only the thing
+    /// holding the flow knows which it is.
+    fn align_wrap(node: &UiNode) -> Option<(&'static str, String)> {
+        let Some(NodeValue::Token(t)) = arg(node, "align") else {
+            return None;
+        };
+        match t.as_str() {
+            "center" | "end" => Some(("l0_aligned(", format!(", {t:?})"))),
+            _ => None,
+        }
+    }
+
+    /// Wrappers COMPOSE around a role — the pattern `tint` established.
+    ///
+    /// `width` and `align` are optional on many roles and meaningless on most,
+    /// so a parameter on every kit function would have nearly all of them
+    /// carrying a default forever. Each attribute the catalog admits needs an
+    /// entry HERE or it is accepted by the profile and silently discarded, which
+    /// is this layer's recurring defect and the reason the list is explicit.
     fn element_untapped(node: &UiNode, depth: usize, out: &mut String) {
+        let wraps: Vec<(&'static str, String)> = [width_wrap(node), align_wrap(node)]
+            .into_iter()
+            .flatten()
+            .collect();
+        for (open, _) in &wraps {
+            out.push_str(open);
+        }
+        element_unsized(node, depth, out);
+        for (_, close) in wraps.iter().rev() {
+            out.push_str(close);
+        }
+    }
+
+    fn element_unsized(node: &UiNode, depth: usize, out: &mut String) {
         let Some(f) = kit_fn(&node.kind) else {
             let _ = write!(out, "l0_unsupported({:?})", node.kind);
             return;
@@ -6540,13 +6916,21 @@ pub mod kit {
             "Photo" => {
                 let _ = write!(out, "{f}({})", makepad::expr_of(node, "src"));
             }
+            // `cond` is a NUMBER — the WMO code the forecast returns — and this
+            // matched only `Text` and `Token`, so every one of them fell through
+            // to `""`. All seven forecast rows drew the same default icon over a
+            // week that was cloudy, rainy and clear on different days, and
+            // nothing on screen said so: a wrong icon looks exactly like a right
+            // one. `scalar_of` takes whichever the card bound.
+            //
+            // `size` says WHERE the icon sits — hero block, forecast row, tile —
+            // and the kit decides how big each of those is.
             "WeatherIcon" => {
-                let cond = match arg(node, "cond") {
-                    Some(NodeValue::Text(c)) => format!("{c:?}"),
-                    Some(NodeValue::Token(c)) => format!("{c:?}"),
-                    _ => "\"\"".into(),
+                let size = match arg(node, "size") {
+                    Some(NodeValue::Token(t)) => t.clone(),
+                    _ => "row".to_owned(),
                 };
-                let _ = write!(out, "{f}({cond})");
+                let _ = write!(out, "{f}({}, {size:?})", scalar_of(node, "cond"));
             }
             "TextStat" => {
                 let _ = write!(out, "{f}({}, {})", makepad::valued(node), direction(node));
