@@ -5487,6 +5487,56 @@ pub mod makepad {
         }
     }
 
+    /// Which member of the map family a `Map` is, in the WIDGET's vocabulary.
+    ///
+    /// Shared by both lowerings rather than written twice. Two backends that
+    /// each decide independently what `.drive` means is the shape of every
+    /// defect this profile keeps finding.
+    pub(super) fn map_mode(node: &UiNode) -> &'static str {
+        match arg(node, "mode") {
+            Some(NodeValue::Token(t)) if t == "drive" => "3d",
+            Some(NodeValue::Token(t)) if t == "plan" => "plan",
+            // `flat` and an unstated mode are the same thing to the widget: the
+            // route, drawn without the 2.5D camera.
+            _ => "",
+        }
+    }
+
+    /// A `Map`'s centre and route, as live calls: `(lat, lon, polyline)`.
+    ///
+    /// Both endpoints name a SOURCE rather than coordinates, so each is asked for
+    /// its own axis — `from: here` becomes `sys.gps("lat")` and `sys.gps("lon")`.
+    /// An endpoint whose capability cannot answer a coordinate yields a neutral
+    /// centre and no route, because a map drawn from a seeded position is a map
+    /// of somewhere the user is not.
+    pub(super) fn map_route(node: &UiNode) -> (String, String, String) {
+        let coord = |name: &str, axis: &str| -> Option<String> {
+            let (_, binding) = node.bindings.iter().find(|(n, _)| n == name)?;
+            // A collection answers `0.lat` and a scalar source answers `lat`.
+            for field in [axis.to_owned(), format!("0.{axis}")] {
+                let probe = SourceBinding {
+                    field,
+                    ..binding.clone()
+                };
+                if let Some(call) = vm_call(&probe) {
+                    return Some(call);
+                }
+            }
+            None
+        };
+        let (Some(a), Some(o)) = (coord("from", "lat"), coord("from", "lon")) else {
+            return ("0".into(), "0".into(), "\"\"".into());
+        };
+        let poly = match (coord("to", "lat"), coord("to", "lon")) {
+            // `via` is carried by the helper's sixth argument and is not emitted
+            // yet: it is a value the card supplies as a list, and threading it
+            // needs that list rendered the way `sys.route` renders it.
+            (Some(b), Some(p)) => format!("sys.navroute({a}, {o}, {b}, {p}, \"polyline\")"),
+            _ => "\"\"".to_owned(),
+        };
+        (a, o, poly)
+    }
+
     /// The VM helper that answers a declared capability, if one does.
     ///
     /// The names differ because the two vocabularies were designed apart: L0
@@ -6177,51 +6227,19 @@ pub mod makepad {
             // card's declared source resolved into a call, which is the same
             // shape every other live value takes.
             "Map" => {
-                // Both endpoints are SOURCE names rather than coordinates, so
-                // each is asked for its own axis: `from: here` becomes
-                // `sys.gps("lat")` and `sys.gps("lon")`.
-                let coord = |name: &str, axis: &str| -> Option<String> {
-                    let (_, binding) = node.bindings.iter().find(|(n, _)| n == name)?;
-                    // A collection answers `0.lat` and a scalar source answers
-                    // `lat`; try the scalar spelling first.
-                    for field in [axis.to_owned(), format!("0.{axis}")] {
-                        let probe = SourceBinding {
-                            field,
-                            ..binding.clone()
-                        };
-                        if let Some(call) = vm_call(&probe) {
-                            return Some(call);
-                        }
-                    }
-                    None
-                };
-                // The widget's own vocabulary: 1 is the chase camera, 2 the
-                // north-up route preview, anything else a flat map.
-                let mode = match arg(node, "mode") {
-                    Some(NodeValue::Token(t)) if t == "drive" => "3d",
-                    Some(NodeValue::Token(t)) if t == "plan" => "plan",
-                    _ => "",
-                };
+                let (lat, lon, poly) = map_route(node);
+                let mode = map_mode(node);
                 let zoom = match arg(node, "zoom") {
                     Some(NodeValue::Number(n)) => trim_num(*n),
                     _ => "15".to_owned(),
                 };
                 let _ = write!(
                     out,
-                    "{p}MapView{{ width: Fill height: 240 nav_mode: {mode:?} zoom: {zoom}"
+                    "{p}MapView{{ width: Fill height: 240 nav_mode: {mode:?} zoom: {zoom} \
+                     center_lat: {lat} center_lon: {lon}"
                 );
-                if let (Some(a), Some(o)) = (coord("from", "lat"), coord("from", "lon")) {
-                    let _ = write!(out, " center_lat: {a} center_lon: {o}");
-                    if let (Some(b), Some(p2)) = (coord("to", "lat"), coord("to", "lon")) {
-                        // `via` is carried by the helper's sixth argument and is
-                        // not emitted yet: it is a value the card supplies as a
-                        // list, and threading it needs the list rendered the way
-                        // `sys.route` renders it. Recorded rather than guessed.
-                        let _ = write!(
-                            out,
-                            " nav_polyline: sys.navroute({a}, {o}, {b}, {p2}, \"polyline\")"
-                        );
-                    }
+                if poly != "\"\"" {
+                    let _ = write!(out, " nav_polyline: {poly}");
                 }
                 let _ = writeln!(out, " }}");
             }
@@ -7623,6 +7641,7 @@ pub mod kit {
     fn kit_fn(role: &str) -> Option<&'static str> {
         Some(match role {
             "Field" => "l0_field",
+            "Map" => "l0_map",
             "Surface" => "l0_surface",
             "Col" => "l0_col",
             "Row" => "l0_row",
@@ -7962,6 +7981,24 @@ pub mod kit {
             }
             "Photo" => {
                 let _ = write!(out, "{f}({})", makepad::expr_of(node, "src"));
+            }
+            // The trip, as the kit takes it: which member of the map family, how
+            // close, where to centre, and the route already resolved.
+            //
+            // The route is a CALL — `sys.navroute` over both endpoints' own
+            // coordinate calls — so the geometry is fetched when the card draws
+            // rather than baked at realization. The kit was emitting
+            // `l0_unsupported("Map")` until now, which is what put an error box
+            // in the middle of the nav card ON DEVICE, since the device renders
+            // through this path and not through `makepad::lower`.
+            "Map" => {
+                let (lat, lon, poly) = makepad::map_route(node);
+                let _ = write!(
+                    out,
+                    "{f}({:?}, {}, {lat}, {lon}, {poly})",
+                    makepad::map_mode(node),
+                    scalar_of(node, "zoom"),
+                );
             }
             // `cond` is a NUMBER — the WMO code the forecast returns — and this
             // matched only `Text` and `Token`, so every one of them fell through

@@ -5823,6 +5823,18 @@ view root Surface {
         mk.contains("sys.searchnum(\"SFO\", 0, \"lat\")"),
         "the destination's coordinates come from the search that found it:\n{mk}"
     );
+    // THE KIT TOO, because the device renders through it. Fixing only
+    // `makepad::lower` left the error box exactly where it was on a phone, which
+    // is the half that matters and the half a green test suite would have hidden.
+    let kit = splash_ui_l0::kit::lower(&root);
+    assert!(
+        !kit.contains("l0_unsupported(\"Map\")"),
+        "the kit must lower the role, not report it unsupported:\n{kit}"
+    );
+    assert!(
+        kit.contains("l0_map(\"3d\", 16, sys.gps(\"lat\"), sys.gps(\"lon\"), sys.navroute("),
+        "the kit passes the mode, the zoom, the centre and the live route:\n{kit}"
+    );
     // And none of the seeded numbers may appear as a literal.
     for seeded in ["37.3", "-122", "37.4", "-121.9"] {
         assert!(
