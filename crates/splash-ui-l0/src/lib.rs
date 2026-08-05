@@ -1049,6 +1049,12 @@ impl<'a> Parser<'a> {
         self.tokens.get(self.at)
     }
 
+    /// One token further on, for a decision that needs to see two: a `-` is a
+    /// negative literal or a negation depending on what follows it.
+    fn peek_at(&self, ahead: usize) -> Option<&Token> {
+        self.tokens.get(self.at + ahead)
+    }
+
     fn next(&mut self) -> Option<Token> {
         let t = self.tokens.get(self.at).cloned();
         if t.is_some() {
@@ -2188,6 +2194,53 @@ impl<'a> Parser<'a> {
         let Some(t) = self.peek().cloned() else {
             return Operand::Str(String::new());
         };
+        // GROUPING. Precedence was fixed and unoverridable, so `(a + b) * c` —
+        // the first thing an author reaches for after a formula that does not fit
+        // it — could not be written at all. A `(` here is unambiguous: an
+        // argument value never otherwise starts with one, because every
+        // call-shaped form in the grammar (`set`, `cycle`, `append`) is reached
+        // by its verb.
+        if t.is_punct("(") {
+            if self.depth > DEFAULT_MAX_SYNTAX_NESTING {
+                self.sink.at(&t, "nesting is too deep".into());
+                return Operand::Str(String::new());
+            }
+            self.at += 1;
+            self.depth += 1;
+            let inner = self.parse_operand();
+            self.depth -= 1;
+            self.expect_punct(")");
+            return inner;
+        }
+        // UNARY MINUS. `x * -1` was refused, so a negative coefficient — the
+        // ordinary way to subtract a scaled reading — had no spelling.
+        //
+        // A negated LITERAL becomes a negative literal rather than an expression,
+        // so it stays a coefficient: wrapping it as `0 - 1` would make
+        // `value: -1` an expression that reads nothing, which §9.3 refuses, and
+        // that is the right answer for a bare `-1` but reached by the wrong
+        // route. A negated PATH is arithmetic and lowers as such.
+        if t.is_punct("-") {
+            if self.depth > DEFAULT_MAX_SYNTAX_NESTING {
+                self.sink.at(&t, "nesting is too deep".into());
+                return Operand::Str(String::new());
+            }
+            if let Some(next) = self.peek_at(1).cloned() {
+                if next.kind == Kind::Num {
+                    self.at += 2;
+                    return Operand::Num(-next.text.parse::<f64>().unwrap_or(0.0));
+                }
+            }
+            self.at += 1;
+            self.depth += 1;
+            let inner = self.parse_atom();
+            self.depth -= 1;
+            return Operand::Expr {
+                lhs: Box::new(Operand::Num(0.0)),
+                op: "-".to_string(),
+                rhs: Box::new(inner),
+            };
+        }
         match t.kind {
             Kind::Token => {
                 self.at += 1;
@@ -2319,28 +2372,91 @@ fn eval_expr(
 ) -> Option<serde_json::Value> {
     let a = scope_value(scope, lhs)?.as_f64()?;
     let b = scope_value(scope, rhs)?.as_f64()?;
+    apply_op(a, op, b).map(serde_json::Value::from)
+}
+
+/// The five operators, in one place.
+///
+/// Shared by realization and by §9.3's degeneracy probe, so the arithmetic a
+/// card is CHECKED against cannot drift from the arithmetic it is EVALUATED
+/// with — which is the mistake this profile keeps finding in other shapes.
+fn apply_op(a: f64, op: &str, b: f64) -> Option<f64> {
     let v = match op {
         "+" => a + b,
         "-" => a - b,
         "*" => a * b,
-        "/" => {
-            if b == 0.0 {
-                return None;
-            }
-            a / b
-        }
-        "%" => {
-            if b == 0.0 {
-                return None;
-            }
-            a % b
-        }
+        // A zero divisor yields missing, not zero: a fabricated number is the
+        // failure §4 exists to prevent, and it does not become acceptable
+        // because arithmetic produced it.
+        "/" | "%" if b == 0.0 => return None,
+        "/" => a / b,
+        "%" => a % b,
         _ => return None,
     };
-    if !v.is_finite() {
-        return None;
+    v.is_finite().then_some(v)
+}
+
+/// Evaluate an expression with every path resolved by `resolve`.
+///
+/// The shape §9.3's probe needs: the same tree, the same operators, arbitrary
+/// values for the reads.
+fn fold_expr(operand: &Operand, resolve: &dyn Fn(&str) -> Option<f64>) -> Option<f64> {
+    match operand {
+        Operand::Num(n) => Some(*n),
+        Operand::Path(p) => resolve(p),
+        Operand::Expr { lhs, op, rhs } => {
+            apply_op(fold_expr(lhs, resolve)?, op, fold_expr(rhs, resolve)?)
+        }
+        // A comparison is a boolean, not a number, and arithmetic over one is
+        // not in the grammar.
+        _ => None,
     }
-    Some(serde_json::Value::from(v))
+}
+
+/// Whether an expression's value is INDEPENDENT of everything it reads.
+///
+/// §9.3 requires an expression to read something, which stops `1547 * 3.2` and
+/// does not stop `quote.last * 0 + 1547` — one real reading laundering a
+/// fabricated number past the rule. That gap was recorded as needing an argument
+/// nobody had; this is the argument.
+///
+/// A formula is a formula because its answer MOVES when its inputs move. So the
+/// expression is evaluated with its reads bound to several distinct assignments,
+/// and an answer that never changes is a constant the model wrote with extra
+/// steps. `temp * 9 / 5 + 32` moves; `last * 0 + 1547` does not.
+///
+/// Distinct values PER PATH, varied across rounds, because binding every read to
+/// the same number would make `a - b` constant and condemn a correct formula.
+/// Three rounds of coprime-ish values: an expression that is constant across all
+/// three and not constant in general is not something the five arithmetic
+/// operators can express.
+///
+/// Unresolvable in every round (a division by a probed zero, say) is NOT
+/// degenerate — that is a partial expression, and §9.4 already renders it as
+/// missing.
+fn expr_is_constant(expr: &Operand) -> bool {
+    let mut paths = Vec::new();
+    expr_paths(expr, &mut paths);
+    paths.sort();
+    paths.dedup();
+    if paths.is_empty() {
+        // The must-read rule owns this case and reports it better.
+        return false;
+    }
+    let mut seen: Vec<f64> = Vec::new();
+    for (base, step) in [(2.0, 1.0), (5.0, 3.0), (11.0, 7.0)] {
+        let resolve = |p: &str| -> Option<f64> {
+            paths
+                .iter()
+                .position(|q| q == p)
+                .map(|i| base + step * i as f64)
+        };
+        match fold_expr(expr, &resolve) {
+            Some(v) => seen.push(v),
+            None => return false,
+        }
+    }
+    seen.windows(2).all(|w| w[0] == w[1])
 }
 
 /// Compare two resolved values. Shared by guards (`when a == b`) and by
@@ -3836,15 +3952,26 @@ fn walk(
                 if let Some(rhs) = element.rhs.as_ref() {
                     let mut paths = Vec::new();
                     expr_paths(rhs, &mut paths);
-                    if matches!(rhs, Operand::Expr { .. }) && paths.is_empty() {
-                        sink.push(
-                            *line,
-                            *column,
-                            "an expression must read a declared source or state: every operand \
-                             here is a literal, which states a fact rather than computing one \
-                             (profile §4)"
-                                .to_string(),
-                        );
+                    if matches!(rhs, Operand::Expr { .. }) {
+                        if paths.is_empty() {
+                            sink.push(
+                                *line,
+                                *column,
+                                "an expression must read a declared source or state: every \
+                                 operand here is a literal, which states a fact rather than \
+                                 computing one (profile §4)"
+                                    .to_string(),
+                            );
+                        } else if expr_is_constant(rhs) {
+                            sink.push(
+                                *line,
+                                *column,
+                                "this expression reads declared values and IGNORES them: its \
+                                 answer is the same whatever they are, so it states a fact \
+                                 rather than computing one (profile §4)"
+                                    .to_string(),
+                            );
+                        }
                     }
                     for r in paths {
                         check_path(&r, scope, *line, *column, sink);
@@ -4144,14 +4271,25 @@ fn check_arg(
             expr_paths(rhs, &mut paths);
             // §9.3 applies to a comparison's right side too: `x == 3 * 4` computes
             // a number from nothing and compares against it.
-            if matches!(rhs.as_ref(), Operand::Expr { .. }) && paths.is_empty() {
-                sink.push(
-                    arg.line,
-                    arg.column,
-                    "an expression must read a declared source or state: every operand here \
-                     is a literal, which states a fact rather than computing one (profile §4)"
-                        .to_string(),
-                );
+            if matches!(rhs.as_ref(), Operand::Expr { .. }) {
+                if paths.is_empty() {
+                    sink.push(
+                        arg.line,
+                        arg.column,
+                        "an expression must read a declared source or state: every operand here \
+                         is a literal, which states a fact rather than computing one (profile §4)"
+                            .to_string(),
+                    );
+                } else if expr_is_constant(rhs) {
+                    sink.push(
+                        arg.line,
+                        arg.column,
+                        "this expression reads declared values and IGNORES them: its answer is \
+                         the same whatever they are, so it states a fact rather than computing \
+                         one (profile §4). `x * 0 + 1547` is 1547"
+                            .to_string(),
+                    );
+                }
             }
             for p in paths {
                 check_path(&p, scope, arg.line, arg.column, sink);
@@ -4173,6 +4311,15 @@ fn check_arg(
                     arg.column,
                     "an expression must read a declared source or state: every operand here \
                      is a literal, which states a fact rather than computing one (profile §4)"
+                        .to_string(),
+                );
+            } else if expr_is_constant(expr) {
+                sink.push(
+                    arg.line,
+                    arg.column,
+                    "this expression reads declared values and IGNORES them: its answer is the \
+                     same whatever they are, so it states a fact rather than computing one \
+                     (profile §4). `x * 0 + 1547` is 1547"
                         .to_string(),
                 );
             }

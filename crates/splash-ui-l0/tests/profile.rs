@@ -5984,3 +5984,109 @@ view root Surface { Chip(text: "c", active: k == 3 * 4) TextRow(text: q.last) }
         why(FABRICATED)
     );
 }
+
+/// L1's remaining holes, closed: grouping, a negative coefficient, and an
+/// expression that reads values and ignores them.
+///
+/// The third is the one that needed an argument rather than a patch. §9.3 asked
+/// an expression to READ something, which stops `1547 * 3.2` and does not stop
+/// `quote.last * 0 + 1547` — one real reading laundering a fabricated number.
+/// The argument: a formula is a formula because its answer MOVES when its inputs
+/// move, so evaluate it under several assignments and refuse an answer that never
+/// changes.
+#[test]
+fn an_expression_must_depend_on_what_it_reads() {
+    let ok = |body: &str| {
+        let card = format!(
+            "# level: L1\nsource q sys.quote(ticker: \"N\", fields: [last, open])\n\
+             state k {{ shape: number, initial: 2 }}\nview root Surface {{ {body} }}\n"
+        );
+        check_ui_l0_named("x", &card).valid
+    };
+
+    // GROUPING. Precedence was fixed and unoverridable.
+    assert!(ok("TextHero(value: (q.last + q.open) * k)"), "grouping");
+    assert!(
+        ok("TextHero(value: ((q.last + 1) * (k + 2)) / q.open)"),
+        "nested grouping"
+    );
+    // A NEGATIVE COEFFICIENT — the ordinary way to subtract a scaled reading.
+    assert!(ok("TextHero(value: q.last * -1)"), "negative coefficient");
+    // A bare negative literal is still refused, by §4's original rule: a
+    // measurement the model wrote, in a position that renders one.
+    assert!(!ok("TextHero(value: -1)"), "a bare literal is still a fact");
+
+    // DEGENERATE. Each reads something real and ignores it.
+    for fake in [
+        "q.last * 0 + 1547",
+        "q.last - q.last + 99",
+        "(q.last - q.last) * k + 5",
+        "q.last * 0.0",
+    ] {
+        assert!(
+            !ok(&format!("TextHero(value: {fake})")),
+            "{fake} is a constant with extra steps and must be refused"
+        );
+    }
+    // HONEST. Each answer moves with its inputs.
+    for real in [
+        "q.last - q.open",
+        "q.last * 9 / 5 + 32",
+        "(q.last + q.open) * k",
+        "q.last / q.open",
+        "q.last * -1",
+    ] {
+        assert!(
+            ok(&format!("TextHero(value: {real})")),
+            "{real} is a formula and must be admitted"
+        );
+    }
+
+    // The probe must not condemn a difference. Binding every read to the SAME
+    // number would make `a - b` constant, which is why the assignments differ
+    // per path as well as per round.
+    assert!(
+        ok("TextHero(value: q.last - q.open)"),
+        "a - b is not constant"
+    );
+
+    // And it reaches a comparison's right side, which can hold arithmetic now.
+    const GUARD: &str = r#"# level: L1
+source q sys.quote(ticker: "N", fields: [last])
+state k { shape: number, initial: 2 }
+view root Surface { when k == q.last * 0 + 7 { Rule() } TextRow(text: q.last) }
+"#;
+    assert!(
+        !check_ui_l0_named("g", GUARD).valid,
+        "a guard comparing against a fabricated constant must be refused"
+    );
+}
+
+/// Grouping changes the ANSWER, not just the parse.
+#[test]
+fn grouping_overrides_precedence() {
+    let tree = |expr: &str| {
+        let card = format!(
+            "# level: L1\nstate a {{ shape: number, initial: 2 }}\n\
+             state b {{ shape: number, initial: 3 }}\nstate c {{ shape: number, initial: 4 }}\n\
+             view root Surface {{ TextHero(value: {expr}) }}\n"
+        );
+        let data = serde_json::json!({
+            "a": 2.0, "b": 3.0, "c": 4.0, "env": { "locale": {} }, "copy": {}
+        });
+        let root = realize(&card, &data, RealizeLimits::default())
+            .root
+            .expect("realizes");
+        splash_ui_l0::kit::lower(&root)
+    };
+    // The DSL carries the EXPRESSION, so the tree's shape is the evidence: the
+    // backend evaluates it against data that arrives later.
+    assert!(
+        tree("a + b * c").contains("(2 + (3 * 4))"),
+        "multiplication binds tighter"
+    );
+    assert!(
+        tree("(a + b) * c").contains("((2 + 3) * 4)"),
+        "and grouping overrides that"
+    );
+}

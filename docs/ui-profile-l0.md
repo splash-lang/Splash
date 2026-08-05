@@ -1307,11 +1307,13 @@ Multiplicative operators bind tighter than additive ones and both associate left
 `temp * 9 / 5 + 32` means what it reads as. Nesting is bounded at parse by the same limit every
 other nested construct uses (`DEFAULT_MAX_SYNTAX_NESTING`, 128).
 
-**There is no grouping.** Parentheses are not in the production above, so precedence is fixed
-and cannot be overridden: `(a + b) * c` is not writable at L1. **There is no unary minus inside
-an expression** either — a negative literal is admitted where a literal is admitted, and `n * -1`
-is not. Both are limits of what was implemented rather than decisions, and both are recorded in
-§9.8.
+**Grouping and a leading minus are both in the grammar.** `atom` also admits `"(" , operand , ")"`
+and a negated atom, so `(a + b) * c` overrides the fixed precedence and `n * -1` is the ordinary
+way to subtract a scaled reading. A negated *literal* is a negative literal rather than an
+expression, so it stays a coefficient — which also means a bare `value: -1` is refused by §4's
+original rule, as a measurement the model wrote in a position that renders one.
+
+A comparison is the **loosest** thing in an operand, so `x == a + b` compares against the sum.
 
 **The specified position is an argument value**, which is where the motivating cards need one:
 
@@ -1338,12 +1340,27 @@ fact wearing arithmetic, and is refused. Every path an expression reads — at a
 checked against declared names exactly as a bare binding is, so an expression cannot launder an
 undeclared name past the check that a plain path would fail.
 
-This is the whole of the §4 argument at L1, and it is weaker than L0's in a way worth naming.
-L0's version is *structural*: there is no position in which a fabricated number can appear.
-L1's is a *predicate on the operand set*: a card that reads one real value and combines it with
-invented coefficients passes. `quote.last * 0 + 1547` reads a source, computes, and produces a
-fabricated number. **The rule bounds what an expression may be made of; it does not bound what
-an expression may produce**, and closing that needs an argument this section does not have.
+That rule alone bounds what an expression is made OF and not what it may PRODUCE, and the gap is
+real: `quote.last * 0 + 1547` reads a source, computes, and yields a fabricated number. So there
+is a second rule.
+
+> **An expression's answer must MOVE when its inputs move.**
+
+A formula is a formula because it depends on what it reads. So the expression is evaluated under
+several assignments of its reads, and an answer that never changes is a constant the model wrote
+with extra steps — refused. `temp * 9 / 5 + 32` moves; `last * 0 + 1547`, `last - last + 99` and
+`(last - last) * k + 5` do not.
+
+The assignments differ **per path** as well as per round, because binding every read to one number
+would make `a - b` constant and condemn a correct formula. Three rounds of coprime-ish values: an
+expression constant across all three and not constant in general is not something five arithmetic
+operators can express. Unresolvable in every round — a division by a probed zero — is *not*
+degenerate; that is a partial expression, and §9.4 already renders it as missing.
+
+The two rules together are still not L0's *structural* guarantee, which is that no position admits
+a fabricated number at all. They are a pair of decidable checks that between them refuse the
+constructions a fabrication has available. The remaining distance is that L1 must ASK these
+questions where L0 has no question to ask.
 
 ### 9.4 Evaluation
 
@@ -1422,10 +1439,12 @@ Recorded rather than patched over, in the order they would bite.
   also checked like any other operand, since it can now hold arithmetic: an undeclared name in it
   is refused, and §9.3 reaches it, so `x == 3 * 4` compares against a fabricated number and is
   refused too.
-- **No grouping and no unary minus**, per §9.2. `(a + b) * c` is inexpressible, which is the
-  first thing an author will reach for after a formula that does not match the fixed precedence.
-- **The no-facts rule bounds operands, not results** (§9.3). A fabricated number can be computed
-  from one real reading and invented coefficients.
+- ~~**No grouping and no unary minus.**~~ **Fixed**, per §9.2. `(a + b) * c` and `n * -1` are both
+  admitted, and a bare `value: -1` is still refused by §4's original rule.
+- ~~**The no-facts rule bounds operands, not results.**~~ **Fixed**, per §9.3's second rule: an
+  expression's answer must move when its inputs move, so `last * 0 + 1547` is refused. This was
+  recorded as needing an argument rather than a patch, and the argument is that a formula depends
+  on what it reads.
 - **Arithmetic is the only construct.** No comparison chain, no conditional, no string
   operation, no aggregate over a collection. §8 question 10 — how a card says a collection is
   empty — is *not* answered here, and a count is still one operator away from the arithmetic
