@@ -1404,13 +1404,16 @@ L0, which is precisely what the level in the report is for.
 
 Recorded rather than patched over, in the order they would bite.
 
-- **A guard's right-hand side escapes both checks.** `when n == nosuch * 2` is *accepted*: an
-  expression in a guard is not checked against declared names and is not subject to §9.3's
-  must-read rule, and its operands are not registered as dependencies. The same guard with a bare
-  path — `when n == nosuch` — is correctly refused, so the hole is the expression form
-  specifically. Realization *does* evaluate it. This section admits expressions in argument
-  positions only; the implementation parses one here and then checks nothing, which is the worst
-  of the three possible behaviours. **This is a defect, not a limit.**
+- ~~**A guard's right-hand side escapes both checks.**~~ **Fixed.** `when n == nosuch * 2` was
+  *accepted*: an expression in a guard was matched only as a bare path, so it was checked against
+  no declared name, was not subject to §9.3's must-read rule, and its operands were not registered
+  as dependencies — while realization evaluated it anyway. A guard's right operand is now walked
+  like any other operand, by the same function, so all three apply there. Two neighbouring
+  under-approximations went with it: a comparison's right operand in an argument
+  (`active: a == b` never re-realized when `b` moved) and, in the coarse dependency query, a state
+  reaching a view only through a source argument. **A guard is still not a position this section
+  admits an expression in** — the implementation parses one and now checks it correctly, which is
+  a narrower gap between the two than it was, and still a gap.
 - **Comparison and arithmetic have no defined relative precedence.** `active: x == a + b` parses
   as `(x == a) + b` rather than as a comparison against a sum, and evaluates to missing. Nothing
   rejects it.

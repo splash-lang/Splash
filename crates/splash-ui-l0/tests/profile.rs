@@ -5233,3 +5233,114 @@ view root Surface {
         "the cell must still hold w1, so d1 is a move: {out:?}"
     );
 }
+
+/// Every path an operand reads is a dependency, however it is nested.
+///
+/// Reconciliation is only safe if this set is complete: over-approximating
+/// re-realizes too much, under-approximating shows a stale screen, and the
+/// second is the one that ships a wrong number. Two shapes were missed because
+/// the scan matched operand forms one at a time — a comparison's RIGHT operand,
+/// and a guard's right operand beyond a bare path.
+#[test]
+fn every_operand_a_record_reads_is_a_dependency() {
+    // `active: a == b` reads `b`. It reported nothing, so a chip's selected
+    // state never re-realized when the thing it compares against moved.
+    const PREDICATE: &str = r#"
+state a { shape: text, initial: "x" }
+state b { shape: text, initial: "y" }
+view root Surface { Chip(text: "c", active: a == b) }
+"#;
+    assert!(
+        dirty_records(PREDICATE, &["b"]).contains(&"root".to_string()),
+        "a comparison's right operand is read: {:?}",
+        dirty_records(PREDICATE, &["b"])
+    );
+
+    // The same, one level up: a guard whose right operand is an expression.
+    const GUARD_EXPR: &str = r#"# level: L1
+state a { shape: number, initial: 1 }
+state b { shape: number, initial: 2 }
+view root Surface { when a == b * 2 { Rule() } }
+"#;
+    assert!(
+        dirty_records(GUARD_EXPR, &["b"]).contains(&"root".to_string()),
+        "a guard's expression operands are read: {:?}",
+        dirty_records(GUARD_EXPR, &["b"])
+    );
+
+    // A binder still shadows — `it` is loop-local, not a card dependency.
+    const LOOP: &str = r#"
+source items sys.news(count: 3, fields: [title])
+view root Surface { for it, i in items key it.title { TextRow(text: it.title) } }
+"#;
+    assert!(
+        dirty_records(LOOP, &["it"]).is_empty(),
+        "a loop binder is not a dependency"
+    );
+}
+
+/// A state that reaches a view only THROUGH a source argument is a dependency
+/// of that view.
+///
+/// `dirty_records` filtered on the changed names alone, so `sel` dirtied nothing
+/// here: no record reads `sel`, they read `q`. That is the stock card's exact
+/// shape — `sys.quote(ticker: state.selected)` — and the coarse function is the
+/// one a host reaches for first. `patch_points` already followed the cascade,
+/// and two functions answering one question differently is worse than either.
+#[test]
+fn a_state_a_source_reads_dirties_that_sources_readers() {
+    const CARD: &str = r#"
+source q sys.quote(ticker: sel, fields: [last])
+state sel { shape: text, initial: "NVDA" }
+view root Surface { TextHero(value: q.last) }
+"#;
+    assert!(
+        dirty_records(CARD, &["sel"]).contains(&"root".to_string()),
+        "changing the ticker must dirty the view that shows the quote: {:?}",
+        dirty_records(CARD, &["sel"])
+    );
+    // And the two functions now agree about it.
+    assert!(patch_points(CARD, &["sel"]).contains(&"root".to_string()));
+}
+
+/// A guard's right-hand side is checked like any other operand.
+///
+/// §9.8 recorded this as a defect: an expression there was matched only as a
+/// bare path, so an undeclared name reached evaluation through the one position
+/// that did not look inside its operand, and §4's must-read rule was skipped
+/// with it.
+#[test]
+fn a_guards_right_operand_is_checked_like_any_other() {
+    let why = |c: &str| {
+        check_ui_l0_named("g", c)
+            .diagnostics
+            .iter()
+            .map(|d| d.message.clone())
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    const UNDECLARED: &str = r#"# level: L1
+state n { shape: number, initial: 2 }
+view root Surface { when n == nosuch * 2 { Rule() } }
+"#;
+    assert!(
+        why(UNDECLARED).contains("not a declared name"),
+        "an undeclared name in a guard expression: {}",
+        why(UNDECLARED)
+    );
+    const FABRICATED: &str = r#"# level: L1
+state n { shape: number, initial: 2 }
+view root Surface { when n == 3 * 4 { Rule() } }
+"#;
+    assert!(
+        why(FABRICATED).contains("must read a declared"),
+        "§4 applies in a guard too: {}",
+        why(FABRICATED)
+    );
+    const HONEST: &str = r#"# level: L1
+state n { shape: number, initial: 2 }
+state m { shape: number, initial: 1 }
+view root Surface { when n == m * 2 { Rule() } }
+"#;
+    assert!(check_ui_l0_named("g", HONEST).valid, "{}", why(HONEST));
+}

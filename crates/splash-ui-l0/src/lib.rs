@@ -3813,8 +3813,31 @@ fn walk(
                 // The right operand is a binding too. Unchecked, an undeclared
                 // name on the right resolved to nothing and the comparison
                 // decided the branch on that absence.
-                if let Some(Operand::Path(r)) = element.rhs.as_ref() {
-                    check_path(r, scope, *line, *column, sink);
+                //
+                // EVERY path in it, not just a bare one. This matched
+                // `Operand::Path` alone, so `when a == nosuch * 2` was accepted
+                // at L1 — an undeclared name reaching evaluation through the one
+                // position that did not look inside its operand. §4's rule that
+                // an expression must READ something was skipped here for the
+                // same reason, so a guard could compare against a fabricated
+                // literal. Both are the argument-position rules; a guard is not
+                // a place they stop applying.
+                if let Some(rhs) = element.rhs.as_ref() {
+                    let mut paths = Vec::new();
+                    expr_paths(rhs, &mut paths);
+                    if matches!(rhs, Operand::Expr { .. }) && paths.is_empty() {
+                        sink.push(
+                            *line,
+                            *column,
+                            "an expression must read a declared source or state: every operand \
+                             here is a literal, which states a fact rather than computing one \
+                             (profile §4)"
+                                .to_string(),
+                        );
+                    }
+                    for r in paths {
+                        check_path(&r, scope, *line, *column, sink);
+                    }
                 }
             }
         }
@@ -7223,10 +7246,29 @@ pub fn patch_points(source: &str, changed: &[&str]) -> Vec<String> {
 /// The measurable claim behind "one event, one state change, one reconciliation
 /// pass": toggling a unit should touch the records that read it, not the tree.
 pub fn dirty_records(source: &str, changed: &[&str]) -> Vec<String> {
-    let roots: Vec<String> = changed.iter().map(root_of).collect();
+    // Follow the SOURCE cascade first, exactly as `patch_points` does.
+    //
+    // This filtered on the changed roots alone, so a state that reaches a view
+    // only through a source argument dirtied nothing: `sys.quote(ticker: sel)`
+    // read by `TextHero(value: q.last)` reported no record when `sel` changed,
+    // because no record reads `sel` — they read `q`. That is the stock card's
+    // whole shape, and it is the under-approximating direction, which the
+    // profile is explicit shows stale data.
+    //
+    // `patch_points` had this and this did not, which is the more dangerous half
+    // of a disagreement between two functions answering one question: the coarse
+    // one is what a host reaches for first.
+    let mut sink = Diagnostics::default();
+    let invalidated = match lex(source, &mut sink) {
+        Some(tokens) => {
+            let card = Parser::new(&tokens, &mut sink).parse_card();
+            invalidated_by(&card, changed)
+        }
+        None => changed.iter().map(root_of).collect(),
+    };
     record_dependencies(source)
         .into_iter()
-        .filter(|d| d.reads.iter().any(|r| roots.iter().any(|c| c == r)))
+        .filter(|d| d.reads.iter().any(|r| invalidated.iter().any(|c| c == r)))
         .map(|d| d.record)
         .collect()
 }
@@ -7247,32 +7289,32 @@ fn collect_reads(element: &Element, reads: &mut Vec<String>, pulls: &mut Vec<Str
     // A loop binder shadows: `for d in week` makes `d` local, not a dependency.
     let binders = &element.binders;
 
-    for arg in &element.args {
-        match &arg.value {
-            Operand::Path(p) | Operand::Predicate { path: p, .. } => {
-                let root = root_of(p);
-                if !binders.contains(&root) {
-                    reads.push(root);
-                }
+    // EVERY path an operand reads is a dependency, however it is nested.
+    //
+    // This matched shapes one at a time and missed two of them, in the direction
+    // that is a correctness bug rather than a cost: a comparison's right operand
+    // (`active: a == b` never re-realized when `b` changed) and a guard's right
+    // operand beyond a bare path (`when a == b * 2` likewise). Both render a
+    // stale screen, which is what this whole mechanism exists to prevent.
+    //
+    // `expr_paths` already walks all three forms, and is the same function §4's
+    // must-read rule and the checker use — so a shape it learns is picked up
+    // here for free rather than needing a third arm added in a third place.
+    let collect = |operand: &Operand, reads: &mut Vec<String>| {
+        let mut paths = Vec::new();
+        expr_paths(operand, &mut paths);
+        for p in paths {
+            let root = root_of(&p);
+            if !binders.contains(&root) {
+                reads.push(root);
             }
-            // Every operand of an expression is a dependency. Missing these
-            // would under-approximate the patch set, and the profile is explicit
-            // that under-approximating shows stale data.
-            expr @ Operand::Expr { .. } => {
-                let mut paths = Vec::new();
-                expr_paths(expr, &mut paths);
-                for p in paths {
-                    let root = root_of(&p);
-                    if !binders.contains(&root) {
-                        reads.push(root);
-                    }
-                }
-            }
-            _ => {}
         }
+    };
+    for arg in &element.args {
+        collect(&arg.value, reads);
     }
-    if let Some(Operand::Path(p)) = element.rhs.as_ref() {
-        reads.push(root_of(p));
+    if let Some(rhs) = element.rhs.as_ref() {
+        collect(rhs, reads);
     }
 
     if element.is_reference || !element.name.is_empty() {
