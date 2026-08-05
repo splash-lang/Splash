@@ -4687,10 +4687,15 @@ view root Surface {
         dsl.contains("l0_aligned(l0_col(") && dsl.contains(", \"center\")"),
         "align: .center must reach the kit:\n{dsl}"
     );
-    // A NUMBER. Matching only text and tokens emptied every one of these.
+    // The hero's condition is LIVE. This asserted `l0_weathericon(2, "hero")` —
+    // the realized number — which was right while no scalar consulted its
+    // binding. A `cond` the backend can answer now lowers to the call, so the
+    // icon is the code that is true when the card draws rather than the one the
+    // host happened to seed. The size must still travel with it: that half was
+    // the original defect and is unrelated to where the value comes from.
     assert!(
-        dsl.contains("l0_weathericon(2, \"hero\")"),
-        "a numeric cond and its size must both reach the kit:\n{dsl}"
+        dsl.contains("l0_weathericon(sys.weatherword(") && dsl.contains(", \"hero\")"),
+        "the hero's cond must go live and keep its size:\n{dsl}"
     );
     // And the per-item conditions must DIFFER — one shared value for every row
     // is exactly what the bug produced, and a test that only checked "a number

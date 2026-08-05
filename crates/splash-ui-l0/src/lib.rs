@@ -7641,7 +7641,21 @@ pub mod kit {
     /// arity, and a card that failed to supply a bound would otherwise not
     /// parse. Zero at least draws something visibly wrong, where a parse error
     /// takes the whole card down.
+    /// A scalar argument — live where the backend can answer it.
+    ///
+    /// The bindings were never consulted here, so `WeatherIcon(cond: d.cond)`
+    /// lowered the weather code realization happened to see. Against a seed blob
+    /// that is right by accident; on a live card, which carries no blob, every
+    /// icon in a seven-day forecast fell back to the same default. Exactly the
+    /// defect `tint` had, in the other place that reads a realized value and
+    /// emits a literal — and the icon is the harder one to notice, because a
+    /// wrong icon looks precisely like a right one.
     fn scalar_of(node: &UiNode, name: &str) -> String {
+        if let Some((_, binding)) = node.bindings.iter().find(|(n, _)| n == name) {
+            if let Some(call) = makepad::vm_call(binding) {
+                return call;
+            }
+        }
         match arg(node, name) {
             Some(NodeValue::Number(n)) => makepad::trim_num(*n),
             Some(NodeValue::Text(t)) => format!("{t:?}"),
