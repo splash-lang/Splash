@@ -388,7 +388,7 @@ against an empty host surface. Three reference cards exercise it.
 
 **Implemented** in `splash-core::ui_l0`: parser, validator, per-instance state store,
 event dispatch, a renderer-neutral realizer, a source plan, and static dependency tracking for
-reconciliation. 85 tests; the three reference cards are accepted and the shipping nav card is
+reconciliation. 203 tests; the three reference cards are accepted and the shipping nav card is
 rejected as L2; four cases render on a OnePlus 6T through an unmodified downstream host, checked
 against golden images.
 
@@ -435,10 +435,15 @@ Remaining:
   realization still rebuilds the tree rather than patching those points.
 - **`makepad::lower` is in the wrong crate.** It belongs in a backend crate, not
   in `splash-core`, which otherwise names no renderer.
-- **`StockPlot` and `AqiContour` lower without their data arrays**, so both
-  render as empty frames on device.
-- **L1 and L2 are unimplemented.** Both are specified only as what L0 excludes,
-  so the level classifier can name them but cannot check them.
+- **L1 is implemented ahead of its specification.** A card declaring `level: L1`
+  is admitted and gets an expression form — arithmetic over already-declared
+  values, where an expression must read something so a literal-only formula
+  stays a fabricated fact. But the profile is titled Level 0 and specifies L1
+  only as what L0 excludes: §7 licenses the admission and no section states the
+  grammar, the evaluation rules, or the §4 argument. The checker currently
+  blesses a level no document defines, and the spec pass is owed.
+- **L2 is unimplemented and refused before parsing.** Imperative widget commands
+  are a different grammar rather than a wider one, so nothing below parses them.
 
 ## Before a stable language release
 
