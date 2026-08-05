@@ -224,14 +224,28 @@ pub fn check_ui_l0_named(_name: &str, source: &str) -> UiL0Report {
 
     // A construct outside the grammar tells us the level before parsing can
     // finish, and a level diagnostic is far more useful than "unexpected token".
+    // A card that DECLARES L1 is parsed, not refused.
+    //
+    // §7 says a record needing a wider grammar is rejected "until the level is
+    // explicitly raised" — so raising it explicitly is the whole point. Without
+    // this the classifier could name L1 and never admit one, which is what
+    // `roadmap.md` meant by "can name them but cannot check them". L2 stays
+    // refused here: imperative widget commands are a different grammar, not a
+    // wider one, and nothing below parses them.
+    let declared_l1 = header
+        .as_ref()
+        .and_then(|h| h.level.as_deref())
+        .is_some_and(|l| l.trim() == "L1");
     if let Some((level, diag)) = classify_beyond_l0(&tokens) {
-        sink.push(diag.line, diag.column, diag.message);
-        let mut report = sink.into_report(level);
-        report.header = header.clone();
-        // Compare here too: this is the path a card that UNDER-declares its
-        // level takes, and it was the one path that skipped the comparison.
-        check_header(&header, level, &mut report);
-        return report;
+        if !(declared_l1 && level == Level::L1) {
+            sink.push(diag.line, diag.column, diag.message);
+            let mut report = sink.into_report(level);
+            report.header = header.clone();
+            // Compare here too: this is the path a card that UNDER-declares its
+            // level takes, and it was the one path that skipped the comparison.
+            check_header(&header, level, &mut report);
+            return report;
+        }
     }
 
     let mut parser = Parser::new(&tokens, &mut sink);
@@ -241,7 +255,8 @@ pub fn check_ui_l0_named(_name: &str, source: &str) -> UiL0Report {
     }
 
     validate(&card, &mut sink);
-    let mut report = sink.into_report(Level::L0);
+    let derived = if declared_l1 { Level::L1 } else { Level::L0 };
+    let mut report = sink.into_report(derived);
     report.closure = component_closure(&card);
     report.header = header.clone();
     check_header(&header, report.level, &mut report);
@@ -406,7 +421,14 @@ impl Diagnostics {
         UiL0Report {
             header: None,
             closure: Vec::new(),
-            valid: self.items.is_empty() && level == Level::L0,
+            // Valid AT ITS LEVEL, not "is L0".
+            //
+            // This read `level == Level::L0`, which was right while L0 was the
+            // only level this checker admitted: an L1 card reached here with no
+            // diagnostics and was still reported invalid, with nothing to say
+            // why. L2 is refused before parsing, so anything arriving here is L0
+            // or a card that declared L1.
+            valid: self.items.is_empty() && level != Level::L2,
             level,
             diagnostics: self.items,
             diagnostics_truncated: self.truncated,
@@ -987,6 +1009,16 @@ enum Operand {
     /// right operand, so `active: range == .d1` realized as the VALUE of
     /// `range` rather than as a boolean — live in stock.card, and invisible
     /// because the device golden recorded the wrong rendering as correct.
+    /// **L1 only.** Arithmetic over already-declared values: `shares * quote.last`.
+    ///
+    /// The model supplies the FORMULA; the runtime computes it. That split is
+    /// what keeps §4's no-facts rule true one level up — a card may combine
+    /// facts it declared, and still cannot state one it never observed.
+    Expr {
+        lhs: Box<Operand>,
+        op: String,
+        rhs: Box<Operand>,
+    },
     Predicate {
         path: String,
         cmp: String,
@@ -2098,7 +2130,61 @@ impl<'a> Parser<'a> {
         out
     }
 
+    /// An argument value, including an L1 arithmetic expression.
+    ///
+    /// Precedence is the usual one — `*` `/` `%` bind tighter than `+` `-` — so
+    /// `cost + shares * price` means what it reads as. Left-associative.
     fn parse_operand(&mut self) -> Operand {
+        let lhs = self.parse_term();
+        self.parse_additive(lhs)
+    }
+
+    fn parse_additive(&mut self, mut lhs: Operand) -> Operand {
+        while let Some(op) = self.peek().cloned() {
+            if !(op.is_punct("+") || op.is_punct("-")) {
+                break;
+            }
+            if self.depth > DEFAULT_MAX_SYNTAX_NESTING {
+                self.sink.at(&op, "nesting is too deep".into());
+                break;
+            }
+            self.at += 1;
+            self.depth += 1;
+            let rhs = self.parse_term();
+            self.depth -= 1;
+            lhs = Operand::Expr {
+                lhs: Box::new(lhs),
+                op: op.text,
+                rhs: Box::new(rhs),
+            };
+        }
+        lhs
+    }
+
+    fn parse_term(&mut self) -> Operand {
+        let mut lhs = self.parse_atom();
+        while let Some(op) = self.peek().cloned() {
+            if !(op.is_punct("*") || op.is_punct("/") || op.is_punct("%")) {
+                break;
+            }
+            if self.depth > DEFAULT_MAX_SYNTAX_NESTING {
+                self.sink.at(&op, "nesting is too deep".into());
+                break;
+            }
+            self.at += 1;
+            self.depth += 1;
+            let rhs = self.parse_atom();
+            self.depth -= 1;
+            lhs = Operand::Expr {
+                lhs: Box::new(lhs),
+                op: op.text,
+                rhs: Box::new(rhs),
+            };
+        }
+        lhs
+    }
+
+    fn parse_atom(&mut self) -> Operand {
         let Some(t) = self.peek().cloned() else {
             return Operand::Str(String::new());
         };
@@ -2126,7 +2212,7 @@ impl<'a> Parser<'a> {
                         }
                         self.at += 1;
                         self.depth += 1;
-                        let rhs = self.parse_operand();
+                        let rhs = self.parse_term();
                         self.depth -= 1;
                         return Operand::Predicate {
                             path,
@@ -2163,6 +2249,24 @@ fn literal_of(operand: &Operand) -> serde_json::Value {
         Operand::Path(p) | Operand::Predicate { path: p, .. } => {
             serde_json::Value::String(p.clone())
         }
+        // An expression has no literal form; it is computed at realization.
+        Operand::Expr { .. } => serde_json::Value::Null,
+    }
+}
+
+/// Every path an operand reads, however deeply nested in an expression.
+fn expr_paths(operand: &Operand, out: &mut Vec<String>) {
+    match operand {
+        Operand::Path(p) => out.push(p.clone()),
+        Operand::Predicate { path, rhs, .. } => {
+            out.push(path.clone());
+            expr_paths(rhs, out);
+        }
+        Operand::Expr { lhs, rhs, .. } => {
+            expr_paths(lhs, out);
+            expr_paths(rhs, out);
+        }
+        _ => {}
     }
 }
 
@@ -2187,7 +2291,45 @@ fn scope_value(scope: &ValueScope, operand: &Operand) -> Option<serde_json::Valu
         Operand::Num(n) => Some(serde_json::Value::from(*n)),
         // A nested comparison is not in the grammar.
         Operand::Predicate { .. } => None,
+        Operand::Expr { lhs, op, rhs } => eval_expr(scope, lhs, op, rhs),
     }
+}
+
+/// Evaluate an L1 arithmetic expression over resolved values.
+///
+/// Returns `None` when either side is unresolved — a missing operand must render
+/// as the em dash a missing binding already does, never as a zero, which would be
+/// a fabricated number wearing arithmetic.
+fn eval_expr(
+    scope: &ValueScope,
+    lhs: &Operand,
+    op: &str,
+    rhs: &Operand,
+) -> Option<serde_json::Value> {
+    let a = scope_value(scope, lhs)?.as_f64()?;
+    let b = scope_value(scope, rhs)?.as_f64()?;
+    let v = match op {
+        "+" => a + b,
+        "-" => a - b,
+        "*" => a * b,
+        "/" => {
+            if b == 0.0 {
+                return None;
+            }
+            a / b
+        }
+        "%" => {
+            if b == 0.0 {
+                return None;
+            }
+            a % b
+        }
+        _ => return None,
+    };
+    if !v.is_finite() {
+        return None;
+    }
+    Some(serde_json::Value::from(v))
 }
 
 /// Compare two resolved values. Shared by guards (`when a == b`) and by
@@ -3965,6 +4107,29 @@ fn check_arg(
                 check_path(r, scope, arg.line, arg.column, sink);
             }
         }
+        // §4's no-facts rule, one level up.
+        //
+        // L0 refuses a literal in a value position outright — a decidable,
+        // structural check. L1 cannot, because a coefficient is a legitimate
+        // literal: `temp * 9 / 5 + 32` is a FORMULA. So the rule becomes: an
+        // expression must READ something. `1547 * 3.2` reads nothing, and is a
+        // fabricated fact wearing arithmetic.
+        (expr @ Operand::Expr { .. }, _) => {
+            let mut paths = Vec::new();
+            expr_paths(expr, &mut paths);
+            if paths.is_empty() {
+                sink.push(
+                    arg.line,
+                    arg.column,
+                    "an expression must read a declared source or state: every operand here \
+                     is a literal, which states a fact rather than computing one (profile §4)"
+                        .to_string(),
+                );
+            }
+            for p in paths {
+                check_path(&p, scope, arg.line, arg.column, sink);
+            }
+        }
         _ => {}
     }
 
@@ -4222,6 +4387,23 @@ fn check_path(path: &str, scope: &Scope, line: usize, column: usize, sink: &mut 
 
 // ─────────────────────────────────────────────────────────────────── realization ──
 
+/// An L1 expression, resolved for lowering.
+///
+/// A realized number is not enough: `shares * quote.last` computed at
+/// realization is the answer for the data the host happened to seed, and a live
+/// card has none. The backend needs the SHAPE — which operands are live calls
+/// and which are constants — so it can emit arithmetic the VM evaluates against
+/// data that arrives later.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExprPart {
+    /// An operand answered by a live capability call.
+    Call(SourceBinding),
+    /// An operand already resolved to a constant — a coefficient, or a value no
+    /// backend can answer.
+    Const(String),
+    Bin(Box<ExprPart>, String, Box<ExprPart>),
+}
+
 /// A realized node. Renderer-neutral: a backend maps `kind` to its own widget.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UiNode {
@@ -4243,6 +4425,8 @@ pub struct UiNode {
     /// Additive on purpose: a consumer that ignores this sees exactly what it
     /// saw before.
     pub bindings: Vec<(String, SourceBinding)>,
+    /// For each argument that is an L1 expression, its resolved shape.
+    pub exprs: Vec<(String, ExprPart)>,
 }
 
 /// Where an argument's value came from, with the source's own arguments already
@@ -4665,12 +4849,18 @@ impl Realizer<'_> {
             args: Vec::new(),
             children: Vec::new(),
             bindings: Vec::new(),
+            exprs: Vec::new(),
         };
         for arg in &element.args {
             let value = self.value(&element.name, &arg.name, &arg.value, scope);
             if let Operand::Path(path) = &arg.value {
                 if let Some(binding) = self.source_binding(path, scope) {
                     node.bindings.push((arg.name.clone(), binding));
+                }
+            }
+            if matches!(arg.value, Operand::Expr { .. }) {
+                if let Some(shape) = self.expr_shape(&arg.value, scope) {
+                    node.exprs.push((arg.name.clone(), shape));
                 }
             }
             node.args.push((arg.name.clone(), value));
@@ -4993,6 +5183,31 @@ impl Realizer<'_> {
         }
     }
 
+    /// Resolve an expression into live calls and constants.
+    ///
+    /// A `Path` the backend can answer becomes a call; anything else becomes the
+    /// value realization already resolved. Returning `None` for an operand that
+    /// resolves to nothing keeps a half-resolved expression from lowering — it
+    /// renders as the missing binding it is.
+    fn expr_shape(&self, operand: &Operand, scope: &ValueScope) -> Option<ExprPart> {
+        match operand {
+            Operand::Expr { lhs, op, rhs } => Some(ExprPart::Bin(
+                Box::new(self.expr_shape(lhs, scope)?),
+                op.clone(),
+                Box::new(self.expr_shape(rhs, scope)?),
+            )),
+            Operand::Num(n) => Some(ExprPart::Const(makepad::trim_num(*n))),
+            Operand::Path(p) => match self.source_binding(p, scope) {
+                Some(binding) => Some(ExprPart::Call(binding)),
+                None => {
+                    let v = scope.lookup(p)?;
+                    Some(ExprPart::Const(makepad::trim_num(v.as_f64()?)))
+                }
+            },
+            _ => None,
+        }
+    }
+
     fn source_binding(&self, path: &str, scope: &ValueScope) -> Option<SourceBinding> {
         // Inside a `for`, a path is rooted at the BINDER: `m.ticker`, not
         // `movers.0.ticker`. The binder's frame records which collection it
@@ -5100,6 +5315,13 @@ impl Realizer<'_> {
             Operand::Predicate { path, cmp, rhs } => {
                 NodeValue::Bool(compare(scope.lookup(path), cmp, scope_value(scope, rhs)))
             }
+            Operand::Expr { lhs, op, rhs } => match eval_expr(scope, lhs, op, rhs) {
+                Some(v) => match v.as_f64() {
+                    Some(n) => NodeValue::Number(n),
+                    None => NodeValue::Missing,
+                },
+                None => NodeValue::Missing,
+            },
             Operand::Path(p) => match scope.lookup(p) {
                 Some(serde_json::Value::String(s)) => NodeValue::Text(s),
                 Some(serde_json::Value::Bool(b)) => NodeValue::Bool(b),
@@ -5134,7 +5356,7 @@ fn json_to_key(value: &serde_json::Value) -> String {
 /// discipline holding — the card declares questions, and only the *realized
 /// output* contains answers.
 pub mod makepad {
-    use super::{NodeValue, SourceBinding, UiNode};
+    use super::{ExprPart, NodeValue, SourceBinding, UiNode};
     use std::fmt::Write as _;
 
     // Matching octos-one's `plan/common.rs`, so a lowered card sits beside the
@@ -5204,12 +5426,31 @@ pub mod makepad {
     /// will. Emitting a call the VM cannot answer would render an em dash where
     /// a real number was available.
     pub(super) fn expr_of(node: &UiNode, arg_name: &str) -> String {
+        if let Some((_, shape)) = node.exprs.iter().find(|(n, _)| n == arg_name) {
+            if let Some(rendered) = render_expr(shape) {
+                return rendered;
+            }
+        }
         if let Some((_, binding)) = node.bindings.iter().find(|(n, _)| n == arg_name) {
             if let Some(call) = vm_call(binding) {
                 return call;
             }
         }
         text_of(arg(node, arg_name))
+    }
+
+    /// An `ExprPart` as backend arithmetic. Parenthesised at every join, so the
+    /// tree's shape survives regardless of the target VM's precedence rules.
+    pub(super) fn render_expr(part: &ExprPart) -> Option<String> {
+        match part {
+            ExprPart::Const(v) => Some(v.clone()),
+            ExprPart::Call(binding) => vm_call(binding),
+            ExprPart::Bin(lhs, op, rhs) => Some(format!(
+                "({} {op} {})",
+                render_expr(lhs)?,
+                render_expr(rhs)?
+            )),
+        }
     }
 
     /// The VM helper that answers a declared capability, if one does.
@@ -5605,6 +5846,15 @@ pub mod makepad {
         // one that does not keeps the seeded value until the format can travel
         // with the call.
         if format_kind.is_none() {
+            // An L1 expression: emit the ARITHMETIC, so a live operand is still
+            // fetched and the multiply happens against data that arrives later.
+            // Realization already computed a number, but only for whatever the
+            // host seeded — which for a live card is nothing.
+            if let Some((_, shape)) = node.exprs.iter().find(|(n, _)| n == "value") {
+                if let Some(rendered) = render_expr(shape) {
+                    return decorate(rendered, &glyph, unit, &suffix);
+                }
+            }
             if let Some((_, binding)) = node.bindings.iter().find(|(n, _)| n == "value") {
                 if let Some(call) = vm_call(binding) {
                     return decorate(call, &glyph, unit, &suffix);
@@ -6979,6 +7229,19 @@ fn collect_reads(element: &Element, reads: &mut Vec<String>, pulls: &mut Vec<Str
                 let root = root_of(p);
                 if !binders.contains(&root) {
                     reads.push(root);
+                }
+            }
+            // Every operand of an expression is a dependency. Missing these
+            // would under-approximate the patch set, and the profile is explicit
+            // that under-approximating shows stale data.
+            expr @ Operand::Expr { .. } => {
+                let mut paths = Vec::new();
+                expr_paths(expr, &mut paths);
+                for p in paths {
+                    let root = root_of(&p);
+                    if !binders.contains(&root) {
+                        reads.push(root);
+                    }
                 }
             }
             _ => {}

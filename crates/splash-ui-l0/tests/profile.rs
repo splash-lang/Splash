@@ -688,6 +688,7 @@ fn an_unmapped_constructor_is_visible_rather_than_dropped() {
         args: vec![],
         children: vec![],
         bindings: vec![],
+        exprs: vec![],
     };
     let dsl = makepad::lower(&node);
     assert!(dsl.contains("no makepad lowering for Hologram"), "{dsl}");
@@ -5074,5 +5075,93 @@ fn a_list_through_a_component_stays_live() {
     assert!(
         dsl.contains(r#"sys.news(2, "title")"#),
         "and row 1 is story 2:\n{dsl}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────── L1 ──
+
+/// An L1 card is ADMITTED when it declares its level.
+///
+/// §7: "a record needing a wider grammar is rejected until the level is
+/// explicitly raised" — so raising it explicitly must work. Before this the
+/// classifier could name L1 and never accept one.
+#[test]
+fn a_declared_l1_card_is_admitted() {
+    const CARD: &str = r#"# level: L1
+source quote sys.quote(ticker: state.sym, fields: [last])
+state sym    { shape: text, initial: "NVDA" }
+state shares { shape: number, initial: 10 }
+view root Surface { TextHero(value: shares * quote.last) }
+"#;
+    let report = check_ui_l0_named("portfolio", CARD);
+    assert!(report.valid, "must be admitted: {:#?}", report.diagnostics);
+    assert_eq!(report.level, Level::L1);
+}
+
+/// The same card WITHOUT the header is still refused — escalation is never silent.
+#[test]
+fn the_same_card_at_l0_is_refused() {
+    const CARD: &str = r#"# level: L0
+source quote sys.quote(ticker: state.sym, fields: [last])
+state sym    { shape: text, initial: "NVDA" }
+state shares { shape: number, initial: 10 }
+view root Surface { TextHero(value: shares * quote.last) }
+"#;
+    let report = check_ui_l0_named("portfolio", CARD);
+    assert!(!report.valid, "arithmetic is not in L0");
+}
+
+/// §4 one level up: an expression must READ something. A coefficient is fine;
+/// an expression made only of literals states a fact rather than computing one.
+#[test]
+fn an_expression_of_only_literals_is_refused() {
+    const CARD: &str = r#"# level: L1
+state shares { shape: number, initial: 10 }
+view root Surface { TextHero(value: 1547 * 3.2) }
+"#;
+    let report = check_ui_l0_named("fabricator", CARD);
+    assert!(
+        !report.valid,
+        "a literal-only expression is a fabricated fact"
+    );
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("must read a declared")),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+/// A coefficient IS allowed — `temp * 9 / 5 + 32` is a formula, not a fact.
+#[test]
+fn a_coefficient_is_not_a_fabricated_fact() {
+    const CARD: &str = r#"# level: L1
+source now sys.weather(lat: 1.0, lon: 2.0, fields: [temp])
+view root Surface { TextHero(value: now.temp * 9 / 5 + 32) }
+"#;
+    let report = check_ui_l0_named("converter", CARD);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+}
+
+/// An expression over a LIVE source lowers to arithmetic the backend evaluates —
+/// not to the number realization happened to compute from seeded data.
+#[test]
+fn an_expression_over_a_live_source_lowers_live() {
+    const CARD: &str = r#"# level: L1
+source quote sys.quote(ticker: state.sym, fields: [last])
+state sym    { shape: text, initial: "NVDA" }
+state shares { shape: number, initial: 10 }
+view root Surface { TextHero(value: shares * quote.last) }
+"#;
+    let data = serde_json::json!({"sym": "NVDA", "shares": 10, "quote": {"last": 5.0}});
+    let root = realize(CARD, &data, RealizeLimits::default())
+        .root
+        .expect("realizes");
+    let dsl = splash_ui_l0::kit::lower(&root);
+    assert!(
+        dsl.contains("sys.stock(") && dsl.contains('*'),
+        "the price must stay live and the multiply must reach the backend:\n{dsl}"
     );
 }
