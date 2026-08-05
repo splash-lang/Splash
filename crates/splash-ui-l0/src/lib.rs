@@ -895,8 +895,21 @@ enum Form {
     Toggle,
     Cycle,
     Clear,
+    /// §5.12's two collection forms. Unlike the four above, these do NOT write a
+    /// cell: the target is a source backed by a durable store, and dispatch
+    /// hands the write to the host. Total for the same reason `cycle` is — the
+    /// card names the operation and the runtime performs it.
+    Append,
+    Remove,
     /// Anything else — an expression, which L0 has no form for.
     NotTotal(String),
+}
+
+impl Form {
+    /// Whether this form writes a durable collection rather than a state cell.
+    fn is_collection(&self) -> bool {
+        matches!(self, Form::Append | Form::Remove)
+    }
 }
 
 /// What `set(…)` assigns. Each is a value the runtime already holds; none is
@@ -1650,6 +1663,42 @@ impl<'a> Parser<'a> {
                     self.expect_punct(")");
                 }
                 (Form::Cycle, members)
+            }
+            // §5.12: the two collection forms. Both take `$value` and nothing
+            // else — `remove($value)` matches an exact payload rather than
+            // evaluating a predicate, which is what keeps them the same shape as
+            // `cycle`: runtime logic the card NAMES and does not write.
+            "append" | "remove" => {
+                let verb = t.text.clone();
+                self.at += 1;
+                let mut ok = false;
+                if self.peek().is_some_and(|t| t.is_punct("(")) {
+                    self.at += 1;
+                    if self.peek().is_some_and(|t| t.is_punct("$")) {
+                        self.at += 1;
+                        match self.ident() {
+                            Some(name) if name == "value" => ok = true,
+                            Some(other) => self.sink.at(
+                                &t,
+                                format!("`${other}` is not a payload; the only one is `$value`"),
+                            ),
+                            None => {}
+                        }
+                    }
+                    self.expect_punct(")");
+                }
+                if ok {
+                    if verb == "append" {
+                        (Form::Append, Vec::new())
+                    } else {
+                        (Form::Remove, Vec::new())
+                    }
+                } else {
+                    (
+                        Form::NotTotal(format!("{verb} takes $value and nothing else")),
+                        Vec::new(),
+                    )
+                }
             }
             other => {
                 self.at += 1;
@@ -2467,6 +2516,21 @@ pub mod catalog {
             "sys.series",
             &["ticker", "range", "points", "fields", "aggregate"],
         ),
+        // §5.12's durable capabilities. `sys.watchlist` takes no selector — it
+        // IS the user's list — and the host joins the stored tickers to live
+        // quotes, so a card asks for the fields it wants to show and never
+        // learns that a store exists.
+        ("sys.watchlist", &["fields"]),
+        ("sys.prefs", &["fields"]),
+        // Free-text ticker lookup, so a card can offer something the top-movers
+        // list does not happen to contain. `sys.search` is the PLACE search and
+        // answers a different question; naming them apart is what stops a card
+        // asking a geocoder for a company.
+        ("sys.symbol_search", &["query", "count", "fields"]),
+        // The user's saved places. Same shape as `sys.watchlist`: no selector,
+        // because it IS the list, and the host joins each stored place to a
+        // live reading.
+        ("sys.cities", &["fields"]),
     ];
 
     pub fn source(name: &str) -> Option<&'static [&'static str]> {
@@ -2561,6 +2625,31 @@ pub mod catalog {
             ],
         ),
         ("sys.series", &["points", "min", "max"]),
+        // The host joins the stored tickers to live quotes, so a watchlist row
+        // answers everything a quote does. The STORE holds only the ticker.
+        (
+            "sys.watchlist",
+            &[
+                "ticker", "name", "last", "change", "pct", "open", "high", "low", "prev", "volume",
+                "mktcap", "pe", "currency", "exchange",
+            ],
+        ),
+        ("sys.prefs", &["units", "range"]),
+        // Verified against the live endpoint, not its documentation: `longname`
+        // comes back null for plenty of listings, so `name` falls back to
+        // `shortname` in the helper. `kind` distinguishes an equity from a
+        // crypto or an ETF, because a search for "nvid" returns all three and a
+        // card that cannot say which is offering the user a coin.
+        ("sys.symbol_search", &["ticker", "name", "exchange", "kind"]),
+        // `name`, `lat` and `lon` come from the store — they IDENTIFY the place.
+        // Everything else is a reading fetched at those coordinates each time it
+        // is read, so a saved city can never show yesterday's temperature.
+        (
+            "sys.cities",
+            &[
+                "name", "lat", "lon", "temp", "feels", "hi", "lo", "cond", "humidity", "wind",
+            ],
+        ),
     ];
 
     /// Extra scalars `aggregate:` may ask a capability to compute over the rows
@@ -2570,6 +2659,35 @@ pub mod catalog {
         ("sys.weather", &["min_lo", "max_hi"]),
         ("sys.series", &["min", "max"]),
     ];
+
+    /// Capabilities backed by a durable store, and the transitions each accepts
+    /// (§5.12).
+    ///
+    /// A capability absent from this table is READ-ONLY: a card may bind it and
+    /// may not write it. That is the safe default — a fetch is not a thing a tap
+    /// should be able to mutate, and listing the writable ones explicitly means
+    /// granting the power is a deliberate edit rather than an omission.
+    ///
+    /// What is stored is REFERENCES, never facts. `sys.watchlist` holds tickers;
+    /// the values beside them on screen are fetched every time. §4's no-facts
+    /// rule does not stop applying because the data went to disk.
+    pub const MUTABLE: &[(&str, &[&str])] = &[
+        ("sys.watchlist", &["append", "remove"]),
+        ("sys.cities", &["append", "remove"]),
+        // `sys.prefs` is READ-ONLY here, deliberately and temporarily.
+        //
+        // A preference write has to name WHICH preference, and a transition's
+        // target is a bare source name: `event set_units { prefs: set($value) }`
+        // says nothing about `units`. Naming it needs a dotted target
+        // (`prefs.units: set($value)`), which is grammar this slice does not
+        // have. Declaring the capability writable before that exists would ship
+        // a write nobody could aim, so a card can read a preference and not yet
+        // change one.
+    ];
+
+    pub fn mutable(name: &str) -> Option<&'static [&'static str]> {
+        MUTABLE.iter().find(|(n, _)| *n == name).map(|(_, a)| *a)
+    }
 
     pub fn answers(name: &str) -> Option<&'static [&'static str]> {
         ANSWERS.iter().find(|(n, _)| *n == name).map(|(_, a)| *a)
@@ -2696,6 +2814,7 @@ fn validate_transitions(card: &Card, sink: &mut Diagnostics) {
         &card_readable,
         &card_events,
         &card.copies,
+        &card.sources,
         sink,
     );
     for component in &card.components {
@@ -2727,6 +2846,10 @@ fn validate_transitions(card: &Card, sink: &mut Diagnostics) {
             &readable,
             &events,
             &card.copies,
+            // A component may write a durable collection too: the card's
+            // sources are in scope for it (§5.3 forbids card STATE, not
+            // sources), so the same rules must reach here.
+            &card.sources,
             sink,
         );
     }
@@ -2790,10 +2913,72 @@ fn check_event_batch(
     readable: &[String],
     event_names: &[String],
     copies: &[CopyDecl],
+    sources: &[SourceDecl],
     sink: &mut Diagnostics,
 ) {
     for event in events {
         for transition in &event.transitions {
+            // §5.12: a transition may target a SOURCE when that source is backed
+            // by a durable store. The write leaves the card entirely — dispatch
+            // hands it to the host — so none of the shape checks below apply,
+            // and this is settled before them rather than inside them.
+            if let Some(source) = sources.iter().find(|s| s.name == transition.target) {
+                let accepted = catalog::mutable(&source.helper);
+                let verb = match &transition.form {
+                    Form::Append => "append",
+                    Form::Remove => "remove",
+                    Form::Set(_) => "set",
+                    Form::Clear => "clear",
+                    Form::Toggle => "toggle",
+                    Form::Cycle => "cycle",
+                    Form::NotTotal(_) => "",
+                };
+                match accepted {
+                    // Read-only by default: binding a fetch is not permission to
+                    // write it, and a capability earns that by being listed.
+                    None => sink.push(
+                        transition.line,
+                        transition.column,
+                        format!(
+                            "{:?} is a source and cannot be written — {} is read-only. \
+                             Only a capability backed by a durable store accepts a \
+                             transition (profile §5.12)",
+                            transition.target, source.helper
+                        ),
+                    ),
+                    Some(verbs) if !verbs.contains(&verb) => sink.push(
+                        transition.line,
+                        transition.column,
+                        format!(
+                            "{} does not accept `{verb}`; it accepts: {}",
+                            source.helper,
+                            verbs.join(", ")
+                        ),
+                    ),
+                    Some(_) => {}
+                }
+                continue;
+            }
+            // A collection form on anything else is refused HERE rather than
+            // falling through to the shape checks, which would report it as a
+            // bad `set` on a state and send the reader looking in the wrong
+            // place. There is no list-shaped cell: §5.12 is deliberate that a
+            // durable collection is a source, because a card is regenerated per
+            // request and a cell would be empty again the next time.
+            if transition.form.is_collection() {
+                sink.push(
+                    transition.line,
+                    transition.column,
+                    format!(
+                        "`append`/`remove` write a durable collection, and {:?} is not one. \
+                         Declare it as a source over a store-backed capability — card state \
+                         cannot hold a list, and would be reset on the next request anyway \
+                         (profile §5.12)",
+                        transition.target
+                    ),
+                );
+                continue;
+            }
             let Some(state) = states.iter().find(|s| s.path == transition.target) else {
                 sink.push(
                     transition.line,
@@ -5218,6 +5403,51 @@ pub mod makepad {
                     .unwrap_or_default();
                 Some(format!("sys.movers({index}, {key:?}, {universe:?})"))
             }
+            // §5.12. Indexed like `sys.movers` — the host holds the user's list
+            // in order, so a row is addressed by position — but every value
+            // beside the ticker is FETCHED. The store holds only the reference,
+            // which is why this lowers to a live call at all rather than to the
+            // realized literal: a stored price would render stale and look live.
+            "sys.watchlist" => {
+                let (index, field) = binding.field.split_once('.')?;
+                index.parse::<u32>().ok()?;
+                let key = match field {
+                    "ticker" => "symbol",
+                    "last" => "price",
+                    "pct" => "changepct",
+                    "volume" => "vol",
+                    "mktcap" => "marketcap",
+                    f @ ("name" | "change" | "changemoney" | "high" | "low" | "open") => f,
+                    _ => return None,
+                };
+                Some(format!("sys.watchlist({index}, {key:?})"))
+            }
+            // A saved place. `name`/`lat`/`lon` identify it and come from the
+            // store; the readings beside them are fetched, which is why this
+            // lowers to a call rather than to the realized literal.
+            "sys.cities" => {
+                let (index, field) = binding.field.split_once('.')?;
+                index.parse::<u32>().ok()?;
+                let key = match field {
+                    f @ ("name" | "lat" | "lon" | "temp" | "feels" | "hi" | "lo" | "cond"
+                    | "humidity" | "wind") => f,
+                    _ => return None,
+                };
+                Some(format!("sys.cities({index}, {key:?})"))
+            }
+            // The query is a path into declared state, so it reaches the helper
+            // as whatever the user committed — the card never builds it.
+            "sys.symbol_search" => {
+                let (index, field) = binding.field.split_once('.')?;
+                index.parse::<u32>().ok()?;
+                let query = arg("query")?;
+                let key = match field {
+                    "ticker" => "symbol",
+                    f @ ("name" | "exchange" | "kind") => f,
+                    _ => return None,
+                };
+                Some(format!("sys.symbol_search({query:?}, {index}, {key:?})"))
+            }
             _ => None,
         }
     }
@@ -6071,7 +6301,26 @@ pub fn dispatch_with_data(
     payload: Option<&serde_json::Value>,
     data: &serde_json::Value,
 ) -> bool {
-    !dispatch_writes(source, store, instance_key, event, payload, data).is_empty()
+    let (changed, durable) = dispatch_writes(source, store, instance_key, event, payload, data);
+    !changed.is_empty() || !durable.is_empty()
+}
+
+/// A write to a durable collection that the HOST must perform (§5.12).
+///
+/// L0 reports it and never performs it, exactly as `source_plan` reports a fetch
+/// it never performs. The card names a capability; only the host knows what
+/// answers it, and only the host owns the store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CollectionWrite {
+    /// The declared source name the card wrote through — `watch`.
+    pub source: String,
+    /// The capability behind it — `sys.watchlist`.
+    pub helper: String,
+    /// `append`, `remove`, `set` or `clear`, already checked against what the
+    /// capability declares it accepts.
+    pub op: String,
+    /// The payload the tapped element carried. Empty for `clear`.
+    pub value: String,
 }
 
 /// What a dispatch did, and what it obliges the host to do next.
@@ -6093,6 +6342,9 @@ pub struct DispatchOutcome {
     /// The declared sources those writes invalidate, following the dependency
     /// cascade. The host should refetch these before the next realization.
     pub stale: Vec<String>,
+    /// §5.12 writes the host must perform against its durable store, in order.
+    /// L0 reports them and never performs them.
+    pub writes: Vec<CollectionWrite>,
 }
 
 /// Apply an event and report what it invalidated.
@@ -6108,18 +6360,29 @@ pub fn dispatch_reporting(
     payload: Option<&serde_json::Value>,
     data: &serde_json::Value,
 ) -> DispatchOutcome {
-    let changed = dispatch_writes(source, store, instance_key, event, payload, data);
-    if changed.is_empty() {
+    let (changed, writes) = dispatch_writes(source, store, instance_key, event, payload, data);
+    if changed.is_empty() && writes.is_empty() {
         return DispatchOutcome::default();
     }
     // `stale_sources` takes the changed names; a write to `selected` is a change
     // to `selected` as a source argument reads it.
-    let names: Vec<&str> = changed.iter().map(String::as_str).collect();
-    let stale = stale_sources(source, &names);
+    //
+    // A durable write invalidates the source it wrote THROUGH, and anything
+    // reading that source, by the same cascade. Appending to a watchlist and not
+    // refetching it is a card that swallowed the tap.
+    let mut names: Vec<&str> = changed.iter().map(String::as_str).collect();
+    names.extend(writes.iter().map(|w| w.source.as_str()));
+    let mut stale = stale_sources(source, &names);
+    for w in &writes {
+        if !stale.contains(&w.source) {
+            stale.push(w.source.clone());
+        }
+    }
     DispatchOutcome {
         applied: true,
         changed,
         stale,
+        writes,
     }
 }
 
@@ -6130,10 +6393,10 @@ fn dispatch_writes(
     event: &str,
     payload: Option<&serde_json::Value>,
     data: &serde_json::Value,
-) -> Vec<String> {
+) -> (Vec<String>, Vec<CollectionWrite>) {
     let mut sink = Diagnostics::default();
     let Some(tokens) = lex(source, &mut sink) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     let card = Parser::new(&tokens, &mut sink).parse_card();
 
@@ -6170,11 +6433,11 @@ fn dispatch_writes(
                 &instance_key[..boundary],
                 Some((component, schema_id(component))),
             ),
-            None => return Vec::new(),
+            None => return (Vec::new(), Vec::new()),
         },
         None => match card.events.iter().find(|e| e.name == event) {
             Some(d) => (d, &card.states, CARD_STATE_KEY, None),
-            None => return Vec::new(),
+            None => return (Vec::new(), Vec::new()),
         },
     };
 
@@ -6187,10 +6450,41 @@ fn dispatch_writes(
     // a half-applied event, which is the thing atomicity exists to prevent.
     // Stage every write first, commit only if the whole batch resolves.
     let mut staged: Vec<(String, serde_json::Value)> = Vec::new();
+    // §5.12 writes are staged alongside the cells, so §3's atomicity covers both:
+    // a batch that sets a preference AND appends to a list must do neither if the
+    // preference cannot be resolved.
+    let mut durable: Vec<CollectionWrite> = Vec::new();
 
     for transition in &declared.transitions {
+        // A source target leaves the card. Nothing is written here — the host
+        // owns the store — so this records the write and moves on, the same way
+        // `source_plan` records a fetch it will never perform.
+        if let Some(decl) = card.sources.iter().find(|s| s.name == transition.target) {
+            let op = match &transition.form {
+                Form::Append => "append",
+                Form::Remove => "remove",
+                Form::Clear => "clear",
+                Form::Set(_) => "set",
+                _ => return (Vec::new(), Vec::new()),
+            };
+            // All but `clear` carry the payload, so a tap without one is a no-op
+            // rather than a write of nothing — the same choice `set` makes.
+            let value = match (op, payload) {
+                ("clear", _) => String::new(),
+                (_, Some(serde_json::Value::String(v))) => v.clone(),
+                (_, Some(v)) => v.to_string(),
+                (_, None) => return (Vec::new(), Vec::new()),
+            };
+            durable.push(CollectionWrite {
+                source: decl.name.clone(),
+                helper: decl.helper.clone(),
+                op: op.to_owned(),
+                value,
+            });
+            continue;
+        }
         let Some(state) = states.iter().find(|s| s.path == transition.target) else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
         // The declared initial, path-valued or not. `clear` and a first `cycle`
         // both fell back to the SHAPE default here, so a card whose initial
@@ -6229,10 +6523,10 @@ fn dispatch_writes(
                     // that has to be checked at runtime: every other set form is
                     // decided against the declared shape at check time.
                     Some(v) if value_fits_shape(&state.shape, v) => v.clone(),
-                    Some(_) => return Vec::new(),
+                    Some(_) => return (Vec::new(), Vec::new()),
                     // No payload is a no-op rather than a silent clear: falling
                     // back to the initial would look like a deliberate reset.
-                    None => return Vec::new(),
+                    None => return (Vec::new(), Vec::new()),
                 },
                 // A path READS. Treating it as the payload meant
                 // `n: set(config.answer)` wrote whatever the tap carried — or
@@ -6241,13 +6535,13 @@ fn dispatch_writes(
                     Some(v) if value_fits_shape(&state.shape, &v) => v,
                     // Unresolvable or ill-shaped: the batch cannot complete, and
                     // §3 says a batch is all or nothing.
-                    _ => return Vec::new(),
+                    _ => return (Vec::new(), Vec::new()),
                 },
                 SetSource::Token(t) | SetSource::Text(t) => serde_json::Value::String(t.clone()),
                 SetSource::Num(n) => serde_json::Value::from(*n),
                 SetSource::Bool(b) => serde_json::Value::Bool(*b),
             },
-            _ => return Vec::new(),
+            _ => return (Vec::new(), Vec::new()),
         };
         staged.push((transition.target.clone(), next));
     }
@@ -6262,7 +6556,7 @@ fn dispatch_writes(
             written.push(target);
         }
     }
-    written
+    (written, durable)
 }
 
 // ───────────────────────────────────────────────────────────────── source plan ──

@@ -739,6 +739,9 @@ An earlier version of this paragraph offered card state "with a declared migrati
 home for durable values. **There is no card-state migration** — no syntax, no implementation.
 Card state is reset like any other, and §8 question 8 records this as an open question rather
 than a mechanism, because durability needs a storage contract this profile does not have.
+§5.12 provides that contract — durable values are *references* read as a source, not cells — but
+card state itself is still not it: there is nowhere durable to put a CELL,
+and there is not meant to be.
 
 ### 5.9 Source lifecycle
 
@@ -816,6 +819,10 @@ an **effect** (render-only, layout, source query, navigation), and a **lifetime*
 card, session). `selected` is card-shared by visibility but *navigation* by effect; `units`
 looks like a durable preference. Classifying by owner alone answers where a value lives, not
 how long it should, which is why question 8 in §8 stays open.
+
+The lifetime axis here has three values and needed a fourth. §5.12 supplies it: a durable value is
+not a longer-lived cell but a **reference** the host stores and a source resolves, which is why
+it does not appear in this section's taxonomy at all.
 
 #### 5.10.1 Moving kind 2 down requires a protocol, not just a move
 
@@ -905,6 +912,154 @@ on a backend that answers its own sources, and the translation table between L0'
 capability names and a backend's helper names lives in that backend's lowering.
 Both are the price of reaching live data without a second fetch layer, and both
 are recorded here rather than discovered later.
+
+### 5.12 What is durable
+
+**Status: implemented, and proved on a phone.** `sys.watchlist` with `append`
+and `remove`, a versioned store at `~/.config/octos-app/user.json`, and the
+write path from a tap to disk. The test that matters is the one no unit test can
+run: tap a row, force-stop the app, relaunch, and the entry is still there — with
+its price fetched fresh, because the file held `["ATKR"]` and nothing else.
+
+Written before the implementation, deliberately, so the implementation had
+something to diverge from. Two things did diverge and both are recorded below:
+`sys.prefs` is read-only, and the tap payload had to become a live call.
+
+This answers the storage and migration halves of §8 question 8. The third half —
+what a user is *entitled* to get back — is a product decision and stays open.
+
+#### State is a cursor, not data
+
+`selected = "NVDA"` is not a value the card holds. It is **which entity the card
+is looking at** — a reference into data the card does not own. `range = "m1"` is
+which slice. Once state is read as a cursor rather than as a value, three things
+that look unrelated turn out to be one thing at three lifetimes:
+
+| | what it holds | lives for |
+|---|---|---|
+| `selected` | one entity reference | the card |
+| a watchlist | a set of entity references | indefinitely |
+| `quote(NVDA)` | the entity itself | never stored; always fetched |
+
+A watchlist is a **persisted set of the same thing `selected` holds one of**. That
+is the whole of it — not a new kind of storage, the same kind of reference at a
+different lifetime. §5.10 names a cell's lifetime as instance, card or session;
+this is the fourth value that axis is missing, and the reason question 8 could not
+be answered under a state mechanism.
+
+#### What is stored: references, never facts
+
+§4's no-facts rule extends to the store, and for the same reason. A stored price is
+wrong within a second of being written, and a stale number that still looks live is
+precisely the failure §4 exists to prevent — the shipping card drew a seeded `$181`
+open beside two live values and nothing on screen distinguished them.
+
+So a watchlist is `["NVDA", "AAPL"]`. It is not a list of rows carrying names and
+prices. **Identity is durable; facts are not**, and the store may hold only the
+first. Ordering is part of identity here: the array's order is the user's order.
+
+#### A durable collection is a source, not state
+
+It reads as a `source`, which keeps §5 intact — state remains disposable UI state
+and this never becomes a second kind of cell.
+
+```
+source watch sys.watchlist(fields: [ticker, name, last, pct])
+```
+
+**The host performs the join.** It reads the stored references, fetches the live
+quotes, and returns the rows. The card never sees the store, and L0 needs no join
+operator — which it does not have and must not acquire.
+
+#### Mutation: an event may target a source
+
+One grammar addition, and only one:
+
+```
+event add  { watch: append($value) }
+event drop { watch: remove($value) }
+```
+
+The target is a source rather than a state, and the capability declares which
+transitions it accepts. Dispatch routes the write to the host instead of to the
+`InstanceStore`; the source goes stale and §5.9's lifecycle re-fetches it.
+
+**This does not weaken the confinement argument.** L0 is safe because it has no
+expression form to evaluate, not because taps are inert — `cycle(a, b, c)` already
+advances an enum with wrapping, which is runtime logic the card names and does not
+write. `append($value)` is the same shape. `remove($value)` matches an exact
+payload; it does not evaluate a predicate, and it must not be allowed to.
+
+#### Why the card cannot hold this instead
+
+Cards are **regenerated per request**. Asking for the same app twice produces a new
+card and a new session. `state watch { initial: [] }` would therefore be empty
+again on the next request, and would look like it worked until someone came back.
+That is the decisive argument, and it is why durability is not a state feature no
+matter how convenient a list-shaped cell would be.
+
+#### Entities, and the disagreement they remove
+
+Today a `quote` is a node and `NVDA` is not, so two reads of the same company are
+unrelated values that happen to share a ticker. That is why a percentage could
+render red while the price beside it rose: the tint resolved from one snapshot and
+the value from another. Normalising by entity id — one `NVDA` that a watchlist
+references and a detail card reads — makes the disagreement unrepresentable rather
+than something to keep in sync. It is the piece that makes this a graph rather than
+a pile of records, and it is worth doing for that alone.
+
+#### Migration
+
+The store outlives the cards that read it, and a regenerated card will ask for a
+different shape. §5.8's discipline applies unchanged: **a version stamp**, so an
+old file is recognised rather than misread; **tolerate unknown fields**, so a card
+asking for something never stored gets "missing" rather than a failure; and **drop
+rather than guess** when a shape changes, because feeding version-A data to
+version-B code produces a card that renders confidently and wrongly.
+
+#### What the implementation changed
+
+**`sys.prefs` is read-only.** A preference write must name WHICH preference, and
+a transition targets a bare source name: `event set_units { prefs: set($value) }`
+says nothing about `units`. That needs a dotted target (`prefs.units:
+set($value)`), which is grammar this does not have. A card may read a preference
+and not yet change one. Declaring the capability writable before the target can
+be aimed would have shipped a write nobody could use.
+
+**A tap payload had to become a live call.** `Row(on_tap: keep, value: m.ticker)`
+resolved its payload at realize time while the row's own text lowered to a live
+call, so the two could disagree — and with no seed blob the payload was simply
+empty, so the first watchlist tap was refused. Where a payload has a source
+binding the backend can answer, the lowering now emits the call:
+
+```
+l0_tap("l0:{…,\"v\":\"" + sys.movers(0, "symbol") + "\"}", …)
+```
+
+That was a pre-existing defect in every tappable bound row, not one this section
+introduced. It surfaced here because a watchlist is the first feature where the
+payload is the whole point rather than a convenience.
+
+**Reorder is absent.** `move(ticker, position)` needs two payloads and `value:`
+carries one. `append` and `remove` cover adding and removing; ordering is the
+order things were added until the grammar grows a second slot.
+
+#### What is deliberately not adopted
+
+The obvious reference here is GraphQL, and two of its three ideas are worth taking:
+a typed schema per capability, and normalisation by entity id. The third is not.
+
+- **No query language.** Arguments, variables, aliases and directives are a second
+  language to parse, validate and confine, and L0's entire safety claim is that
+  there is nothing to evaluate. The schema and the colocation are expressible in
+  the grammar that already exists.
+- **No resolver graph.** GraphQL assumes one endpoint over a traversable schema.
+  These capabilities are heterogeneous — Yahoo, Photon, Open-Meteo, OSRM — with no
+  joins between them. The only planning value is dependency ordering, and
+  `source_plan` already does that.
+- **Not for over-fetching.** `sys.movers` fetches one fixed URL regardless of what
+  `fields:` names, so narrowing the list saves nothing on the wire. This is adopted
+  for correctness. If it is ever argued for on performance, the argument is wrong.
 
 ---
 
@@ -1010,7 +1165,7 @@ construct and keep the widest.
 | ~~5~~ | ~~Named slots~~ — **settled in §5.5.** `slot name` in the component, `into name { … }` at the call site, anonymous slot unchanged as the default. An `into` naming a slot that does not exist is rejected rather than silently dropping its children |
 | ~~6~~ | ~~An explicit state migration~~ — **settled in §5.8.** `keep: true` opts a cell out of the schema-change reset, and only while that field's own shape is unchanged |
 | ~~7~~ | ~~The closed token sets per constructor argument~~ — **settled**: `docs/ui-l0-constructors.toml` is the normative catalog, and tests assert the two agree in both directions — constructor names and shared token sets, and for source capabilities the arguments too |
-| **8** | **What, if anything, is durable.** Card state resets with the card; §5.8 previously claimed a card-state migration that does not exist. `units` and `city` look like preferences a user expects to survive a restart. Answering needs a storage contract, a migration story, and a decision about what a user is entitled to get back — none of which belongs under a state mechanism |
+| **8** | **What, if anything, is durable.** **Two thirds settled in §5.12, and shipped.** The storage contract — durable *references*, never facts, read as a source and written through a declared transition on it — and the migration story (§5.8's discipline over a versioned store) are implemented and verified across an app restart on device. What stays open is the third part, and it is not a technical question: **what a user is entitled to get back.** A watchlist obviously; a scroll position obviously not; `units` and `city` are the genuinely arguable middle, and nothing in this document can settle them. The reframe that made the rest tractable: state is a **cursor** into data rather than data, so a watchlist is a persisted set of the same thing `selected` holds one of — the fourth value §5.10's lifetime axis was missing |
 | **10** | **How a card says a collection is empty.** `activity` wants "Nothing close by" when a list has no members, and L0 has no length, no count and no emptiness predicate — a guard cannot tell an empty collection from a full one, so the card silently renders nothing where it should say something. Every list-shaped card wants this. The narrow fix is a predicate against a collection's emptiness, NOT a `.count` — a count is a number, and a number in a card is one operator away from arithmetic |
 | **9** | **Whether component-local state (§5.10 kind 2) moves to the component kit.** The corpus says it would cost little — six kind-1 declarations against one kind-2. §5.10.1 says it cannot move alone: identity, mount/unmount and invalidation must move with it, and that protocol is unwritten. Open until the protocol exists, not until the split looks tidy |
 

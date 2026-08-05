@@ -2111,7 +2111,11 @@ fn the_field_vocabularies_match_the_toml_spec() {
         } else if line.starts_with('[') {
             current = None;
         } else if let Some(name) = &current {
-            for (key, label) in [("answers = [", "answers"), ("aggregates = [", "aggregates")] {
+            for (key, label) in [
+                ("answers = [", "answers"),
+                ("aggregates = [", "aggregates"),
+                ("writes = [", "writes"),
+            ] {
                 if let Some(rest) = line.strip_prefix(key) {
                     documented.push((
                         name.clone(),
@@ -2140,6 +2144,11 @@ fn the_field_vocabularies_match_the_toml_spec() {
         let rust: &[&str] = match kind.as_str() {
             "answers" => catalog::answers(name)
                 .unwrap_or_else(|| panic!("{name:?} documents fields but Rust declares none")),
+            // Which transitions a store-backed capability accepts (§5.12). A
+            // capability the TOML says is writable and Rust does not would be a
+            // card refused for doing what the documentation offered.
+            "writes" => catalog::mutable(name)
+                .unwrap_or_else(|| panic!("{name:?} documents writes but Rust says read-only")),
             _ => catalog::aggregates(name),
         };
         assert_eq!(
@@ -2154,6 +2163,17 @@ fn the_field_vocabularies_match_the_toml_spec() {
                 .iter()
                 .any(|(n, k, f)| n == name && k == "answers" && f == fields),
             "{name:?} answers {fields:?} in Rust and the TOML does not say so"
+        );
+    }
+    // The other direction for writes. A capability that is writable in Rust and
+    // silent in the TOML grants a power the documentation never mentions, which
+    // is the worse half of a drift — the agent never learns it exists.
+    for (name, verbs) in catalog::MUTABLE {
+        assert!(
+            documented
+                .iter()
+                .any(|(n, k, v)| n == name && k == "writes" && v == verbs),
+            "{name:?} accepts {verbs:?} in Rust and the TOML does not say so"
         );
     }
 }
@@ -4831,6 +4851,156 @@ fn a_read_must_name_a_field_the_source_was_asked_for() {
         check_ui_l0_named("card", NO_FIELDS).valid,
         "a capability with no field list must stay unchecked: {}",
         why(NO_FIELDS)
+    );
+}
+
+/// §5.12: a transition may target a source backed by a durable store.
+///
+/// The card that motivates it — tap a mover, keep it. Every earlier attempt at
+/// this had to put the list in card state, where `check_card` accepted it,
+/// dispatch reported success, and the list rendered empty: `set($value)` wrote a
+/// string into a collection-shaped cell. Worse, a card is regenerated per
+/// request, so even a working list-shaped cell would have been empty the next
+/// time the user asked — which is why this is a source and not a longer-lived
+/// kind of state.
+#[test]
+fn a_durable_collection_is_written_through_a_source() {
+    const CARD: &str = r#"
+# level: L0
+# model: stock
+source movers sys.movers(count: 5, fields: [ticker, name, last])
+source watch  sys.watchlist(fields: [ticker, name, last, pct])
+
+event keep { watch: append($value) }
+event drop { watch: remove($value) }
+
+view root Surface {
+  Panel {
+    for m, i in movers key m.ticker {
+      Row(on_tap: keep, value: m.ticker) { TextRow(text: m.ticker) }
+    }
+  }
+  Panel {
+    for w, i in watch key w.ticker {
+      Row(on_tap: drop, value: w.ticker) { TextRow(text: w.ticker) }
+    }
+  }
+}
+"#;
+    let why = |src: &str| -> String {
+        check_ui_l0_named("card", src)
+            .diagnostics
+            .iter()
+            .map(|d| d.message.clone())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    assert!(
+        check_ui_l0_named("card", CARD).valid,
+        "a watchlist card must be admitted: {}",
+        why(CARD)
+    );
+
+    // A source NOT backed by a store is read-only. Binding a fetch is not
+    // permission to write it, and the default has to be refusal.
+    let readonly = CARD.replace("watch: append($value)", "movers: append($value)");
+    let msg = why(&readonly);
+    assert!(
+        msg.contains("read-only") && msg.contains("sys.movers"),
+        "writing a fetched source must be refused: {msg}"
+    );
+
+    // A store-backed capability accepts only the transitions it declares.
+    // `sys.watchlist` is a list — `toggle` is meaningless on one.
+    let wrong_verb = CARD.replace("watch: append($value)", "watch: toggle");
+    let msg = why(&wrong_verb);
+    assert!(
+        msg.contains("does not accept") && msg.contains("append"),
+        "an unaccepted transition must be refused and the accepted ones named: {msg}"
+    );
+
+    // And the reverse: a collection form on a STATE is refused with the reason,
+    // not reported as a malformed `set`.
+    const ON_STATE: &str = r#"
+# level: L0
+# model: stock
+source movers sys.movers(count: 3, fields: [ticker])
+state watch { shape: collection, initial: [] }
+event keep { watch: append($value) }
+view root Surface {
+  for m, i in movers key m.ticker { Row(on_tap: keep, value: m.ticker) { TextRow(text: m.ticker) } }
+}
+"#;
+    let msg = why(ON_STATE);
+    assert!(
+        msg.contains("durable collection") && msg.contains("source"),
+        "a collection form on card state must say where the list belongs: {msg}"
+    );
+
+    // `remove` takes the payload and nothing else. A predicate here would be an
+    // expression, which is the one thing L0 does not have.
+    let predicate = CARD.replace("watch: remove($value)", "watch: remove(w.pct < 0)");
+    assert!(
+        !check_ui_l0_named("card", &predicate).valid,
+        "remove must not accept a predicate"
+    );
+}
+
+/// A tap on a durable collection reports the write and invalidates the source.
+///
+/// The write is REPORTED, never performed — the same separation `source_plan`
+/// keeps. L0 has no store and must not acquire one: the host owns durability,
+/// and a card that could write directly would be a card that could persist a
+/// fact (§4).
+#[test]
+fn a_durable_write_is_reported_and_makes_its_source_stale() {
+    const CARD: &str = r#"
+# level: L0
+# model: stock
+source movers sys.movers(count: 5, fields: [ticker, name])
+source watch  sys.watchlist(fields: [ticker, name, last])
+event keep { watch: append($value) }
+view root Surface {
+  for m, i in movers key m.ticker {
+    Row(on_tap: keep, value: m.ticker) { TextRow(text: m.ticker) }
+  }
+  for w, i in watch key w.ticker { TextRow(text: w.ticker) }
+}
+"#;
+    let mut store = splash_ui_l0::InstanceStore::default();
+    let out = splash_ui_l0::dispatch_reporting(
+        CARD,
+        &mut store,
+        "root",
+        "keep",
+        Some(&serde_json::Value::String("NVDA".into())),
+        &serde_json::Value::Null,
+    );
+
+    assert!(out.applied, "a durable write is an applied event");
+    assert_eq!(out.writes.len(), 1, "exactly one write: {:?}", out.writes);
+    let w = &out.writes[0];
+    assert_eq!((w.op.as_str(), w.value.as_str()), ("append", "NVDA"));
+    assert_eq!(
+        (w.source.as_str(), w.helper.as_str()),
+        ("watch", "sys.watchlist"),
+        "the host needs both the bound name and the capability behind it"
+    );
+
+    // Nothing went into the card's own store. If it had, the list would be
+    // per-card again and every regenerated card would start empty.
+    assert!(
+        out.changed.is_empty(),
+        "a durable write writes no cell: {:?}",
+        out.changed
+    );
+
+    // And the source must be refetched, or the row the user just added does not
+    // appear until something else happens to invalidate it.
+    assert!(
+        out.stale.contains(&"watch".to_string()),
+        "the written source must go stale: {:?}",
+        out.stale
     );
 }
 

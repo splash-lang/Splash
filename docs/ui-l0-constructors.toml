@@ -320,3 +320,53 @@ answers = ["ticker", "name", "last", "change", "pct", "open", "high", "low", "pr
 args = ["ticker", "range", "points", "fields", "aggregate"]
 answers = ["points", "min", "max"]
 aggregates = ["min", "max"]
+
+# ─── durable capabilities (profile §5.12) ─────────────────────────────────────
+# Backed by a store rather than by a fetch, and the only ones a transition may
+# write. What is STORED is references — a ticker, a token — never the values
+# rendered beside them: §4's no-facts rule does not stop applying because the
+# data went to disk, and a stored price is wrong a second after it is written.
+#
+# `sys.watchlist` takes no selector because it IS the user's list. The host reads
+# the stored tickers, fetches each quote, and returns the rows — so a card asks
+# for the fields it wants to show and never learns a store exists.
+[sources."sys.watchlist"]
+args = ["fields"]
+answers = ["ticker", "name", "last", "change", "pct", "open", "high", "low", "prev", "volume", "mktcap", "pe", "currency", "exchange"]
+writes = ["append", "remove"]
+
+# READ-ONLY for now. A preference write must name WHICH preference, and a
+# transition targets a bare source name — `prefs: set($value)` cannot say
+# `units`. That needs a dotted target, which does not exist yet, so a card may
+# read a preference and not yet change one.
+[sources."sys.prefs"]
+args = ["fields"]
+answers = ["units", "range"]
+
+# Free-text TICKER lookup. `sys.search` is the PLACE search and answers a
+# different question; a card asking a geocoder for a company gets nonsense, so
+# they are named apart.
+#
+# Verified against the live endpoint: `longname` is null for many listings, so
+# `name` falls back to the short one. `kind` separates an equity from a crypto
+# or an ETF — a search for "nvid" returns all three, and a card that cannot say
+# which is offering the user a coin.
+[sources."sys.symbol_search"]
+args = ["query", "count", "fields"]
+answers = ["ticker", "name", "exchange", "kind"]
+
+# The user's saved PLACES. Same shape as `sys.watchlist` — no selector, because
+# it IS the list — and the host joins each stored place to a live reading.
+#
+# A place is stored as a NAME and nothing else — the purest form of the rule
+# that a durable collection keeps references, never facts. Coordinates and every
+# reading are resolved by the host: geocode the name, then read the weather at
+# what comes back, each fetch URL-cached.
+#
+# An earlier design stored `name|lat|lon` to save the geocode. The card cannot
+# produce that: L0 has no way to build a composite value, which is exactly the
+# point of it having no expression form. The language was right.
+[sources."sys.cities"]
+args = ["fields"]
+answers = ["name", "lat", "lon", "temp", "feels", "hi", "lo", "cond", "humidity", "wind"]
+writes = ["append", "remove"]
