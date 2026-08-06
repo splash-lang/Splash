@@ -5824,7 +5824,10 @@ pub mod makepad {
     /// says `sys.quote(ticker:)` and the VM says `sys.stock(symbol, key)`. This
     /// table is the whole of the translation, and a helper or field missing from
     /// it means the seeded value is used — never a wrong call.
-    pub(super) fn vm_call(binding: &SourceBinding) -> Option<String> {
+    /// Public so a conformance test can ask, per capability and field, whether
+    /// this backend answers at all — the check §4 says is owed and that no test
+    /// comparing Splash with itself can perform.
+    pub fn vm_call(binding: &SourceBinding) -> Option<String> {
         let arg = |name: &str| {
             binding
                 .args

@@ -11,7 +11,7 @@
 source place       sys.geocode(name: state.city)
 source now         sys.weather(lat: place.lat, lon: place.lon,
                                fields: [temp, feels, hi, lo, cond, humidity, wind,
-                                        pressure, uv, visibility])
+                                        pressure, uv, precip])
 source week        sys.weather(lat: place.lat, lon: place.lon, days: state.days,
                                fields: [dayname, hi, lo, cond],
                                aggregate: [min_lo, max_hi])
@@ -39,6 +39,7 @@ copy humidity   { class: vocabulary, en: "Humidity",     zh: "湿度" }
 copy wind       { class: vocabulary, en: "Wind",         zh: "风速" }
 copy pressure   { class: vocabulary, en: "Pressure",     zh: "气压" }
 copy uv         { class: vocabulary, en: "UV Index",     zh: "紫外线" }
+copy precip     { class: vocabulary, en: "Rain",         zh: "降水概率" }
 copy visibility { class: vocabulary, en: "Visibility",   zh: "能见度" }
 copy sky   { class: vocabulary, en: "Satellite", zh: "卫星云图" }
 copy air        { class: vocabulary, en: "Air Quality",  zh: "空气质量" }
@@ -133,5 +134,8 @@ view details  Grid(cols: 2) {
                 Tile(label: copy.wind,       value: now.wind,       unit: .speed)
                 Tile(label: copy.pressure,   value: now.pressure,   unit: .pressure)
                 Tile(label: copy.uv,         value: now.uv,         unit: .index)
-                Tile(label: copy.visibility, value: now.visibility, unit: .distance)
+                # `visibility` was here and renders an em dash: open-meteo serves
+                # it hourly only, so no call answers it. `precip` is answered by
+                # the same fetch and is the more useful sixth tile anyway.
+                Tile(label: copy.precip,     value: now.precip,     unit: .pct)
               }

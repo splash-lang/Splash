@@ -6347,3 +6347,122 @@ fn a_visualisations_parameters_are_numbers_and_a_grid_is_rows() {
         "the six detail tiles are still all there:\n{kit}"
     );
 }
+
+/// Every field the vocabulary offers must be one a backend can ANSWER.
+///
+/// §4 predicted this and left it: "a field can be declared here, accepted by the
+/// checker, and still unanswerable by a given backend… Closing that needs a
+/// conformance test per backend asserting it answers everything declared here.
+/// This table is what such a test would check against; it is not the test."
+///
+/// This is the test. It compares the vocabulary against the TRANSLATION rather
+/// than against the TOML — the two existing catalog tests both compare Splash
+/// with itself, which is why every defect of this shape got through: `dayname`
+/// called with three of four arguments, `min_lo`/`max_hi` with no arm at all,
+/// `sys.search` demanding an index, `visibility` offered by the vocabulary and
+/// requested by no URL. A card asks for it, the checker accepts, and the screen
+/// shows an em dash indistinguishable from data still in flight.
+#[test]
+fn every_offered_field_has_a_translation() {
+    use splash_ui_l0::catalog;
+    // Fields the vocabulary offers that THIS backend cannot answer. May only
+    // shrink, and each needs a reason.
+    const UNANSWERED: &[(&str, &str)] = &[
+        // ── the helper genuinely cannot answer ────────────────────────────────
+        // open-meteo serves visibility as an HOURLY variable only; there is no
+        // `current.visibility`, so answering means requesting the hourly series
+        // and indexing the current hour, which the helper does not do.
+        ("sys.weather", "visibility"),
+        // `sys.stock` fetches the CHART endpoint, which carries neither market
+        // cap nor P/E. The existing arm says so in a comment; this makes it a
+        // fact the build checks rather than a note someone may read.
+        ("sys.quote", "mktcap"),
+        ("sys.quote", "pe"),
+        ("sys.movers", "pe"),
+        ("sys.watchlist", "pe"),
+        // The photo capability answers an image for a QUERY and has no fields.
+        ("sys.photo", ""),
+        // ── a capability with NO translation at all ───────────────────────────
+        // Every one of these renders an em dash today. `sys.route` is why the
+        // nav card's duration and distance row is `— —`, and `sys.locale` is why
+        // `state units { initial: env.locale.temp_unit }` seeds from nothing —
+        // which is half of why the units toggle appears to do nothing.
+        ("sys.route", "duration"),
+        ("sys.route", "distance"),
+        ("sys.route", "steps"),
+        ("sys.locale", "lang"),
+        ("sys.locale", "temp_unit"),
+        ("sys.news_item", "id"),
+        ("sys.news_item", "title"),
+        ("sys.news_item", "author"),
+        ("sys.news_item", "points"),
+        ("sys.news_item", "comments"),
+        ("sys.news_item", "url"),
+        ("sys.series", "points"),
+        ("sys.series", "min"),
+        ("sys.series", "max"),
+        ("sys.prefs", "units"),
+        ("sys.prefs", "range"),
+        // ── a field the arm forgot ────────────────────────────────────────────
+        // Each of these sits beside fields the same arm answers, so the
+        // capability works and one value on the card does not.
+        ("sys.geocode", "population"),
+        ("sys.quote", "ticker"),
+        ("sys.quote", "prev"),
+        ("sys.quote", "currency"),
+        ("sys.quote", "exchange"),
+        ("sys.movers", "prev"),
+        ("sys.movers", "currency"),
+        ("sys.movers", "exchange"),
+        ("sys.watchlist", "prev"),
+        ("sys.watchlist", "currency"),
+        ("sys.watchlist", "exchange"),
+        ("sys.places", "id"),
+        ("sys.search", "id"),
+        ("sys.search", "distance"),
+        // `days` is the COLLECTION a forecast loops over, not a value read off
+        // it, so no single call answers it. The loop is what consumes it.
+        ("sys.weather", "days"),
+    ];
+
+    let mut missing: Vec<(String, String)> = Vec::new();
+    for (capability, fields) in catalog::ANSWERS {
+        for field in *fields {
+            // A collection is addressed by row; ask for row 0.
+            let answered = [field.to_string(), format!("0.{field}")].iter().any(|f| {
+                splash_ui_l0::makepad::vm_call(&splash_ui_l0::SourceBinding {
+                    helper: (*capability).to_string(),
+                    // Arguments every helper of this shape needs. A missing
+                    // one makes the arm bail for the wrong reason, so they
+                    // are all supplied.
+                    args: vec![
+                        ("lat".into(), "1".into()),
+                        ("lon".into(), "2".into()),
+                        ("ticker".into(), "N".into()),
+                        ("query".into(), "q".into()),
+                        ("name".into(), "n".into()),
+                        ("id".into(), "1".into()),
+                        ("category".into(), "c".into()),
+                    ],
+                    field: f.clone(),
+                })
+                .is_some()
+            });
+            if !answered {
+                missing.push(((*capability).to_string(), (*field).to_string()));
+            }
+        }
+    }
+
+    let known: Vec<(String, String)> = UNANSWERED
+        .iter()
+        .map(|(c, f)| (c.to_string(), f.to_string()))
+        .collect();
+    let mut fresh: Vec<_> = missing.iter().filter(|p| !known.contains(p)).collect();
+    fresh.sort();
+    assert!(
+        fresh.is_empty(),
+        "the vocabulary offers these and no backend call answers them, so a card \
+         that asks renders an em dash the checker cannot warn about: {fresh:#?}"
+    );
+}
