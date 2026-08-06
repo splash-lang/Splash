@@ -462,11 +462,13 @@ Remaining:
   blesses a level no document defines, and the spec pass is owed.
 - **L2 is unimplemented and refused before parsing.** Imperative widget commands
   are a different grammar rather than a wider one, so nothing below parses them.
-  There is now a concrete card that NEEDS it: the shipping nav app's turn-by-turn
-  drive screen updates a vehicle position every frame through `ui.<id>.set_*`
-  inside a `fn tick()` that must never rebuild. §1.0 records this as settled
-  against L0 — an L0 nav card shows a route and cannot drive one — so the honest
-  scope of "nav at L0" is its declarative screens.
+  The nearest thing to a card that needs it is the shipping nav app's drive
+  screen, which updates a vehicle position every frame through `ui.<id>.set_*`
+  inside a `fn tick()` that must never rebuild. §1.0 records why that is L2 as
+  WRITTEN and why the capability is not: `MapView` already animates its own
+  camera, so a declared position for it to follow would make navigation
+  declarative — a widget change rather than a language one. So L2 still has no
+  card that requires it.
 
 ## Before a stable language release
 
