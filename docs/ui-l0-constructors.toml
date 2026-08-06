@@ -45,6 +45,12 @@ mode = { kind = "token", tokens = ["plan", "drive", "flat"] }
 from = { kind = "path" }
 to   = { kind = "path" }
 via  = { kind = "path" }
+# The live position the camera follows — a source answering `lat`/`lon`, in
+# practice `sys.gps`. This is what makes `.drive` mean the chase camera instead of
+# the static preview: without it there is no measured position and a follow camera
+# could only animate on a timer, drawing motion the user is not making. With it,
+# every frame the map spends is one a real fix earned.
+at   = { kind = "path" }
 zoom = { kind = "number" }
 
 # A text field — the one role that lets a card receive something the user typed.
@@ -299,9 +305,26 @@ answers = ["id", "name", "lat", "lon", "distance"]
 # A trip's facts — duration, distance, the step list. The ROUTE ITSELF is the
 # `Map` widget's to fetch; this is what the card needs to write on the screen
 # beside it, and asking twice is cheaper than making the card carry a polyline.
+# COORDINATES, not places: a route needs four numbers and an argument carries one
+# value, so place names could never resolve into a call.
 [sources."sys.route"]
-args = ["from", "to", "via", "mode", "fields"]
+args = ["from_lat", "from_lon", "to_lat", "to_lon", "mode", "fields"]
 answers = ["duration", "distance", "steps"]
+
+# Where you are ON a route: the next instruction, and what is left of the trip.
+#
+# This is the half of navigation a route cannot answer. `sys.route` describes the
+# whole trip and never changes as you drive it; this takes the SAME four trip
+# coordinates plus the device's own two, and answers relative to them.
+#
+# `at_lat`/`at_lon` are what keep it honest. The original nav app fed its
+# instruction a timer — `sys.navsecs(period) * speed` — so the card announced
+# turns for a vehicle moving at an assumed 34 mph whether or not anything moved.
+# Progress here is measured: the position is projected onto the route, so an
+# instruction only advances because the device did.
+[sources."sys.step"]
+args = ["from_lat", "from_lon", "to_lat", "to_lon", "at_lat", "at_lon", "fields"]
+answers = ["instruction", "remaining", "progress"]
 
 [sources."sys.places"]
 args = ["lat", "lon", "category", "count", "fields"]

@@ -5531,6 +5531,11 @@ const INERT: &[(&str, &str)] = &[
     ("Map", "from"),
     ("Map", "to"),
     ("Map", "via"),
+    // `at` is the same: a live POSITION, so a state cell holding a number is
+    // correctly ignored. Its liveness — that it centres the map on the fix and
+    // turns `.drive` into the follow camera — is asserted by
+    // `a_map_lowers_a_live_route`, in the two `at:` cases at its end.
+    ("Map", "at"),
     // A text input is not wrapped by the width composer — the `Field` branch
     // returns before it — so a field cannot be told how wide to be.
     ("Field", "width"),
@@ -5844,6 +5849,124 @@ view root Surface {
             "{seeded} is the seeded coordinate and must not be lowered:\n{mk}"
         );
     }
+
+    // ── `at:` — the declaration that makes `.drive` mean what it says ────────
+    //
+    // Above, `.drive` lowered to `"plan"`, and that is correct WITHOUT a declared
+    // position: a follow camera handed a route and no position animates along the
+    // polyline on a timer, drawing motion the user is not making. §4 does not stop
+    // applying because the invented value is a camera pose.
+    //
+    // `at:` supplies the missing measurement, so the two cards below differ in
+    // exactly one thing — whether the card said where the user is — and the
+    // camera mode must follow that and nothing else.
+    const DRIVING: &str = r#"
+source here sys.gps()
+source orig sys.search(query: state.o, count: 1, fields: [name, lat, lon])
+source dest sys.search(query: state.q, count: 1, fields: [name, lat, lon])
+state o { shape: text, initial: "HOME" }
+state q { shape: text, initial: "SFO" }
+view root Surface {
+  TextRow(text: dest.0.name)
+  Map(mode: .drive, from: orig, to: dest, at: here, zoom: 16)
+}
+"#;
+    let report = check_ui_l0_named("nav", DRIVING);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    let data = serde_json::json!({
+        "here": { "lat": 37.3, "lon": -122.0, "ok": 1 },
+        "orig": { "0": { "name": "H", "lat": 37.2, "lon": -122.1 } },
+        "dest": { "0": { "name": "X", "lat": 37.4, "lon": -121.9 } },
+        "o": "HOME", "q": "SFO", "env": { "locale": {} }, "copy": {}
+    });
+    let driving = splash_ui_l0::kit::lower(
+        &realize(DRIVING, &data, RealizeLimits::default())
+            .root
+            .expect("realizes"),
+    );
+    // The camera follows, because there is now something real to follow.
+    assert!(
+        driving.contains("l0_map(\"follow\","),
+        "a declared position must turn `.drive` into the follow camera:\n{driving}"
+    );
+    // Centred on the DRIVER — the live fix, not the trip's start.
+    assert!(
+        driving.contains("l0_map(\"follow\", 16, sys.gps(\"lat\"), sys.gps(\"lon\")"),
+        "the follow camera centres on the live fix:\n{driving}"
+    );
+    // And the route is still the declared TRIP. Centring on the fix without
+    // keeping the endpoints would redraw the route from wherever the user happens
+    // to be, which is a different trip from the one the card states.
+    assert!(
+        driving.contains("sys.navroute(sys.searchnum(\"HOME\", 0, \"lat\")")
+            && driving.contains("sys.searchnum(\"SFO\", 0, \"lat\")"),
+        "the route stays the trip the card declared:\n{driving}"
+    );
+}
+
+/// Navigation's live half: an instruction that advances because the DEVICE did.
+///
+/// This is the one place a fabricated number was load-bearing in the app L0
+/// replaces. `sys.navstep` needs a progress-along-the-route in metres, and the
+/// 664-line exemplar supplied `sys.navsecs(period) * 15.2` — a looping clock
+/// times an assumed 34 mph. The card announced turns for a vehicle that was
+/// moving whether or not anything was; it read as a demo because it was one.
+///
+/// `sys.step` takes the trip's four coordinates AND the device's two, so progress
+/// is a projection of a real fix onto the route. Every argument is a measurement.
+#[test]
+fn a_navigation_instruction_advances_only_when_the_device_does() {
+    const CARD: &str = r#"
+source here sys.gps()
+source orig sys.search(query: state.o, count: 1, fields: [name, lat, lon])
+source dest sys.search(query: state.q, count: 1, fields: [name, lat, lon])
+source step sys.step(from_lat: orig.0.lat, from_lon: orig.0.lon,
+                     to_lat: dest.0.lat,   to_lon: dest.0.lon,
+                     at_lat: here.lat,     at_lon: here.lon,
+                     fields: [instruction, remaining])
+state o { shape: text, initial: "HOME" }
+state q { shape: text, initial: "SFO" }
+view root Surface {
+  TextRow(text: step.instruction)
+  TextCaption(value: step.remaining)
+  Map(mode: .drive, from: orig, to: dest, at: here, zoom: 16)
+}
+"#;
+    let report = check_ui_l0_named("nav", CARD);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    let data = serde_json::json!({
+        "here": { "lat": 37.3, "lon": -122.0, "ok": 1 },
+        "orig": { "0": { "name": "H", "lat": 37.2, "lon": -122.1 } },
+        "dest": { "0": { "name": "X", "lat": 37.4, "lon": -121.9 } },
+        "step": { "instruction": "seeded turn", "remaining": "999 km" },
+        "o": "HOME", "q": "SFO", "env": { "locale": {} }, "copy": {}
+    });
+    let kit = splash_ui_l0::kit::lower(
+        &realize(CARD, &data, RealizeLimits::default())
+            .root
+            .expect("realizes"),
+    );
+    // The instruction is fetched for THIS trip, at THIS position.
+    assert!(
+        kit.contains("sys.navstep(") && kit.contains("sys.navprog("),
+        "the instruction must be asked for, and its progress measured:\n{kit}"
+    );
+    // The progress argument reads the device's fix — the whole point.
+    assert!(
+        kit.contains("sys.gps(\"lat\"), sys.gps(\"lon\"))"),
+        "progress along the route must come from the device's own fix:\n{kit}"
+    );
+    // And no clock anywhere. `sys.navsecs` is what the L2 exemplar used, and its
+    // appearance here would mean the timer came back wearing a source's clothes.
+    assert!(
+        !kit.contains("navsecs") && !kit.contains("simsecs"),
+        "progress must be measured, never clocked:\n{kit}"
+    );
+    // Nor the seeded strings the lowering could have reached for instead.
+    assert!(
+        !kit.contains("seeded turn") && !kit.contains("999 km"),
+        "the seeded instruction must not be lowered:\n{kit}"
+    );
 }
 
 /// Token pairs a card TOGGLES between must be distinguishable in the lowering.
@@ -6387,8 +6510,10 @@ fn every_offered_field_has_a_translation() {
         // nav card's duration and distance row is `— —`, and `sys.locale` is why
         // `state units { initial: env.locale.temp_unit }` seeds from nothing —
         // which is half of why the units toggle appears to do nothing.
-        ("sys.route", "duration"),
-        ("sys.route", "distance"),
+        // A route's step LIST is a collection a card loops over, not a scalar a
+        // call answers. Duration and distance used to sit here beside it and no
+        // longer do: both are answered, and the probe now supplies the
+        // coordinates that prove it.
         ("sys.route", "steps"),
         ("sys.locale", "lang"),
         ("sys.locale", "temp_unit"),
@@ -6443,6 +6568,24 @@ fn every_offered_field_has_a_translation() {
                         ("name".into(), "n".into()),
                         ("id".into(), "1".into()),
                         ("category".into(), "c".into()),
+                        // A trip's four coordinates, and the device's two.
+                        //
+                        // These were missing, and their absence put `sys.route`
+                        // on the allowlist below as an em dash the card could not
+                        // avoid — for two releases AFTER the arm that answers it
+                        // was written. The arm bailed on `arg("from_lat")?`, the
+                        // probe read that as "no translation exists", and the
+                        // allowlist recorded a defect that had been fixed. An
+                        // allowlist that accumulates entries nothing verifies is
+                        // worse than no allowlist: it reports the codebase as
+                        // more broken than it is, which is the one direction that
+                        // stops anyone acting on it.
+                        ("from_lat".into(), "1".into()),
+                        ("from_lon".into(), "2".into()),
+                        ("to_lat".into(), "3".into()),
+                        ("to_lon".into(), "4".into()),
+                        ("at_lat".into(), "5".into()),
+                        ("at_lon".into(), "6".into()),
                     ],
                     field: f.clone(),
                 })
@@ -6464,5 +6607,58 @@ fn every_offered_field_has_a_translation() {
         fresh.is_empty(),
         "the vocabulary offers these and no backend call answers them, so a card \
          that asks renders an em dash the checker cannot warn about: {fresh:#?}"
+    );
+}
+
+/// The nav card routes between two EDITABLE places, and says how far.
+///
+/// Three things were wrong at once and each hid the next.
+///
+/// The `Field` sat behind `when dest == ""`, so a card opening with the trip
+/// already known — which is every card whose request named the places — had no
+/// input at all. Measured on device: the model generated a card containing only a
+/// `Map`, and there was no way to change where you were going.
+///
+/// `sys.route` had no translation, because its `from`/`to` were PLACES: a route
+/// needs four numbers and an argument carries one value, so a place name had
+/// nothing to resolve into. Duration and distance rendered `— —` beneath a route
+/// that drew correctly — the map resolved its endpoints and the text beside it
+/// could not.
+///
+/// And the map routed from `sys.gps` while the user edited a FROM field the map
+/// ignored.
+#[test]
+fn the_nav_card_routes_between_two_editable_places() {
+    const NAV: &str = include_str!("fixtures/nav.card");
+    let report = check_ui_l0_named("nav", NAV);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+
+    let data = serde_json::json!({
+        "origin": "Saratoga High", "dest": "Stanford University", "query": "",
+        "found": [], "env": { "locale": {} },
+        "copy": { "from": "FROM", "to": "TO", "where": "Where to?",
+                  "here_now": "Starting from…", "away": " away", "seeking": "…",
+                  "eta": "ETA", "nostop": "stop" }
+    });
+    let root = realize(NAV, &data, RealizeLimits::default())
+        .root
+        .expect("realizes");
+    let kit = splash_ui_l0::kit::lower(&root);
+
+    // BOTH endpoints editable, always — not one behind a branch that never fires.
+    assert_eq!(
+        kit.matches("l0_field(").count(),
+        2,
+        "an origin field and a destination field:\n{kit}"
+    );
+    // The trip's facts, live, from the coordinates of the places that were found.
+    assert!(
+        kit.contains("sys.navroute(sys.searchnum(\"Saratoga High\", 0, \"lat\")"),
+        "duration and distance must be fetched for THIS trip:\n{kit}"
+    );
+    // And the map routes from the origin the user can edit.
+    assert!(
+        kit.contains("l0_map(") && kit.contains("sys.searchnum(\"Stanford University\""),
+        "the map must route between the same two places:\n{kit}"
     );
 }

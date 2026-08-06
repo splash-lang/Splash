@@ -6,8 +6,8 @@
 # `a2app/apps/nav/exemplars/trip-planner.splash` is 664 lines and classifies at
 # L2: 30 `let` bindings, 83 assignments, 128 conditionals, 606 operators, and a
 # `fn tick()` that recomputes route geometry every frame. This is the same
-# screen — pick an origin, a destination, up to two stops, see the route and its
-# ETA — written against declared sources instead.
+# screen — pick an origin, a destination, see the route, then drive it — written
+# against declared sources instead.
 #
 # THE COMPARISON IS THE POINT. Everything that shrank was compensation:
 #
@@ -21,83 +21,163 @@
 #   - It called `sys.navroute` itself and pushed a polyline into the widget.
 #     `Map` takes the trip and fetches its own route, exactly as `StockPlot`
 #     takes a symbol and `AqiContour` takes a location.
+#   - It drove the turn banner from a CLOCK — `sys.navsecs(period) * 15.2`, a
+#     looping timer times an assumed 34 mph. See `source step` below.
 
-source here   sys.gps()
-source found  sys.search(query: state.query, count: 5, fields: [id, name, lat, lon])
-source trip   sys.route(from: here, to: dest_place, mode: .drive,
-                        fields: [duration, distance])
-source dest_place sys.search(query: state.dest, count: 1, fields: [id, name, lat, lon])
+# Where the device is. This is the one declaration that makes navigating — as
+# opposed to previewing a route — expressible at all.
+#
+# A follow camera needs a position that updates as the user moves, and L0 has no
+# loop to supply one: that is what `fn tick()` is for, and `fn tick()` is L2. So
+# `Map(mode: .drive)` used to lower to the static preview, because a widget handed
+# a route and no position animates along it on a timer and draws motion the user
+# is not making. §4 does not stop applying because the invented value is a camera
+# pose.
+#
+# `sys.gps` is that position, declared. Everything downstream of it — the camera,
+# the turn instruction, the distance remaining — moves because the device did.
+source here sys.gps()
+
+source found sys.search(query: state.query, count: 5, fields: [id, name, lat, lon])
+
+# Both endpoints, each resolved by the search that found it.
+source origin_place sys.search(query: state.origin, count: 1, fields: [id, name, lat, lon])
+source dest_place   sys.search(query: state.dest,   count: 1, fields: [id, name, lat, lon])
+
+# The trip's own facts, from FOUR COORDINATES.
+#
+# `sys.route(from: here, to: dest_place)` read better and could not work: a route
+# needs four numbers and an argument carries one value, so a place name had
+# nothing to resolve into. The duration and distance rendered `— —` under a route
+# that drew correctly, because the map resolved its endpoints and the text beside
+# it could not.
+source trip sys.route(from_lat: origin_place.0.lat, from_lon: origin_place.0.lon,
+                      to_lat:   dest_place.0.lat,   to_lon:   dest_place.0.lon,
+                      mode: .drive, fields: [duration, distance])
+
+# Where we are ON the trip: the next manoeuvre, and what is left of it.
+#
+# `sys.route` describes the whole trip and never changes as it is driven. This
+# takes the same four coordinates PLUS the device's own two, so the host projects
+# the fix onto the route and answers relative to it.
+#
+# The two extra arguments are the whole difference between navigating and playing
+# a demo. The 664-line exemplar fed its banner `sys.navsecs(period) * 15.2` and
+# announced turns for a vehicle moving at an assumed 34 mph whether or not
+# anything was moving — it arrived on schedule from a parked car.
+source step sys.step(from_lat: origin_place.0.lat, from_lon: origin_place.0.lon,
+                     to_lat:   dest_place.0.lat,   to_lon:   dest_place.0.lon,
+                     at_lat:   here.lat,           at_lon:   here.lon,
+                     fields: [instruction, remaining])
 source env.locale sys.locale()
 
-state query { shape: text, initial: "" }        # what the user is typing
-state dest  { shape: text, initial: "" }        # the chosen destination
+# BOTH endpoints are editable state, and both are always on screen.
+#
+# An earlier version had only `dest`, behind `when dest == ""`, so a card that
+# opened with the trip already known — which is every card whose request named
+# the places — had no input at all. Measured: the model generated a card
+# containing only a `Map`, and there was no way to change where you were going.
+state origin { shape: text, initial: "" }        # empty ⇒ nothing to route from
+state dest   { shape: text, initial: "" }        # empty ⇒ nothing to route to
+state query  { shape: text, initial: "" }        # what the user is typing
 
+# Planning or driving — an ENUM, not a flag, and the reason is §3.
+#
+# A `bool` reads better and cannot express the second screen. A guard tests a
+# declared name against a declared value, so `when driving` names the true case
+# and there is no total form for the false one: `when driving == false` asks the
+# checker to accept an undeclared literal, and a `not` operator would be the
+# expression form L0 does not have. Two named screens have two guards that each
+# say which screen they are, which is what a card should have said anyway.
+state screen { shape: enum[plan, drive], initial: .plan }
+
+event set_origin  { origin: set($value), query: clear }
+event set_dest    { dest: set($value), query: clear }
 event choose_dest { dest: set($value), query: clear }
-event clear_dest  { dest: clear, query: clear }
+event go          { screen: cycle(.plan, .drive) }
 
 copy where    { class: vocabulary, en: "Where to?" }
 copy from     { class: vocabulary, en: "FROM" }
 copy to       { class: vocabulary, en: "TO" }
-copy here_now { class: vocabulary, en: "Current location" }
-copy eta      { class: vocabulary, en: "ETA" }
+copy here_now { class: vocabulary, en: "Starting from…" }
 copy away     { class: vocabulary, en: "away" }
 copy seeking  { class: vocabulary, en: "Finding a route…" }
-copy nostop   { class: vocabulary, en: "Add a stop" }
+copy start    { class: vocabulary, en: "Go" }
+copy stop     { class: vocabulary, en: "End" }
+copy left     { class: vocabulary, en: "left" }
 
 view root Surface {
-  # ---- the trip, as the card states it -------------------------------------
-  Panel {
-    Row(align: .center, gap: 10) {
-      TextCaption(text: copy.from)
-      TextRow(text: here.name)
-    }
-    Rule()
-    Row(align: .center, gap: 10) {
-      TextCaption(text: copy.to)
-      # A destination is either chosen or being typed. No branch on a sentinel:
-      # the state itself says which.
-      when dest == "" { Field(text: query, placeholder: copy.where, on_commit: choose_dest) }
-      when dest != "" {
-        Row(on_tap: clear_dest) { TextRow(text: dest_place.name) }
-      }
-    }
-  }
-
-  # ---- what the user is choosing between -----------------------------------
-  when dest == "" {
+  # ---- planning ------------------------------------------------------------
+  when screen == .plan {
+    # Two fields, ALWAYS. A `Field` shows the state it is bound to and commits a
+    # replacement, so each row is both the current value and the way to change it
+    # — no branch, no two-step "clear then retype".
     Panel {
-      for f, i in found key f.id {
-        Row(align: .center, gap: 10, on_tap: choose_dest, value: f.id) {
-          TextRow(text: f.name)
-        }
-        Rule()
+      Row(align: .center, gap: 10) {
+        TextCaption(text: copy.from)
+        Field(text: origin, placeholder: copy.here_now, on_commit: set_origin, width: .fill)
       }
+      Rule()
+      Row(align: .center, gap: 10) {
+        TextCaption(text: copy.to)
+        Field(text: dest, placeholder: copy.where, on_commit: set_dest, width: .fill)
+      }
+    }
+
+    # What the user is choosing between.
+    when dest == "" {
+      Panel {
+        for f, i in found key f.id {
+          Row(align: .center, gap: 10, on_tap: choose_dest, value: f.id) {
+            TextRow(text: f.name)
+          }
+          Rule()
+        }
+      }
+    }
+
+    when dest != "" {
+      # §5.9, where the original compared against -9999. "Not yet" and "failed"
+      # are different states and the card can say so.
+      when trip.$state == .pending { TextBody(text: copy.seeking) }
+      when trip.$state == .ready {
+        Row(align: .center, gap: 12) {
+          TextValue(value: trip.duration)
+          TextCaption(value: trip.distance, suffix: copy.away)
+          Chip(text: copy.start, on_tap: go)
+        }
+      }
+      # The static route preview: no `at:`, so no camera that moves.
+      #
+      # This does NOT guard on having a fix. An earlier version wrapped it in
+      # `when here.ok == 1`, which is wrong in mechanism however right it sounds:
+      # a guard is evaluated at REALIZE time, before any live value exists, so
+      # `here.ok` reads nothing on a freshly generated card and the map is removed
+      # unconditionally. Measured — the model wrote a card containing `Map(`, and
+      # not one `MapView` reached the screen.
+      #
+      # A guard can only test something realization can see: declared state, or a
+      # source's `$state` (which the host injects). A live VALUE is not that. The
+      # impossible-centre case is handled where the number is actually known, in
+      # the widget.
+      Map(mode: .plan, from: origin_place, to: dest_place, zoom: 16)
     }
   }
 
-  # ---- the route ------------------------------------------------------------
-  when dest != "" {
-    # §5.9, where the original compared against -9999. "Not yet" and "failed"
-    # are different states and the card can say so.
-    when trip.$state == .pending { TextBody(text: copy.seeking) }
-    when trip.$state == .ready {
+  # ---- driving -------------------------------------------------------------
+  when screen == .drive {
+    # The banner. Every value in it is a measurement: the manoeuvre and the
+    # distance left both come from the device's own position projected onto the
+    # route, so this row changes when the car moves and at no other time.
+    Panel {
+      TextRow(text: step.instruction)
       Row(align: .center, gap: 12) {
-        TextValue(value: trip.duration)
-        TextCaption(value: trip.distance, suffix: copy.away)
+        TextCaption(value: step.remaining, suffix: copy.left)
+        Chip(text: copy.stop, on_tap: go)
       }
     }
-    # The card names the TRIP. It does NOT guard on having a fix.
-    #
-    # An earlier version wrapped this in `when here.ok == 1`, which is wrong in
-    # mechanism however right it sounds: a guard is evaluated at REALIZE time,
-    # before any live value exists, so `here.ok` reads nothing on a freshly
-    # generated card and the map is removed unconditionally. Measured — the model
-    # wrote a card containing `Map(`, and not one `MapView` reached the screen.
-    #
-    # A guard can only test something realization can see: declared state, or a
-    # source's `$state` (which the host injects). A live VALUE is not that. The
-    # impossible-centre case is handled where the number is actually known, in the
-    # widget.
-    Map(mode: .drive, from: here, to: dest_place, zoom: 16)
+    # `at:` is what makes `.drive` mean the chase camera rather than the preview.
+    # The route is still the declared trip; only the camera follows the driver.
+    Map(mode: .drive, from: origin_place, to: dest_place, at: here, zoom: 17)
   }
 }

@@ -2643,6 +2643,10 @@ pub mod catalog {
                 ("from", Path),
                 ("to", Path),
                 ("via", Path),
+                // The live position the camera follows. See `map_mode`: this is
+                // what lets `.drive` mean the chase camera rather than the static
+                // preview, because a followed position is a measured one.
+                ("at", Path),
                 ("zoom", Number),
             ],
         ),
@@ -2803,7 +2807,26 @@ pub mod catalog {
         ("sys.locale", &[]),
         ("sys.gps", &[]),
         ("sys.search", &["query", "count", "fields"]),
-        ("sys.route", &["from", "to", "via", "mode", "fields"]),
+        // COORDINATES, not places. A route needs four numbers and an argument
+        // carries one value, so `from`/`to` as place names could never be
+        // resolved into a call — which is why this capability had no translation
+        // and the nav card's duration and distance row was `— —` beneath a route
+        // that drew correctly. Each coordinate is a read off the source that
+        // found the place, which the existing argument resolution already turns
+        // into a live call.
+        (
+            "sys.route",
+            &["from_lat", "from_lon", "to_lat", "to_lon", "mode", "fields"],
+        ),
+        // Where you are ON a route. Takes the trip's four coordinates and the
+        // device's own two, and answers relative to them — the half of navigation
+        // a route cannot give, because a route never changes as you drive it.
+        (
+            "sys.step",
+            &[
+                "from_lat", "from_lon", "to_lat", "to_lon", "at_lat", "at_lon", "fields",
+            ],
+        ),
         ("sys.places", &["lat", "lon", "category", "count", "fields"]),
         ("sys.news", &["count", "offset", "fields"]),
         ("sys.news_item", &["id", "fields"]),
@@ -2898,6 +2921,7 @@ pub mod catalog {
         ("sys.gps", &["lat", "lon", "accuracy", "ok"]),
         ("sys.search", &["id", "name", "lat", "lon", "distance"]),
         ("sys.route", &["duration", "distance", "steps"]),
+        ("sys.step", &["instruction", "remaining", "progress"]),
         (
             "sys.places",
             &["id", "name", "distance", "lat", "lon", "category"],
@@ -5523,10 +5547,11 @@ impl Realizer<'_> {
                     // argument instead. Two different lowerings of one card,
                     // selected by whether a blob happened to carry the key.
                     //
-                    // It surfaced on a navigation card, where the position a turn
-                    // instruction is computed from lowered to a fixed point on the
-                    // map, so every instruction was the first one forever. A
-                    // seeded fix is the one value such a card must never keep.
+                    // It surfaced on `sys.step(at_lat: here.lat)`: the progress a
+                    // turn instruction is computed from lowered to `37.3`, a fixed
+                    // point on the map, so every instruction was the first one
+                    // forever. The seeded fix is the one value a navigation card
+                    // must never be allowed to keep.
                     match self.nested_source_call(key, scope) {
                         Some(call) => call,
                         None => json_to_key(&scope.lookup(key)?),
@@ -5766,26 +5791,38 @@ pub mod makepad {
     /// defect this profile keeps finding.
     pub(super) fn map_mode(node: &UiNode) -> &'static str {
         match arg(node, "mode") {
-            // `.drive` lowers to the STATIC preview, not to the chase camera,
-            // and this is a §4 argument rather than a performance one.
+            // `.drive` means the chase camera EXACTLY WHEN the card declared a
+            // live position for it to follow, and the static preview otherwise.
+            // This is a §4 rule, not a performance compromise.
             //
-            // A chase camera follows a vehicle, and following needs a position
-            // updated every frame. L0 has no loop to supply one — that is what
-            // `fn tick()` is for, and `fn tick()` is L2. Handed a route and no
-            // position, the widget animates along the polyline on a timer: it
-            // draws motion the user is not making. That is a fabricated fact in
-            // the one currency a map trades in, and §4 does not stop applying
-            // because the invented value is a camera pose.
+            // Following needs a position that updates as the user moves. L0 has
+            // no loop to supply one — that is what `fn tick()` is for, and
+            // `fn tick()` is L2 — so an earlier version lowered BOTH moving modes
+            // to the one that does not move. Handed a route and no position, the
+            // widget animates along the polyline on a timer: it draws motion the
+            // user is not making, which is a fabricated fact in the one currency
+            // a map trades in, and §4 does not stop applying because the invented
+            // value is a camera pose.
             //
-            // It is also what made the card stutter. The widget's own settle gate
+            // It is also what made the card stutter: the widget's settle gate
             // exists because a map that keeps asking for frames "was pinning the
-            // GPU at ~100%", and a follow mode is permanently in motion so it
-            // never settles. Measured at 69% CPU and 1.9 GB resident on a
+            // GPU at ~100%", and a timer-driven follow is permanently in motion
+            // so it never settles. Measured at 69% CPU and 1.9 GB resident on a
             // OnePlus 6 for one card holding one map.
             //
-            // So both modes that MOVE are lowered to the one that does not. When
-            // L0 gains a way to declare a live position, `.drive` can mean what
-            // it says.
+            // `at:` is that missing declaration — a source answering `lat`/`lon`,
+            // in practice `sys.gps`. With it, the camera follows a MEASUREMENT:
+            // the frames are the ones the fix earns, so the map settles whenever
+            // the user is standing still, and nothing is invented. Without it the
+            // old argument holds unchanged, so a card that asks to drive and
+            // declares no position still gets the honest preview.
+            // `"follow"`, NOT the widget's `"2d"`. They render the same
+            // projection and differ in where the camera comes from: `"2d"` drives
+            // a simulated vehicle along the route at an assumed speed off a
+            // looping clock, which is the fabrication this whole rule exists to
+            // refuse — and a convincing one, because it looks exactly like
+            // navigating. `"follow"` takes the position the card declared.
+            Some(NodeValue::Token(t)) if t == "drive" && live_position(node).is_some() => "follow",
             Some(NodeValue::Token(t)) if t == "drive" || t == "plan" => "plan",
             // `flat` and an unstated mode are the same thing to the widget: no
             // nav shader at all, which also means no route ribbon.
@@ -5793,28 +5830,43 @@ pub mod makepad {
         }
     }
 
+    /// One axis of a `Map` endpoint, as a live call.
+    ///
+    /// An endpoint names a SOURCE rather than coordinates, so each is asked for
+    /// its own axis — `at: here` becomes `sys.gps("lat")` and `sys.gps("lon")`.
+    fn map_coord(node: &UiNode, name: &str, axis: &str) -> Option<String> {
+        let (_, binding) = node.bindings.iter().find(|(n, _)| n == name)?;
+        // A collection answers `0.lat` and a scalar source answers `lat`.
+        for field in [axis.to_owned(), format!("0.{axis}")] {
+            let probe = SourceBinding {
+                field,
+                ..binding.clone()
+            };
+            if let Some(call) = vm_call(&probe) {
+                return Some(call);
+            }
+        }
+        None
+    }
+
+    /// The live position a `Map` was told to follow, if it was told one.
+    ///
+    /// This is the whole difference between a camera that reports where the user
+    /// is and one that invents it — see `map_mode`. Both axes must resolve: half
+    /// a fix is not a position.
+    pub(super) fn live_position(node: &UiNode) -> Option<(String, String)> {
+        Some((map_coord(node, "at", "lat")?, map_coord(node, "at", "lon")?))
+    }
+
     /// A `Map`'s centre and route, as live calls: `(lat, lon, polyline)`.
     ///
-    /// Both endpoints name a SOURCE rather than coordinates, so each is asked for
-    /// its own axis — `from: here` becomes `sys.gps("lat")` and `sys.gps("lon")`.
-    /// An endpoint whose capability cannot answer a coordinate yields a neutral
-    /// centre and no route, because a map drawn from a seeded position is a map
-    /// of somewhere the user is not.
+    /// The centre is the live position when one was declared, and the route's
+    /// start otherwise — a driving map is centred on the driver, a planning map
+    /// on the trip. An endpoint whose capability cannot answer a coordinate
+    /// yields a neutral centre and no route, because a map drawn from a seeded
+    /// position is a map of somewhere the user is not.
     pub(super) fn map_route(node: &UiNode) -> (String, String, String) {
-        let coord = |name: &str, axis: &str| -> Option<String> {
-            let (_, binding) = node.bindings.iter().find(|(n, _)| n == name)?;
-            // A collection answers `0.lat` and a scalar source answers `lat`.
-            for field in [axis.to_owned(), format!("0.{axis}")] {
-                let probe = SourceBinding {
-                    field,
-                    ..binding.clone()
-                };
-                if let Some(call) = vm_call(&probe) {
-                    return Some(call);
-                }
-            }
-            None
-        };
+        let coord = |name: &str, axis: &str| map_coord(node, name, axis);
         let (Some(a), Some(o)) = (coord("from", "lat"), coord("from", "lon")) else {
             return ("0".into(), "0".into(), "\"\"".into());
         };
@@ -5825,7 +5877,14 @@ pub mod makepad {
             (Some(b), Some(p)) => format!("sys.navroute({a}, {o}, {b}, {p}, \"polyline\")"),
             _ => "\"\"".to_owned(),
         };
-        (a, o, poly)
+        // The route is always the declared trip; only the CENTRE moves to the
+        // driver. Centring on the fix without keeping the trip's endpoints would
+        // redraw the route from wherever the user happens to be, which is a
+        // different trip from the one the card states.
+        match live_position(node) {
+            Some((at_lat, at_lon)) => (at_lat, at_lon, poly),
+            None => (a, o, poly),
+        }
     }
 
     /// The VM helper that answers a declared capability, if one does.
@@ -6008,6 +6067,60 @@ pub mod makepad {
             // the same path that currently crashes the shipping activity with a
             // missing `LocationListener$-CC` desugaring class. So this arm makes
             // the card correct and does not by itself make GPS usable.
+            // A TRIP's own facts — how long and how far — from the same cached
+            // fetch the map's polyline comes from, so asking costs nothing extra.
+            "sys.route" => {
+                let key = match binding.field.as_str() {
+                    "duration" => "min",
+                    "distance" => "km",
+                    // The step list is a collection a card loops over, not a
+                    // scalar a call answers.
+                    _ => return None,
+                };
+                let a = arg("from_lat")?;
+                let o = arg("from_lon")?;
+                let b = arg("to_lat")?;
+                let p = arg("to_lon")?;
+                Some(format!("sys.navroute({a}, {o}, {b}, {p}, {key:?})"))
+            }
+            // Navigation's live half, and the one place a fabricated number was
+            // load-bearing in the app this replaces.
+            //
+            // `sys.navstep` needs a progress-along-the-route in metres. The
+            // original nav app supplied `sys.navsecs(period) * 15.2` — a looping
+            // clock times an assumed 34 mph — so the card announced turns for a
+            // vehicle that was moving whether or not anything was. It read as a
+            // demo because it WAS one: the instruction advanced on a timer.
+            //
+            // `sys.navprog` answers the same slot from the device's own fix, by
+            // projecting it onto the route. Every argument is now a measurement,
+            // so an instruction changes because the device moved. Both helpers
+            // share `sys.navroute`'s one cached fetch.
+            "sys.step" => {
+                let key = match binding.field.as_str() {
+                    "instruction" => "instr",
+                    // The helper calls it `rem`. `"remain"` is what the field is
+                    // called in L0's vocabulary and would have answered "" — the
+                    // helper returns the empty string for a field it does not
+                    // know, so the banner would have shown a live instruction
+                    // above a blank distance, which reads as "still loading"
+                    // rather than "asked for the wrong key".
+                    "remaining" => "rem",
+                    "progress" => "progress",
+                    _ => return None,
+                };
+                let a = arg("from_lat")?;
+                let o = arg("from_lon")?;
+                let b = arg("to_lat")?;
+                let p = arg("to_lon")?;
+                let at_lat = arg("at_lat")?;
+                let at_lon = arg("at_lon")?;
+                let along = format!("sys.navprog({a}, {o}, {b}, {p}, {at_lat}, {at_lon})");
+                if key == "progress" {
+                    return Some(along);
+                }
+                Some(format!("sys.navstep({a}, {o}, {b}, {p}, {along}, {key:?})"))
+            }
             "sys.gps" => {
                 let key = match binding.field.as_str() {
                     "accuracy" => "acc",

@@ -118,9 +118,39 @@ as evidence about the language. The honest position is narrower —
 | | |
 |---|---|
 | **L0 suits** | a card that displays declared data, branches on it, and writes declared state on a tap or a commit |
-| **L0 cannot express** | a card that computes derived values, or drives its own animation loop — including turn-by-turn navigation, which is the same thing wearing a map |
+| **L0 cannot express** | a card that computes derived values, or drives its own animation loop |
 | **Settled by writing it** | `nav`'s DECLARATIVE screens — search, results, route preview — rewritten against declared sources with a `Map` role, in **54 lines** against the L2 exemplar's 664, admitted at L0 |
-| **Settled against the shipping card, NOT against L0** | the **drive** screen. As written it is L2 and unambiguously so — a `fn tick()` calling `ui.<id>.set_*` on named widgets that must never rebuild, which is `fn` plus imperative widget commands plus the negation of declare-and-re-realize. But that is because the CARD drives the camera and the vehicle by hand. `MapView` already animates its own camera from a `nav_period` loop; what it lacks is a declared position to follow, and `sys.gps` is one. So the same move `Map` already made — the card names the trip and the widget fetches the route — would make navigation declarative: the card names the trip and the widget follows the fix. That is a widget change, not a language change. **The mechanism the shipping card uses is L2; turn-by-turn navigation is not inherently L2**, and an L0 nav card shows a route only until the widget can follow one |
+| **Settled by writing it, second pass** | the **drive** screen — turn-by-turn navigation, at L0, in the same card. The prediction in the row this replaces held: it was a widget change, not a language change |
+
+**Turn-by-turn was the hard case, and it is worth reading how it fell.** The row
+above used to say the drive screen was "settled against the shipping card, NOT
+against L0": the shipping mechanism is unambiguously L2 — a `fn tick()` calling
+`ui.<id>.set_*` on widgets that must never rebuild — but only because the CARD
+drove the camera by hand. The prediction was that a declared position would move
+it to L0. Three things were needed, and all three were the same shape:
+
+1. **`Map(at:)`** — a declared position for the camera to follow. `.drive` now
+   means the chase camera exactly when `at:` is supplied, and the static preview
+   otherwise, so the mode that MOVES is available precisely when the card said
+   where the user is.
+2. **`sys.step`** — the next manoeuvre and the distance left, from the trip's four
+   coordinates plus the device's own two.
+3. **A widget mode that follows rather than simulates.** This was the trap. The
+   widget already had a `"2d"` follow camera, and pointing `.drive` at it would
+   have looked like a complete feature: it drives a vehicle along the route at an
+   assumed 34 mph off a looping clock. It looks exactly like navigating. Anything
+   bound to it reports a trip that is not happening, and §4 does not stop applying
+   because the invented value is a camera pose. `"follow"` takes its position from
+   the card's declared fix and moves when, and only when, the device does.
+
+The same fabrication was load-bearing in the L2 exemplar's banner, which fed
+`sys.navstep` a progress of `sys.navsecs(period) * 15.2` — a clock times an
+assumed speed — and so announced turns, and arrived on schedule, from a parked
+car. `sys.step` takes the device's coordinates instead and the host projects the
+fix onto the route. **What L0 forced was not a smaller nav card but a truthful
+one:** the profile's own no-facts rule is what made the simulated camera
+inexpressible, and the honest version cost one attribute, one capability, and one
+widget mode.
 
 **What writing it found.** Four gaps, none structural, all recorded rather than
 patched over:
