@@ -5509,17 +5509,27 @@ impl Realizer<'_> {
                     // `state.x` in a source argument addresses card state; the
                     // view scope names it without the prefix.
                     let key = p.strip_prefix("state.").unwrap_or(p);
-                    match scope.lookup(key) {
-                        Some(v) => json_to_key(&v),
-                        // A source argument that names ANOTHER SOURCE.
-                        //
-                        // `sys.places(lat: place.lat)` depends on `place`, and a
-                        // LIVE card carries no data blob — so the lookup found
-                        // nothing and `?` discarded the whole binding, leaving
-                        // every row an em dash. The dependency is exactly what
-                        // L0 declares, so resolve it the way the backend will:
-                        // emit the parent's own live call in the argument.
-                        None => self.nested_source_call(key, scope)?,
+                    // A source argument that names ANOTHER SOURCE resolves to
+                    // that source's own live call — `sys.places(lat: place.lat)`
+                    // depends on `place`, and the dependency is exactly what L0
+                    // declares, so it is emitted the way the backend will read it.
+                    //
+                    // THE SOURCE IS TRIED FIRST, and the order is the whole point.
+                    // It used to be the other way round: the scope was consulted
+                    // and the live call was the fallback for when the lookup found
+                    // nothing. A live card carries no data blob, so on a device
+                    // that path was taken and everything worked — and a card
+                    // previewed against seed data lowered the SEED into the
+                    // argument instead. Two different lowerings of one card,
+                    // selected by whether a blob happened to carry the key.
+                    //
+                    // It surfaced on a navigation card, where the position a turn
+                    // instruction is computed from lowered to a fixed point on the
+                    // map, so every instruction was the first one forever. A
+                    // seeded fix is the one value such a card must never keep.
+                    match self.nested_source_call(key, scope) {
+                        Some(call) => call,
+                        None => json_to_key(&scope.lookup(key)?),
                     }
                 }
                 SourceArg::Text(t) => t.clone(),
