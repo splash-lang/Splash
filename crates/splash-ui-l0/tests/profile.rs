@@ -6729,11 +6729,18 @@ fn the_nav_card_routes_between_two_editable_places() {
         .expect("realizes");
     let kit = splash_ui_l0::kit::lower(&root);
 
-    // BOTH endpoints editable, always — not one behind a branch that never fires.
+    // THREE fields, always: origin, destination and the stop. None behind a branch
+    // that never fires.
+    //
+    // The stop was a `Chip(..., value: "")` and a review found it could never work —
+    // an empty value becomes no payload, so the transition wrote nothing and the
+    // control was incapable of adding a stop. It looked right, and the trip THROUGH a
+    // stop had been verified by seeding the state, which proves the routing and never
+    // touches the control. A field is how text enters an L0 card.
     assert_eq!(
         kit.matches("l0_field(").count(),
-        2,
-        "an origin field and a destination field:\n{kit}"
+        3,
+        "an origin, a destination and a stop, each editable:\n{kit}"
     );
     // The trip's facts, live, from the coordinates of the places that were found.
     assert!(

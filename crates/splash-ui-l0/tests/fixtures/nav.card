@@ -215,29 +215,25 @@ view root Surface {
       }
     }
 
-    # The stop row. One slot: present as a `Field` when it is set so it can be
-    # replaced, offered as a `Chip` when it is not.
-    when stop != "" {
-      Panel {
-        Row(align: .center, gap: 10) {
-          TextCaption(text: copy.via_lbl)
-          Field(text: stop, placeholder: copy.add_stop, on_commit: set_stop, width: .fill)
-          Chip(text: copy.remove, on_tap: drop_stop)
-        }
-      }
-    }
-
-    # Offering a stop, when there is none. On its OWN row, and that is a fix
-    # rather than a layout preference: with it beside the three mode chips the row
-    # overflowed and "Add a stop" rendered as "Add a sto" — clipped at the card's
-    # edge with nothing saying so. The shipping app's own verification pass found
-    # the identical defect in the identical place (R7.1: a four-chip row clipped
-    # "Bike" to "B") and fixed it by tightening widths. Tightening buys room for
-    # one more chip; moving the control to where it belongs — with the stop, not
-    # with the modes — means the row cannot overflow at all.
-    when stop == "" {
-      Row(align: .center, gap: 8) {
-        Chip(text: copy.add_stop, on_tap: set_stop, value: "")
+    # The stop's own row, a FIELD and always present — for the same reason FROM
+    # and TO are.
+    #
+    # This was a `Chip(text: copy.add_stop, on_tap: set_stop, value: "")`, and a
+    # review found it could never work: an empty `value:` becomes no payload
+    # (`l0_card.rs`'s `(!value.is_empty()).then(...)`), so `set($value)` wrote
+    # nothing and `stop` stayed empty. The chip was tappable, looked right, and
+    # was incapable of adding a stop — which is exactly the class of defect this
+    # profile exists to catch, in the one place I had checked the OUTCOME rather
+    # than the interaction: the trip through a stop was verified by seeding
+    # `stop`, which proves the routing and never touches the control.
+    #
+    # A `Field` is how text enters an L0 card. There is nothing for a chip to do
+    # here that the field does not do better.
+    Panel {
+      Row(align: .center, gap: 10) {
+        TextCaption(text: copy.via_lbl)
+        Field(text: stop, placeholder: copy.add_stop, on_commit: set_stop, width: .fill)
+        when stop != "" { Chip(text: copy.remove, on_tap: drop_stop) }
       }
     }
 
