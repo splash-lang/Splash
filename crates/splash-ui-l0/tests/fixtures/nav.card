@@ -194,6 +194,18 @@ view root Surface {
     # What the user is choosing between.
     when dest == "" {
       Panel {
+        # R5.4's "your trip" defaults: before anything is typed, the trip's own
+        # places are the pickable items — tap the origin while the destination is
+        # empty and the trip reverses. They are shown when the QUERY is empty,
+        # because that is when a results list would otherwise be a blank panel with
+        # nothing to say why.
+        when query == "" {
+          Row(align: .center, gap: 10, on_tap: choose_dest, value: origin) {
+            TextCaption(text: copy.from)
+            TextRow(text: origin)
+          }
+          Rule()
+        }
         for f, i in found key f.id {
           Row(align: .center, gap: 10, on_tap: choose_dest, value: f.id) {
             TextRow(text: f.name)
