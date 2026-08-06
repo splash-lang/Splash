@@ -8561,6 +8561,35 @@ pub mod kit {
             return;
         };
         match node.kind.as_str() {
+            // A card holding a MAP is a map with the card floating over it, and
+            // this is the backend the DEVICE renders through — the app's path is
+            // `kit::lower` -> `_kit.splash` -> eval -> `l0_widgets`, so the same
+            // fix landing only in `makepad::lower` would have looked verified and
+            // changed nothing on a phone. That is exactly the one-backend gap
+            // `Field`, `Grid.cols` and `Map` were each found in, and the reason
+            // `every_admitted_role_is_lowered_by_both_backends` exists.
+            //
+            // See `l0_surface_map` in the kit for why the map is the bottom layer
+            // and why every number in the sheet is the shipping nav card's.
+            "Surface" if node.children.iter().any(|c| c.kind == "Map") => {
+                let map = node
+                    .children
+                    .iter()
+                    .find(|c| c.kind == "Map")
+                    .expect("guarded above");
+                out.push_str("l0_surface_map(");
+                element(map, depth, out);
+                out.push_str(", [");
+                let mut first = true;
+                for child in node.children.iter().filter(|c| c.kind != "Map") {
+                    if !first {
+                        out.push_str(", ");
+                    }
+                    first = false;
+                    element(child, depth + 1, out);
+                }
+                out.push_str("])");
+            }
             "Surface" => {
                 let _ = write!(out, "{f}(");
                 children(node, depth, out);

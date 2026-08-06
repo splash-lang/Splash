@@ -6851,3 +6851,61 @@ fn a_card_holding_a_map_floats_its_content_over_it() {
         "a card without a map is still a column:\n{plain}"
     );
 }
+
+/// BOTH backends float a map card's content over the map.
+///
+/// The kit is the backend the DEVICE renders through — the app's chain is
+/// `kit::lower` -> `_kit.splash` -> its VM -> `l0_widgets` — and `makepad::lower` is
+/// what the other host renders. So a layout fix in one of them is verified in
+/// neither.
+///
+/// This test exists because that happened. The map-card overlay was written into
+/// both, screenshot-verified through `makepad::lower` on a real phone, and the kit
+/// arm was DEAD CODE: an earlier `"Surface" =>` arm matched first, so `l0_surface`
+/// still built a column and a generated card on the device still had its map drawn
+/// over its content. `rustc` said `unreachable pattern` and pointed at the line; the
+/// clippy filter in use grepped for `^error` and dropped it.
+///
+/// A shadowed match arm is invisible at runtime — the code is there, reads
+/// correctly, and never runs. Asserting on the OUTPUT is the only thing that
+/// notices.
+#[test]
+fn both_backends_float_a_map_cards_content_over_the_map() {
+    const NAV: &str = include_str!("fixtures/nav.card");
+    let data = serde_json::json!({
+        "origin": "A", "dest": "B", "query": "", "screen": "plan", "found": [],
+        "here": { "lat": -9999, "lon": -9999, "ok": 0 },
+        "step": { "instruction": "s", "remaining": "s" },
+        "env": { "locale": {} },
+        "copy": { "from": "F", "to": "T", "where": "?", "here_now": "…",
+                  "away": "away", "seeking": "…", "start": "Go", "stop": "End",
+                  "left": "left" }
+    });
+    let root = realize(NAV, &data, RealizeLimits::default())
+        .root
+        .expect("realizes");
+
+    // The kit composes the overlay through its own role, not the plain surface.
+    let kit = splash_ui_l0::kit::lower(&root);
+    assert!(
+        kit.contains("l0_surface_map("),
+        "the kit must build the map card, not a column:\n{kit}"
+    );
+    assert!(
+        !kit.contains("l0_surface(") || kit.matches("l0_surface(").count() == 0,
+        "and must not ALSO emit the column surface:\n{kit}"
+    );
+    // The map is the first argument, so it is the bottom layer.
+    let head = &kit[kit.find("l0_surface_map(").unwrap()..];
+    assert!(
+        head[..40.min(head.len())].contains("l0_map("),
+        "the map must be the overlay's first layer:\n{head}"
+    );
+
+    // And the other backend, which a different host renders.
+    let mk = makepad::lower(&root);
+    assert!(
+        mk.contains("flow: Overlay") && mk.find("MapView{") < mk.find("RoundedView{ width: Fill"),
+        "makepad must float the content over the map too:\n{mk}"
+    );
+}
