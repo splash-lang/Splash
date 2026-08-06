@@ -5391,15 +5391,48 @@ impl Realizer<'_> {
         })
     }
 
+    /// How many rows a loop over this source should realize before its data
+    /// arrives.
+    ///
+    /// This matched an argument named `count` holding a bare literal, and missed
+    /// the case that ships: a weather card asks `sys.weather(days: state.days)`
+    /// with `state days { initial: 7 }`. The argument is called `days`, and it is
+    /// a PATH rather than a literal — so a seven-day forecast realized zero rows
+    /// and the card drew current conditions and nothing else. "Beijing week
+    /// weather" gave one day.
+    ///
+    /// Both names, because `count` and `days` are the same question asked of
+    /// different capabilities, and a path resolved from its declared initial,
+    /// because that value is known at realization — it is the card's own state,
+    /// not something the host has to send.
     fn declared_count(&self, path: &str) -> Option<usize> {
-        let declaration = self.card.sources.iter().find(|s| s.name == path)?;
-        let (_, arg) = declaration.args.iter().find(|(n, _)| n == "count")?;
-        match arg {
-            SourceArg::Number(n) if *n >= 1.0 => {
-                Some((*n as usize).min(self.limits.max_collection))
+        // The loop's path may name the source or a COLLECTION FIELD of it:
+        // `for m in movers` and `for d in week.days` are both loops over a
+        // counted source, and matching only the bare name meant the second found
+        // nothing. That is the weather card's forecast, which is the one that
+        // ships.
+        let root = root_of(path);
+        let declaration = self
+            .card
+            .sources
+            .iter()
+            .find(|s| s.name == path || s.name == root)?;
+        let (_, arg) = declaration
+            .args
+            .iter()
+            .find(|(n, _)| n == "count" || n == "days")?;
+        let n = match arg {
+            SourceArg::Number(n) => *n,
+            // `days: state.days` — a cursor into the card's own state, whose
+            // declared initial is the number the fetch will be asked for.
+            SourceArg::Path(p) => {
+                let key = p.strip_prefix("state.").unwrap_or(p);
+                let state = self.card.states.iter().find(|s| s.path == key)?;
+                state.initial.as_ref().and_then(|v| v.as_f64())?
             }
-            _ => None,
-        }
+            _ => return None,
+        };
+        (n >= 1.0).then(|| (n as usize).min(self.limits.max_collection))
     }
 
     /// Resolve an expression into live calls and constants.
@@ -5493,14 +5526,38 @@ impl Realizer<'_> {
             };
             args.push((name.clone(), resolved));
         }
+        // The field a helper is asked for is `<index>.<name>` for a row of a
+        // collection, and the COLLECTION'S OWN NAME is not part of it.
+        //
+        // `for d in week.days` gives a binder whose provenance is the collection
+        // `week.days`, so the rewrite above produces `week.days.3.cond` — which
+        // is the right path for looking the value up in seeded data and the wrong
+        // one to hand a helper, which wants `3.cond`. Left in, every forecast row
+        // failed to translate and fell back to the realized default: seven rows
+        // of the same icon and an em dash where each day's high should be.
+        //
+        // Only a segment that is not an index is dropped, and only when an index
+        // follows it — `week.min_lo` is an aggregate on the source itself and has
+        // no row.
+        let mut field = path
+            .strip_prefix(&declaration.name)
+            .unwrap_or_default()
+            .trim_start_matches('.')
+            .to_string();
+        if let Some((head, rest)) = field.clone().split_once('.') {
+            let head_is_index = head.chars().all(|c| c.is_ascii_digit()) && !head.is_empty();
+            let rest_starts_with_index = rest
+                .split('.')
+                .next()
+                .is_some_and(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()));
+            if !head_is_index && rest_starts_with_index {
+                field = rest.to_string();
+            }
+        }
         Some(SourceBinding {
             helper: declaration.helper.clone(),
             args,
-            field: path
-                .strip_prefix(&declaration.name)
-                .unwrap_or_default()
-                .trim_start_matches('.')
-                .to_string(),
+            field,
         })
     }
 

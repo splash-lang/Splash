@@ -4700,10 +4700,18 @@ view root Surface {
     // And the per-item conditions must DIFFER — one shared value for every row
     // is exactly what the bug produced, and a test that only checked "a number
     // arrives" would have passed on it.
-    assert!(
-        dsl.contains("l0_weathericon(3, \"row\")") && dsl.contains("l0_weathericon(0, \"row\")"),
-        "each loop item's own condition must reach the kit:\n{dsl}"
-    );
+    //
+    // They are LIVE CALLS at their own row index now, not literals. This
+    // asserted `l0_weathericon(3, "row")` and `l0_weathericon(0, "row")` — the
+    // realized codes — which was right while a row's binding could not translate:
+    // the collection's own name was left in the field handed to the helper, so
+    // every forecast row fell back to its default and seven days drew one icon.
+    for row in 0..2 {
+        assert!(
+            dsl.contains(&format!("daily.weather_code.{row}")),
+            "row {row} must ask for its OWN day:\n{dsl}"
+        );
+    }
 }
 
 /// The nav card §1.0 said to write instead of argue about.
@@ -6144,4 +6152,56 @@ view root Surface {
             "ok={shape} must not satisfy `== 1`"
         );
     }
+}
+
+/// A week forecast realizes SEVEN days, each asking for its own.
+///
+/// "Beijing week weather" gave one day. Two independent defects, both between a
+/// correct card and a correct screen:
+///
+/// - **The declared count was not found.** It matched an argument named `count`
+///   holding a bare literal, and the weather card asks
+///   `sys.weather(days: state.days)` with `state days { initial: 7 }` — the wrong
+///   name, and a path rather than a literal. It also matched the source name
+///   only, and the loop is over `week.days`. So a seven-day forecast realized
+///   ZERO rows and the card drew current conditions and nothing else.
+/// - **A row could not translate.** With rows realized, each one's binding
+///   carried the collection's own name into the field handed to the helper —
+///   `days.3.cond` where it wanted `3.cond` — so every row fell back to its
+///   realized default: seven identical icons and an em dash for every high.
+#[test]
+fn a_week_forecast_realizes_seven_days_each_its_own() {
+    // NO data. A live card carries none, which is the case that ships.
+    let data = serde_json::json!({ "env": { "locale": {} }, "copy": {} });
+    let root = realize(WEATHER, &data, RealizeLimits::default())
+        .root
+        .expect("realizes");
+
+    fn count(n: &splash_ui_l0::UiNode, kind: &str) -> usize {
+        (n.kind == kind) as usize + n.children.iter().map(|c| count(c, kind)).sum::<usize>()
+    }
+    assert_eq!(
+        count(&root, "TempBar"),
+        7,
+        "the declared `days: state.days` is the row count"
+    );
+
+    let dsl = splash_ui_l0::kit::lower(&root);
+    // Each row asks for ITS day, not day 0 seven times.
+    for day in 0..7 {
+        assert!(
+            dsl.contains(&format!("daily.temperature_2m_max.{day}")),
+            "day {day}'s high must be live:\n{dsl}"
+        );
+        assert!(
+            dsl.contains(&format!("daily.weather_code.{day}")),
+            "day {day}'s condition must be live:\n{dsl}"
+        );
+    }
+    // An aggregate on the source itself has no row and must not be rewritten
+    // into one — `week.min_lo` is a property of the WEEK.
+    assert!(
+        !dsl.contains("min_lo.0") && !dsl.contains("0.min_lo"),
+        "an aggregate is not a row:\n{dsl}"
+    );
 }

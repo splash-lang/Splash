@@ -86,14 +86,18 @@ view root Surface {
         TextCaption(value: trip.distance, suffix: copy.away)
       }
     }
-    # The card names the TRIP, and GUARDS it on having a position.
+    # The card names the TRIP. It does NOT guard on having a fix.
     #
-    # `sys.gps` answers -9999 with no fix, so an unguarded map is a map of an
-    # impossible place: it fits its camera to a garbage extent and loads tiles
-    # without bound. §5.9 exists for exactly this — "no fix yet" is a state the
-    # card can branch on, not a number to render.
-    when here.ok == 1 {
-      Map(mode: .drive, from: here, to: dest_place, zoom: 16)
-    }
+    # An earlier version wrapped this in `when here.ok == 1`, which is wrong in
+    # mechanism however right it sounds: a guard is evaluated at REALIZE time,
+    # before any live value exists, so `here.ok` reads nothing on a freshly
+    # generated card and the map is removed unconditionally. Measured — the model
+    # wrote a card containing `Map(`, and not one `MapView` reached the screen.
+    #
+    # A guard can only test something realization can see: declared state, or a
+    # source's `$state` (which the host injects). A live VALUE is not that. The
+    # impossible-centre case is handled where the number is actually known, in the
+    # widget.
+    Map(mode: .drive, from: here, to: dest_place, zoom: 16)
   }
 }
