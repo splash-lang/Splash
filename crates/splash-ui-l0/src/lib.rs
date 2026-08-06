@@ -6633,6 +6633,22 @@ pub mod makepad {
     /// The text may be a literal (`"300 m"`) or a live call, so the decoration
     /// is concatenated in the DSL rather than in Rust — `"a" + call + "b"` works
     /// for both, and quoting a call would draw it instead of evaluating it.
+    /// This node's decoration applied to an already-built expression.
+    ///
+    /// The kit needs it to compose a live call for `fn tick()`: a value with a
+    /// `suffix:` must be set as `call + " left"`, not as the bare call. Excluding
+    /// decorated values left the most visibly moving number on a driving screen as
+    /// the only reason to rebuild the card, which defeats the tick entirely.
+    pub(super) fn decorated(node: &UiNode, body: String) -> String {
+        let Decoration {
+            glyph,
+            unit,
+            suffix,
+            ..
+        } = decoration_of(node);
+        decorate(body, &glyph, unit, &suffix)
+    }
+
     fn decorate(body: String, glyph: &str, unit: &str, suffix: &str) -> String {
         let head = glyph.to_string();
         let tail = format!("{unit}{suffix}");
@@ -8669,6 +8685,25 @@ pub mod kit {
         Some(format!("l0:{json}"))
     }
 
+    /// The live expression behind this node's displayed value, if it has one.
+    ///
+    /// Stamped onto the node by `l0_live` so the renderer can refresh it in place
+    /// with `fn tick()` instead of re-resolving the ledger and re-parsing the whole
+    /// document. On a driving screen a re-resolve lands inside a frame: measured on a
+    /// OnePlus 6, frame hitches and card re-resolves correlate 1:1, up to 327 ms.
+    ///
+    /// L0 is untouched. The constraint is on what a CARD may say, and the card still
+    /// says `TextRow(text: step.instruction)`; `fn tick()` belongs to the backend in
+    /// exactly the way `sys.navstep` does.
+    fn live_call_of(node: &UiNode) -> Option<String> {
+        let (_, binding) = node
+            .bindings
+            .iter()
+            .find(|(n, _)| n == "value" || n == "text")?;
+        let call = makepad::vm_call(binding)?;
+        Some(makepad::decorated(node, call))
+    }
+
     fn element(node: &UiNode, depth: usize, out: &mut String) {
         // A `Field` carries its own commit target and must NOT be wrapped in a
         // tap: a hit target over a text input eats the focus, and the payload
@@ -8740,10 +8775,17 @@ pub mod kit {
     /// entry HERE or it is accepted by the profile and silently discarded, which
     /// is this layer's recurring defect and the reason the list is explicit.
     fn element_untapped(node: &UiNode, depth: usize, out: &mut String) {
-        let wraps: Vec<(&'static str, String)> = [width_wrap(node), align_wrap(node)]
-            .into_iter()
-            .flatten()
-            .collect();
+        let wraps: Vec<(&'static str, String)> = [
+            // OUTERMOST. `l0_live` only stamps the call onto the node, so where it
+            // sits makes no functional difference — but the width and align helpers
+            // read as a pair, and slipping between them makes both harder to see.
+            live_call_of(node).map(|call| ("l0_live(", format!(", {call:?})"))),
+            width_wrap(node),
+            align_wrap(node),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         for (open, _) in &wraps {
             out.push_str(open);
         }
