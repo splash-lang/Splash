@@ -5903,7 +5903,20 @@ pub mod makepad {
                             format!("daily.weather_code.{row}")
                         ))
                     }
-                    "dayname" => return Some(format!("sys.dayname(\"en\", {row}, \"en\")")),
+                    // `sys.dayname(lat, lon, n, locale)` — FOUR arguments. This
+                    // emitted three, putting `"en"` in the lat slot and the row
+                    // in the lon slot, so `n` coerced to 0 and every forecast row
+                    // said "Today". Seven rows of it, under seven different
+                    // temperatures, which is what made it look like a labelling
+                    // choice rather than a bug.
+                    "dayname" => return Some(format!("sys.dayname({lat}, {lon}, {row}, \"en\")")),
+                    // §5.11's aggregates — properties of the WEEK, not of a day,
+                    // and the reason a `TempBar` knows how long its bar should
+                    // be. Untranslated, both fell back to zero: every bar drew
+                    // against a range of nothing, so seven days of different
+                    // temperatures all rendered the same flat line.
+                    "min_lo" => return Some(format!("sys.weekmin({lat}, {lon})")),
+                    "max_hi" => return Some(format!("sys.weekmax({lat}, {lon})")),
                     _ => return None,
                 };
                 Some(format!("sys.weather({lat}, {lon}, {path:?})"))

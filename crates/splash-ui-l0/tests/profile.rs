@@ -6205,3 +6205,48 @@ fn a_week_forecast_realizes_seven_days_each_its_own() {
         "an aggregate is not a row:\n{dsl}"
     );
 }
+
+/// A forecast row's LABEL and the week's range reach their helpers.
+///
+/// Two more between a correct card and a correct screen, both found by looking at
+/// a phone rather than at a test.
+///
+/// `sys.dayname(lat, lon, n, locale)` takes FOUR arguments and this emitted
+/// three, putting `"en"` in the lat slot and the row in the lon slot — so `n`
+/// coerced to 0 and every row said "Today". Seven of them, under seven different
+/// temperatures, which made it read as a labelling choice rather than a bug.
+///
+/// `min_lo` and `max_hi` are §5.11 aggregates — properties of the WEEK, and what
+/// tells a `TempBar` how long its bar should be. Neither was translated, so both
+/// fell back to zero and every bar drew against a range of nothing: seven
+/// different days, seven identical flat lines.
+#[test]
+fn a_forecast_rows_label_and_the_weeks_range_go_live() {
+    let data = serde_json::json!({ "env": { "locale": {} }, "copy": {} });
+    let root = realize(WEATHER, &data, RealizeLimits::default())
+        .root
+        .expect("realizes");
+    let dsl = splash_ui_l0::kit::lower(&root);
+
+    // Every row asks for ITS weekday, with the coordinates the helper needs.
+    for day in 0..7 {
+        assert!(
+            dsl.contains(&format!("\"lon\"), {day}, \"en\")")),
+            "row {day} must ask for its own weekday:\n{dsl}"
+        );
+    }
+    // A four-argument call, so the row can never land in the locale slot.
+    assert!(
+        !dsl.contains("sys.dayname(\"en\""),
+        "the row must not be passed as a coordinate:\n{dsl}"
+    );
+    // The week's range, so a bar has something to be a fraction of.
+    assert!(
+        dsl.contains("sys.weekmin("),
+        "min_lo must translate:\n{dsl}"
+    );
+    assert!(
+        dsl.contains("sys.weekmax("),
+        "max_hi must translate:\n{dsl}"
+    );
+}
