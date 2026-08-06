@@ -388,7 +388,7 @@ against an empty host surface. Three reference cards exercise it.
 
 **Implemented** in `splash-core::ui_l0`: parser, validator, per-instance state store,
 event dispatch, a renderer-neutral realizer, a source plan, and static dependency tracking for
-reconciliation. 203 tests; the three reference cards are accepted and the shipping nav card is
+reconciliation. 224 tests; the three reference cards are accepted and the shipping nav card is
 rejected as L2; four cases render on a OnePlus 6T through an unmodified downstream host, checked
 against golden images.
 
@@ -462,13 +462,26 @@ Remaining:
   blesses a level no document defines, and the spec pass is owed.
 - **L2 is unimplemented and refused before parsing.** Imperative widget commands
   are a different grammar rather than a wider one, so nothing below parses them.
-  The nearest thing to a card that needs it is the shipping nav app's drive
+  The nearest thing to a card that needed it was the shipping nav app's drive
   screen, which updates a vehicle position every frame through `ui.<id>.set_*`
-  inside a `fn tick()` that must never rebuild. §1.0 records why that is L2 as
-  WRITTEN and why the capability is not: `MapView` already animates its own
-  camera, so a declared position for it to follow would make navigation
-  declarative — a widget change rather than a language one. So L2 still has no
-  card that requires it.
+  inside a `fn tick()` that must never rebuild. §1.0 predicted that a declared
+  position for the widget to follow would make navigation declarative — a widget
+  change rather than a language one — and that has now been done: `Map(at:)`
+  takes a position, `sys.step` answers the next manoeuvre from the trip's
+  coordinates plus the device's own, and the widget gained a `follow` camera. The
+  nav card's drive screen is admitted at L0.
+
+  What the exercise found is worth recording, because it is the argument for the
+  level and not merely a feature. The widget ALREADY had a follow camera, and
+  pointing `.drive` at it would have shipped a finished-looking feature: it drives
+  a vehicle along the route at an assumed 34 mph off a looping clock. §4 forbids
+  it — a camera pose is a fact about where the user is — and the same fabrication
+  turned out to be load-bearing in the L2 exemplar, whose turn banner ran on that
+  clock and so announced turns, and arrived on schedule, from a parked car. **What
+  L0 forced was not a smaller nav card but a truthful one.**
+
+  So L2 still has no card that requires it, and the strongest candidate for one
+  has now been written at L0 instead.
 
 ## Before a stable language release
 
