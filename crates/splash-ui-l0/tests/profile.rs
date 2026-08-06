@@ -6273,8 +6273,10 @@ fn a_satellite_pane_and_a_row_that_can_stop_filling() {
 
     // The pane names WHERE and the helper answers the image — in both backends,
     // with LIVE coordinates, so the card never carries an observation.
+    // Coerced, because `sys.satellite` takes coordinates as NUMBERS and every
+    // helper answers with a string.
     assert!(
-        kit.contains("l0_satellite(sys.geocodenum("),
+        kit.contains("l0_satellite(sys.num(sys.geocodenum("),
         "the kit must ask for the sky at the resolved place:\n{kit}"
     );
     assert!(
@@ -6291,5 +6293,57 @@ fn a_satellite_pane_and_a_row_that_can_stop_filling() {
     assert!(
         kit.contains("l0_aligned("),
         "the current block is still centred:\n{kit}"
+    );
+}
+
+/// A visualisation's parameters are NUMBERS, and a grid is rows.
+///
+/// Both were the same shape as everything else this session: the card was right,
+/// the checker accepted it, and the screen was confidently wrong.
+///
+/// Every `sys.*` helper answers with a STRING, because a string is what a card
+/// renders. A visualisation's parameters are not rendered — they drive shader
+/// uniforms typed as numbers — so all four of a `TempBar`'s arrived as `None` and
+/// the uniform got 0: seven days of different temperatures, seven identical flat
+/// bars. `AqiContour` was worse than flat. Its latitude and longitude were 0, so
+/// it drew a real air-quality contour for 0°N 0°E, the Gulf of Guinea, under a
+/// caption naming the user's city.
+///
+/// And a `Grid(cols: 2)` drew one tile per line, because the kit took a flat
+/// child list and the node model renders a grid as a column. `cols` was honoured
+/// only by `makepad::lower`, which is not the path the device renders through.
+#[test]
+fn a_visualisations_parameters_are_numbers_and_a_grid_is_rows() {
+    let data = serde_json::json!({ "env": { "locale": {} }, "copy": {} });
+    let root = realize(WEATHER, &data, RealizeLimits::default())
+        .root
+        .expect("realizes");
+    let kit = splash_ui_l0::kit::lower(&root);
+
+    // All seven bars, and the week's range they are a fraction of.
+    assert_eq!(
+        kit.matches("l0_tempbar(sys.num(").count(),
+        7,
+        "every bar's low must arrive as a number:\n{kit}"
+    );
+    assert!(
+        kit.contains("sys.num(sys.weekmin(") && kit.contains("sys.num(sys.weekmax("),
+        "so must the range:\n{kit}"
+    );
+    // The contour's location, or it draws a real reading for the wrong place.
+    assert!(
+        kit.contains("l0_aqicontour(sys.num("),
+        "the contour must be located by numbers:\n{kit}"
+    );
+
+    // A grid is rows now, not a flat list the theme renders as a column.
+    assert!(
+        !kit.contains("l0_grid("),
+        "the flat grid call must be gone:\n{kit}"
+    );
+    assert_eq!(
+        kit.matches("l0_tile(").count(),
+        6,
+        "the six detail tiles are still all there:\n{kit}"
     );
 }

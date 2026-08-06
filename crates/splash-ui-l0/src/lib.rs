@@ -8108,9 +8108,33 @@ pub mod kit {
     /// emits a literal — and the icon is the harder one to notice, because a
     /// wrong icon looks precisely like a right one.
     fn scalar_of(node: &UiNode, name: &str) -> String {
+        scalar_inner(node, name, false)
+    }
+
+    /// The same, COERCED to a number.
+    ///
+    /// Every `sys.*` helper answers with a string, because a string is what a
+    /// card renders. A visualisation's parameters are not rendered — they drive a
+    /// shader uniform, and the node model types them as numbers, so a string
+    /// arrives as `None` and the uniform gets 0.
+    ///
+    /// Measured: a `TempBar`'s `lo`, `hi`, `min` and `max` were all live calls
+    /// and all four reached the widget as zero, so seven days of different
+    /// temperatures drew seven identical flat bars against a range of nothing.
+    /// The same defect as an L1 operand subtracting strings, in the other place
+    /// a number is needed and a string is what a helper gives.
+    fn scalar_num_of(node: &UiNode, name: &str) -> String {
+        scalar_inner(node, name, true)
+    }
+
+    fn scalar_inner(node: &UiNode, name: &str, numeric: bool) -> String {
         if let Some((_, binding)) = node.bindings.iter().find(|(n, _)| n == name) {
             if let Some(call) = makepad::vm_call(binding) {
-                return call;
+                return if numeric {
+                    format!("sys.num({call})")
+                } else {
+                    call
+                };
             }
         }
         match arg(node, name) {
@@ -8269,7 +8293,45 @@ pub mod kit {
                 children(node, depth, out);
                 out.push(')');
             }
-            "Panel" | "Card" | "Grid" => {
+            // A GRID IS ROWS OF `cols`, chunked HERE.
+            //
+            // `l0_grid` took a flat child list and the node model renders a grid
+            // as a column, so a `Grid(cols: 2)` drew one tile per line — the
+            // weather card's feels-like / humidity / wind / pressure / UV /
+            // visibility ran six rows deep instead of three across. `cols` was
+            // accepted by the catalog and honoured only by `makepad::lower`,
+            // which is not the path the device renders through.
+            //
+            // The chunking is here rather than in the theme because the kit
+            // language has no loop, and it is where `makepad::lower` already does
+            // it — so both backends now divide the same way.
+            "Grid" => {
+                let cols = match arg(node, "cols") {
+                    Some(NodeValue::Number(n)) if *n >= 1.0 => *n as usize,
+                    _ => 2,
+                };
+                let pad = "  ".repeat(depth + 1);
+                let _ = writeln!(out, "l0_col([");
+                let rows: Vec<&[UiNode]> = node.children.chunks(cols).collect();
+                for (r, row) in rows.iter().enumerate() {
+                    let _ = writeln!(out, "{pad}l0_row([");
+                    for (i, cell) in row.iter().enumerate() {
+                        let _ = write!(out, "{pad}  ");
+                        element(cell, depth + 2, out);
+                        if i + 1 < row.len() {
+                            out.push(',');
+                        }
+                        out.push('\n');
+                    }
+                    let _ = write!(out, "{pad}])");
+                    if r + 1 < rows.len() {
+                        out.push(',');
+                    }
+                    out.push('\n');
+                }
+                let _ = write!(out, "{}])", "  ".repeat(depth));
+            }
+            "Panel" | "Card" => {
                 let _ = write!(out, "{f}(");
                 children(node, depth, out);
                 out.push(')');
@@ -8370,7 +8432,8 @@ pub mod kit {
                     "Satellite" => &["lat", "lon"],
                     _ => &["symbol", "range"],
                 };
-                let args: Vec<String> = params.iter().map(|p| scalar_of(node, p)).collect();
+                // Numeric: these drive shader uniforms, not text.
+                let args: Vec<String> = params.iter().map(|p| scalar_num_of(node, p)).collect();
                 let _ = write!(out, "{f}({})", args.join(", "));
             }
             // A hero is sized by the caller, because only the lowering knows
