@@ -2638,6 +2638,8 @@ pub mod catalog {
     /// `plan` shows the whole route, `drive` follows the vehicle, and `flat` is
     /// the same route without the 2.5D camera.
     pub const MAP_MODE: &[&str] = &["plan", "drive", "flat"];
+    /// Flat or tilted, while driving — the shipping app's R8.1 chase view.
+    pub const MAP_VIEW: &[&str] = &["flat", "tilted"];
     pub const ALIGN: &[&str] = &["start", "center", "end", "baseline"];
     pub const PAD: &[&str] = &["page", "tight", "none"];
     pub const ICON_SIZE: &[&str] = &["hero", "row", "tile"];
@@ -2668,6 +2670,11 @@ pub mod catalog {
                 // what lets `.drive` mean the chase camera rather than the static
                 // preview, because a followed position is a measured one.
                 ("at", Path),
+                // Flat or tilted while driving — the shipping app's R8.1 chase
+                // view. Only meaningful with `at:`: a preview has no camera to
+                // tilt, and a tilted camera with no position to follow is the
+                // fabrication `map_mode` refuses.
+                ("view", Token(MAP_VIEW)),
                 ("zoom", Number),
             ],
         ),
@@ -5921,7 +5928,17 @@ pub mod makepad {
             // looping clock, which is the fabrication this whole rule exists to
             // refuse — and a convincing one, because it looks exactly like
             // navigating. `"follow"` takes the position the card declared.
-            Some(NodeValue::Token(t)) if t == "drive" && live_position(node).is_some() => "follow",
+            Some(NodeValue::Token(t)) if t == "drive" && live_position(node).is_some() => {
+                // Tilted is the shipping app's driving view (R8.1); flat is its
+                // 2D alternative. Both follow the DECLARED position — the widget's
+                // own `3d` mode drives a simulated vehicle, and pointing either of
+                // these at it would reintroduce exactly the fabrication this rule
+                // exists to refuse.
+                match arg(node, "view") {
+                    Some(NodeValue::Token(v)) if v == "tilted" => "follow3d",
+                    _ => "follow",
+                }
+            }
             Some(NodeValue::Token(t)) if t == "drive" || t == "plan" => "plan",
             // `flat` and an unstated mode are the same thing to the widget: no
             // nav shader at all, which also means no route ribbon.

@@ -5563,6 +5563,11 @@ const INERT: &[(&str, &str)] = &[
     // turns `.drive` into the follow camera — is asserted by
     // `a_map_lowers_a_live_route`, in the two `at:` cases at its end.
     ("Map", "at"),
+    // `view` only means anything WITH `at:`, which this probe cannot bind — a
+    // preview has no camera to tilt, so both tokens correctly lower to the same
+    // static mode. The tilted case is asserted in `a_map_lowers_a_live_route`,
+    // where a real position is declared.
+    ("Map", "view"),
     // `Field.width` used to sit here: "a text input is not wrapped by the width
     // composer — the `Field` branch returns before it". That was true of both
     // backends because neither lowered `Field` AT ALL in one of them: the makepad
@@ -5950,6 +5955,29 @@ view root Surface {
         driving.contains("l0_map(\"follow\", 16, sys.gps(\"lat\"), sys.gps(\"lon\")"),
         "the follow camera centres on the live fix:\n{driving}"
     );
+    // TILTED is the shipping app's driving view (its R8.1), and it follows the
+    // same declared position — the widget's own `3d` mode drives a SIMULATED
+    // vehicle, so pointing this at it would reintroduce the fabrication `map_mode`
+    // exists to refuse. Flat and tilted must therefore differ in the mode and in
+    // nothing else.
+    let tilted = splash_ui_l0::kit::lower(
+        &realize(
+            &DRIVING.replace("at: here,", "at: here, view: .tilted,"),
+            &data,
+            RealizeLimits::default(),
+        )
+        .root
+        .expect("realizes"),
+    );
+    assert!(
+        tilted.contains("l0_map(\"follow3d\", 16, sys.gps(\"lat\"), sys.gps(\"lon\")"),
+        "a tilted driving view follows the same declared fix:\n{tilted}"
+    );
+    assert!(
+        !tilted.contains("l0_map(\"3d\""),
+        "and must NOT be the widget's simulated drive:\n{tilted}"
+    );
+
     // And the route is still the declared TRIP. Centring on the fix without
     // keeping the endpoints would redraw the route from wherever the user happens
     // to be, which is a different trip from the one the card states.
