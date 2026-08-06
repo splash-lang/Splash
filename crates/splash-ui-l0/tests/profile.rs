@@ -5536,9 +5536,14 @@ const INERT: &[(&str, &str)] = &[
     // turns `.drive` into the follow camera — is asserted by
     // `a_map_lowers_a_live_route`, in the two `at:` cases at its end.
     ("Map", "at"),
-    // A text input is not wrapped by the width composer — the `Field` branch
-    // returns before it — so a field cannot be told how wide to be.
-    ("Field", "width"),
+    // `Field.width` used to sit here: "a text input is not wrapped by the width
+    // composer — the `Field` branch returns before it". That was true of both
+    // backends because neither lowered `Field` AT ALL in one of them: the makepad
+    // lowering admitted the role and emitted a red warning where the input goes,
+    // which is how the nav card's two editable rows — the entire fix for "the map
+    // planner cannot change its origin or destination" — reached the screen as
+    // two apologies. The role is lowered in both now and honours its width, so the
+    // entry is gone rather than reworded.
 ];
 
 #[test]
@@ -6660,5 +6665,88 @@ fn the_nav_card_routes_between_two_editable_places() {
     assert!(
         kit.contains("l0_map(") && kit.contains("sys.searchnum(\"Stanford University\""),
         "the map must route between the same two places:\n{kit}"
+    );
+}
+
+/// A role admitted once must be lowered TWICE.
+///
+/// This is the third time one backend had a role the other did not, and each time
+/// the card was accepted, rendered, and wrong in one of the two places it can
+/// render. `Map` was lowered by neither and drew an error box; `Grid.cols` was
+/// honoured by the kit and ignored by makepad, so a two-column grid was a column;
+/// `Field` was lowered by the kit and by makepad not at all, so the nav card's two
+/// editable rows — the whole of "the map planner cannot change where it is going"
+/// — came out as two red warnings reading "no makepad lowering for Field".
+///
+/// The pattern is structural rather than careless: the catalog is one table and
+/// the lowerings are two functions, so nothing makes adding to the first add to
+/// both. This is what makes it, for every role the catalog admits.
+#[test]
+fn every_admitted_role_is_lowered_by_both_backends() {
+    const CONTAINERS: &[&str] = &["Surface", "Photo", "Panel", "Card", "Col", "Row", "Grid"];
+    let mut missing: Vec<String> = Vec::new();
+
+    for (role, args) in splash_ui_l0::catalog::CONSTRUCTORS {
+        // Instantiate the way a card would: several roles refuse a partial
+        // argument set, and a probe that omits them tests nothing.
+        let arglist: Vec<String> = args
+            .iter()
+            .filter_map(|(n, k)| {
+                use splash_ui_l0::catalog::ArgKind::*;
+                match k {
+                    Path | Data | Text => Some(format!("{n}: q.name")),
+                    Number => Some(format!("{n}: 2")),
+                    Token(set) | TokenOrPath(set) => Some(format!("{n}: .{}", set[0])),
+                    Event => Some(format!("{n}: ev")),
+                    Any => Some(format!("{n}: \"x\"")),
+                    Bool => None,
+                }
+            })
+            .collect();
+        let body = if CONTAINERS.contains(role) {
+            " { Rule() }"
+        } else {
+            ""
+        };
+        let head = "source q sys.quote(ticker: \"NVDA\", fields: [last, name])\n\
+                    state held { shape: text, initial: \"\" }\n\
+                    event ev { held: set($value) }\n";
+        let card = if *role == "Surface" || *role == "Photo" {
+            format!(
+                "{head}view root {role}({}) {{ Rule() }}\n",
+                arglist.join(", ")
+            )
+        } else {
+            format!(
+                "{head}view root Surface {{ {role}({}){body} }}\n",
+                arglist.join(", ")
+            )
+        };
+        if !check_ui_l0_named("probe", &card).valid {
+            continue; // covered by the catalog-agreement tests
+        }
+        let data = serde_json::json!({
+            "q": { "last": 1.0, "name": "n" }, "held": "",
+            "env": { "locale": {} }, "copy": {}
+        });
+        let Some(root) = realize(&card, &data, RealizeLimits::default()).root else {
+            continue;
+        };
+        // Each backend says so in its own words, and both say the role's name.
+        let mk = makepad::lower(&root);
+        if mk.contains(&format!("no makepad lowering for {role}")) {
+            missing.push(format!("makepad: {role}"));
+        }
+        let kit = splash_ui_l0::kit::lower(&root);
+        if kit.contains(&format!("l0_unsupported({role:?})")) {
+            missing.push(format!("kit: {role}"));
+        }
+    }
+
+    missing.sort();
+    assert!(
+        missing.is_empty(),
+        "the catalog admits these and a backend cannot draw them, so the card is \
+         accepted and renders an apology where the role goes: {missing:#?}"
     );
 }

@@ -6929,6 +6929,52 @@ pub mod makepad {
                     tap_binding(node)
                 );
             }
+            // The one role that lets a card receive something the user typed.
+            //
+            // This backend admitted `Field` and lowered none of it, so the nav
+            // card's two editable rows — the whole of "the map planner cannot
+            // change its origin or destination" — rendered as two red warnings.
+            // The kit had it and this did not, which is the same one-backend gap
+            // `Grid.cols` and `Map` were each found in: a role is admitted once
+            // and must be lowered twice.
+            //
+            // `on_return` rather than a tap wrapper. A hit target over a text
+            // input eats the focus and there is nothing left to type into, and the
+            // payload here is what was TYPED — which does not exist until commit,
+            // so the target is assembled at that moment. `$$` is where the typed
+            // text goes.
+            "Field" => {
+                // A field that was not told a width FILLS, unlike a text run.
+                // `Field(width: .fill)` is what every card writes and the row it
+                // sits in is `Fit`, so a `Fit` field collapses to its content —
+                // an empty one to nothing at all, which is a search box that
+                // cannot be tapped.
+                let width = match arg(node, "width") {
+                    Some(NodeValue::Token(t)) if t == "fit" => " width: Fit",
+                    _ => " width: Fill",
+                };
+                let target = match arg(node, "on_commit") {
+                    Some(NodeValue::Event(event)) => {
+                        let json = serde_json::json!({ "e": event, "k": node.key, "v": "$$" });
+                        format!("l0:{json}")
+                    }
+                    _ => String::new(),
+                };
+                let (head, tail) = target.split_once("$$").unwrap_or((target.as_str(), ""));
+                let commit = if target.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " on_return: |t| agent.notify(\"l0\", {{target: {head:?} + t + {tail:?}}})"
+                    )
+                };
+                let _ = writeln!(
+                    out,
+                    "{p}TextInput{{{width} height: 48 text: {} empty_text: {}{commit} }}",
+                    expr_of(node, "text"),
+                    expr_of(node, "placeholder"),
+                );
+            }
             other => {
                 // An unmapped constructor is shown, not skipped. A card that
                 // silently drops a section looks correct and is not.
