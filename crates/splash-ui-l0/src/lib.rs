@@ -8873,9 +8873,30 @@ pub mod kit {
             // through this path and not through `makepad::lower`.
             "Map" => {
                 let (lat, lon, poly) = makepad::map_route(node);
+                // Whether the centre is the DEVICE'S OWN FIX, which decides whether
+                // the camera can follow without rebuilding the card.
+                //
+                // A kit value is evaluated when the ledger resolves, so a baked
+                // centre only moves when the card re-resolves — and re-resolving is
+                // realize + lower + evaluate + rebuild the widget tree. At a fix a
+                // second that is the whole card, every second, which is exactly what
+                // the app this replaces was architected to avoid: its drive screen
+                // is a no-rebuild `fn tick()` and its contract says never to
+                // introduce anything that forces a rebuild while driving. Measured
+                // against that on a OnePlus 6: 10–68% CPU with the fix moving.
+                //
+                // Passed as a FLAG rather than assumed downstream. The renderer
+                // could hardcode `sys.gps` for any follow map, and it would be
+                // right today and wrong the moment a card follows something else;
+                // here the helper is known, so this is a fact rather than a guess.
+                let gps_follow = i32::from(
+                    node.bindings
+                        .iter()
+                        .any(|(n, b)| n == "at" && b.helper == "sys.gps"),
+                );
                 let _ = write!(
                     out,
-                    "{f}({:?}, {}, {lat}, {lon}, {poly})",
+                    "{f}({:?}, {}, {lat}, {lon}, {poly}, {gps_follow})",
                     makepad::map_mode(node),
                     scalar_of(node, "zoom"),
                 );

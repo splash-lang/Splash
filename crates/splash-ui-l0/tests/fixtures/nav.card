@@ -202,6 +202,20 @@ view root Surface {
       }
     }
 
+    # Offering a stop, when there is none. On its OWN row, and that is a fix
+    # rather than a layout preference: with it beside the three mode chips the row
+    # overflowed and "Add a stop" rendered as "Add a sto" — clipped at the card's
+    # edge with nothing saying so. The shipping app's own verification pass found
+    # the identical defect in the identical place (R7.1: a four-chip row clipped
+    # "Bike" to "B") and fixed it by tightening widths. Tightening buys room for
+    # one more chip; moving the control to where it belongs — with the stop, not
+    # with the modes — means the row cannot overflow at all.
+    when stop == "" {
+      Row(align: .center, gap: 8) {
+        Chip(text: copy.add_stop, on_tap: set_stop, value: "")
+      }
+    }
+
     # How the trip is travelled. Three chips, one lit — `active:` is a predicate
     # over declared state, which is why a chip can say which one it is without an
     # expression.
@@ -209,7 +223,6 @@ view root Surface {
       Chip(text: copy.drive, on_tap: pick_mode, value: .drive, active: mode == .drive)
       Chip(text: copy.walk,  on_tap: pick_mode, value: .walk,  active: mode == .walk)
       Chip(text: copy.bike,  on_tap: pick_mode, value: .bike,  active: mode == .bike)
-      when stop == "" { Chip(text: copy.add_stop, on_tap: set_stop, value: "") }
     }
 
     # ---- the DIRECT trip ---------------------------------------------------
