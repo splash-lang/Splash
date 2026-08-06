@@ -462,6 +462,11 @@ Remaining:
   blesses a level no document defines, and the spec pass is owed.
 - **L2 is unimplemented and refused before parsing.** Imperative widget commands
   are a different grammar rather than a wider one, so nothing below parses them.
+  There is now a concrete card that NEEDS it: the shipping nav app's turn-by-turn
+  drive screen updates a vehicle position every frame through `ui.<id>.set_*`
+  inside a `fn tick()` that must never rebuild. §1.0 records this as settled
+  against L0 — an L0 nav card shows a route and cannot drive one — so the honest
+  scope of "nav at L0" is its declarative screens.
 
 ## Before a stable language release
 

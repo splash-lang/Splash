@@ -118,8 +118,9 @@ as evidence about the language. The honest position is narrower —
 | | |
 |---|---|
 | **L0 suits** | a card that displays declared data, branches on it, and writes declared state on a tap or a commit |
-| **L0 cannot express** | a card that computes derived values, or drives its own animation loop |
-| **Settled by writing it** | `nav` rewritten against declared sources and a `Map` role IS inside the first row. `tests/fixtures/nav.card` is the same screen as the 664-line L2 exemplar in **54 lines**, admitted at L0 |
+| **L0 cannot express** | a card that computes derived values, or drives its own animation loop — including turn-by-turn navigation, which is the same thing wearing a map |
+| **Settled by writing it** | `nav`'s DECLARATIVE screens — search, results, route preview — rewritten against declared sources with a `Map` role, in **54 lines** against the L2 exemplar's 664, admitted at L0 |
+| **Settled AGAINST L0** | the shipping card's **drive** screen. Turn-by-turn navigation needs a vehicle position updated every frame, and its own spec's mandatory rules say how: a `fn tick()` card that calls `ui.<id>.set_*` on named widgets and **must never rebuild**, because a rebuild tears down the live `MapView`. All three are what §7 classifies as L2 — `fn` reintroduces unbounded work, `ui.<id>.<method>` is an imperative widget command, and never-rebuilding is the negation of declare-and-re-realize. This is not a missing role: the MECHANISM is the thing L0 refuses. An L0 nav card can show you a route and cannot drive it |
 
 **What writing it found.** Four gaps, none structural, all recorded rather than
 patched over:
