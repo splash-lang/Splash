@@ -132,8 +132,21 @@ state mode { shape: enum[drive, walk, bike], initial: .drive }
 # filled slots needs its own declared source rather than one that varies.
 #
 # So the cost is visible: one slot is two route sources and two guarded branches.
-# A second slot would be a third. That is the honest price of a total form, and it
-# is why this card ships one stop rather than pretending two are free.
+# A second slot is a third source, and it was written, checked and REVERTED —
+# because `Map(via:)` names ONE source, so the drawn route went through the first
+# stop while the duration beside it was for a trip through both. That is precisely
+# the drawn-versus-reported mismatch this profile exists to catch, and it was found
+# by counting the emitted separators rather than by looking at a screenshot where
+# both routes are plausible lines.
+#
+# A second slot therefore needs `via:` on a constructor to accept a LIST of
+# sources, which is an argument shape L0 does not have. That is the real blocker,
+# and it is a smaller and more specific one than "L0 cannot do waypoints": one
+# slot works today, and the second waits on a list-valued attribute rather than on
+# anything about the language's totality.
+#
+# R4.5 of the shipping app's contract is "up to two stops", so this is a recorded
+# gap and not a claim of parity.
 state stop { shape: text, initial: "" }          # empty ⇒ a direct trip
 
 event set_origin  { origin: set($value), query: clear }
