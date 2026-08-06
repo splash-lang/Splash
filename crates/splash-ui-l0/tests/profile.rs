@@ -5821,6 +5821,30 @@ view root Surface {
         mk.contains("nav_mode: \"plan\"") && mk.contains("zoom: 16"),
         "the declared mode and zoom must reach the widget:\n{mk}"
     );
+    // The settings a `MapView` does not work without, from the shipping nav card.
+    //
+    // `use_local_mbtiles: false` is the one that was missing. The widget defaults
+    // to a local `.mbtiles` file for offline development and an L0 card cannot ship
+    // one, so its absence draws the land fill and nothing else — measured on device
+    // as a correct route ribbon and a correct duration over a blank beige
+    // rectangle, with `local mbtiles source missing` in logcat and nothing on
+    // screen saying so. A map with no map is the failure this asserts against.
+    for required in [
+        "use_network: true",
+        "use_local_mbtiles: false",
+        "min_zoom: 3.0",
+        "nav_route_width:",
+    ] {
+        assert!(
+            mk.contains(required),
+            "{required:?} is mandatory for a MapView and is missing:\n{mk}"
+        );
+    }
+    // Capped at 16 for a whole-route preview, as the shipping card caps it.
+    assert!(
+        mk.contains("max_zoom: 16.0"),
+        "a route preview caps its zoom:\n{mk}"
+    );
     // Every coordinate LIVE, from the source each endpoint names — a device fix
     // for the origin and a place search for the destination.
     assert!(
@@ -6748,5 +6772,82 @@ fn every_admitted_role_is_lowered_by_both_backends() {
         missing.is_empty(),
         "the catalog admits these and a backend cannot draw them, so the card is \
          accepted and renders an apology where the role goes: {missing:#?}"
+    );
+}
+
+/// A card holding a map is laid out the way the SHIPPING nav card lays one out.
+///
+/// Every value in this test came off `a2app/apps/nav` rather than out of a guess,
+/// and the reason is a run of four device screenshots that each looked like a
+/// different bug and were all this one.
+///
+/// `MapView` is a fixed-pixel full-bleed surface that paints its route through the
+/// GPU nav projection rather than inside a laid-out rect. Stacked in a column it
+/// draws straight over the card: the plan screen's map covered the FROM/TO fields,
+/// the duration and the Go button completely, and the drive screen's ribbon painted
+/// across the turn banner and cut a street name in half.
+///
+/// So the map is the bottom layer of an overlay and the card's content floats over
+/// it, which is what all four of the shipping card's maps do. The three values that
+/// each cost a screenshot to learn:
+///
+///   - the root is a FIXED 812, not `Fill` — `Fill` in a `Fit` parent resolves to
+///     0, and a card is an item in a chat list, so the whole screen came out empty
+///   - the sheet is OPAQUE — the theme's 7%-white panel over a map is a window,
+///     and the map's own labels read straight through the trip
+///   - the sheet sits at the BOTTOM — `update_plan_preview_camera` frames the route
+///     into the band above the sheet, so a sheet at the top lands exactly on the
+///     route it was making room for
+#[test]
+fn a_card_holding_a_map_floats_its_content_over_it() {
+    const NAV: &str = include_str!("fixtures/nav.card");
+    let data = serde_json::json!({
+        "origin": "Saratoga High", "dest": "Stanford", "query": "", "screen": "plan",
+        "found": [], "here": { "lat": -9999, "lon": -9999, "ok": 0 },
+        "step": { "instruction": "s", "remaining": "s" },
+        "env": { "locale": {} },
+        "copy": { "from": "FROM", "to": "TO", "where": "?", "here_now": "…",
+                  "away": "away", "seeking": "…", "start": "Go", "stop": "End",
+                  "left": "left" }
+    });
+    let mk = makepad::lower(
+        &realize(NAV, &data, RealizeLimits::default())
+            .root
+            .expect("realizes"),
+    );
+
+    // An overlay at a FIXED height, because `Fill` resolves to 0 in a `Fit` parent.
+    assert!(
+        mk.contains("height: 812 flow: Overlay"),
+        "the root must be a fixed-height overlay:\n{mk}"
+    );
+    // The map FIRST — it is the layer everything else sits on.
+    let map_at = mk.find("MapView{").expect("a map");
+    let sheet_at = mk
+        .find("RoundedView{ width: Fill height: Fit")
+        .expect("a sheet");
+    assert!(
+        map_at < sheet_at,
+        "the map must be the bottom layer, not drawn over the card:\n{mk}"
+    );
+    // Opaque, and at the bottom where the preview camera leaves room for it.
+    assert!(
+        mk.contains("draw_bg.color: #0f1620") && mk.contains("Align{x: 0.5 y: 1.0}"),
+        "the sheet must be opaque and bottom-aligned:\n{mk}"
+    );
+    // And a card with NO map keeps the ordinary column — this is a map's rule.
+    const PLAIN: &str = "copy a { class: vocabulary, en: \"x\" }\n                         view root Surface { TextRow(text: copy.a) }\n";
+    let plain = makepad::lower(
+        &realize(
+            PLAIN,
+            &serde_json::json!({ "copy": { "a": "x" }, "env": { "locale": {} } }),
+            RealizeLimits::default(),
+        )
+        .root
+        .expect("realizes"),
+    );
+    assert!(
+        plain.contains("flow: Down") && !plain.contains("flow: Overlay"),
+        "a card without a map is still a column:\n{plain}"
     );
 }

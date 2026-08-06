@@ -6634,13 +6634,97 @@ pub mod makepad {
     fn element_body(node: &UiNode, depth: usize, out: &mut String) {
         let p = pad(depth);
         match node.kind.as_str() {
+            // A card holding a MAP is laid out the way the shipping nav card lays
+            // one out: the map is the BOTTOM layer of an overlay and everything
+            // else floats above it. Any other card keeps the ordinary column.
+            //
+            // This is not a style preference. A `MapView` is a fixed-pixel
+            // full-bleed surface — `Fill`/`Fit` "resolve to 0 and hide the map",
+            // so the shipping card's MANDATORY rules give every map an explicit
+            // 812 — and it paints its route ribbon through the GPU nav projection
+            // rather than inside a laid-out rect. Stacked in a column beneath the
+            // card's own content it draws straight over it.
+            //
+            // Measured, both ways round. With the map in a column: the route and
+            // its ribbon covered the whole screen and the FROM/TO fields, the
+            // duration and the Go button were simply not visible; in the drive
+            // screen the ribbon painted across the turn banner, cutting a street
+            // name in half. `a2app/apps/nav` has four maps and none of them is in
+            // a column — every one is the first child of a `flow: Overlay` with a
+            // floating sheet on top, and that is why they work.
+            //
+            // So the ORDER is inverted here relative to the card's text. A card
+            // reads "the trip, then the map"; the screen is "the map, with the
+            // trip over it". Which layer a role belongs on is presentation, and
+            // presentation is the backend's to decide — the card still says only
+            // what it has and in what order it matters.
             "Surface" => {
+                let map = node.children.iter().find(|c| c.kind == "Map");
+                let Some(map) = map else {
+                    let _ = writeln!(
+                        out,
+                        "{p}SolidView{{ width: Fill height: Fit flow: Down new_batch: true \
+                         draw_bg.color: {BASE} padding: {PAGE_PAD}"
+                    );
+                    children(node, depth, out);
+                    let _ = writeln!(out, "{p}}}");
+                    return;
+                };
+                // FIXED 812, not `Fill`. The shipping card's first MANDATORY rule
+                // is "root is `flow: Overlay`, `new_batch: true`, fixed
+                // `height: 812`", and the reason is the same one that governs the
+                // map itself: `Fill` resolves to 0 inside a `Fit` parent, and a
+                // card is an item in a chat list, so its container hugs content.
+                // Measured — `height: Fill` here rendered an entirely empty screen,
+                // map and sheet both, which is what a height of zero looks like.
                 let _ = writeln!(
                     out,
-                    "{p}SolidView{{ width: Fill height: Fit flow: Down new_batch: true \
-                     draw_bg.color: {BASE} padding: {PAGE_PAD}"
+                    "{p}SolidView{{ width: Fill height: 812 flow: Overlay new_batch: true \
+                     draw_bg.color: {BASE}"
                 );
-                children(node, depth, out);
+                element(map, depth + 1, out);
+                // The floating sheet, OPAQUE, in the shipping card's own colour.
+                //
+                // `height: Fit` so it is only as tall as what it holds — filling
+                // would put a panel over the whole map and swallow every pan and
+                // pinch that missed a control.
+                //
+                // Opaque because the theme's ordinary panel is `#ffffff12`, 7% white,
+                // which over a map is a window rather than a surface. Measured: the
+                // FROM and TO fields, the duration and the distance all rendered and
+                // all of them were unreadable, with the map's own road labels —
+                // "Bayshore Freeway", "22", "20" — drawn across the middle of them.
+                // Legible-on-anything is not something a translucent panel can be,
+                // and a map is the one backdrop a card cannot predict.
+                // 76 at the bottom where the shipping card uses 30. That card is a
+                // full-screen app card; an L0 card is an item in the chat list, and
+                // the app's composer bar sits over the bottom of it. Measured with
+                // 30: the duration, the distance and the Go button were half cut off
+                // behind "Reconnecting…". The sheet was positioned exactly where it
+                // was asked to be.
+                //
+                // AT THE BOTTOM, and that is the widget's requirement rather than a
+                // taste. `update_plan_preview_camera` fits the whole route and frames
+                // it "into the top band above the card's summary sheet" — so a sheet
+                // at the top sits exactly where the widget put the route. Measured:
+                // the trip's Saratoga end was behind the panel, and the camera was
+                // doing its job.
+                let _ = writeln!(
+                    out,
+                    "{p}  View{{ width: Fill height: Fill flow: Down align: Align{{x: 0.5 y: 1.0}}"
+                );
+                let _ = writeln!(
+                    out,
+                    "{p}    RoundedView{{ width: Fill height: Fit flow: Down \
+                     draw_bg.color: #0f1620 draw_bg.border_radius: 22 \
+                     margin: Inset{{left: 8 right: 8 bottom: 76}} \
+                     padding: Inset{{left: 14 top: 12 right: 14 bottom: 14}}"
+                );
+                for child in node.children.iter().filter(|c| c.kind != "Map") {
+                    element(child, depth + 3, out);
+                }
+                let _ = writeln!(out, "{p}    }}");
+                let _ = writeln!(out, "{p}  }}");
                 let _ = writeln!(out, "{p}}}");
             }
             // The card names a TRIP; the widget draws the route.
@@ -6664,9 +6748,40 @@ pub mod makepad {
                     Some(NodeValue::Number(n)) => trim_num(*n),
                     _ => "15".to_owned(),
                 };
+                // The settings a `MapView` does not work without, taken from the
+                // SHIPPING nav card rather than reasoned about — `a2app/apps/nav`
+                // is a working four-map reference whose "MANDATORY rules" section
+                // says why each one matters, and the values below are the ones it
+                // uses.
+                //
+                // `use_local_mbtiles: false` is the one that bites. The widget
+                // defaults to a local `.mbtiles` file for offline development, and
+                // an L0 card cannot ship one — so the omission draws the land fill
+                // and nothing else. Measured: a nav card whose route ribbon and
+                // whose duration were both correct, over a blank beige rectangle,
+                // with `local mbtiles source missing` in logcat and nothing on
+                // screen saying so. The app's own emitter already carried these
+                // and this backend did not, which is the same one-backend gap
+                // `Field`, `Grid.cols` and `Map` itself were each found in.
+                //
+                // `max_zoom` differs BY MODE, as it does in the shipping card: a
+                // whole-route preview is capped at 16 and a driving view goes to
+                // 19. A narrow clamp also has a cost under a finger — a card
+                // sitting exactly on the floor cannot pinch out, so half the
+                // gesture is dead and the map reads as broken rather than clamped.
+                let max_zoom = if mode == "plan" { "16.0" } else { "19.0" };
+                // The ribbon is drawn in ground metres, so a route seen from the
+                // whole-trip view needs a far wider line than one seen from a car.
+                let ribbon = match mode {
+                    "plan" => "40.0",
+                    "2d" => "11.0",
+                    _ => "14.0",
+                };
                 let _ = write!(
                     out,
                     "{p}MapView{{ width: Fill height: 812 nav_mode: {mode:?} zoom: {zoom} \
+                     min_zoom: 3.0 max_zoom: {max_zoom} nav_route_width: {ribbon} \
+                     nav_period: 100 use_network: true use_local_mbtiles: false \
                      center_lat: {lat} center_lon: {lon}"
                 );
                 if poly != "\"\"" {
