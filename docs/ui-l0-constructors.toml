@@ -308,7 +308,7 @@ answers = ["id", "name", "lat", "lon", "distance"]
 # COORDINATES, not places: a route needs four numbers and an argument carries one
 # value, so place names could never resolve into a call.
 [sources."sys.route"]
-args = ["from_lat", "from_lon", "to_lat", "to_lon", "mode", "fields"]
+args = ["from_lat", "from_lon", "to_lat", "to_lon", "via", "mode", "fields"]
 answers = ["duration", "distance", "steps"]
 
 # Where you are ON a route: the next instruction, and what is left of the trip.

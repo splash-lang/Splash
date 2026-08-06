@@ -6909,3 +6909,151 @@ fn both_backends_float_a_map_cards_content_over_the_map() {
         "makepad must float the content over the map too:\n{mk}"
     );
 }
+
+/// The travel mode decides the duration, and it used to be dropped.
+///
+/// `sys.route(mode:)` was accepted by the catalog, documented, and never emitted —
+/// so a card asking how long a trip takes on foot was answered with how long it
+/// takes by car. The same number under a lit "Walk" chip: accepted, rendered,
+/// confidently wrong, which is this profile's whole defect class.
+///
+/// Walk and bike are the HOST's estimates from the measured distance, because the
+/// public OSRM server serves the driving graph whatever profile it is asked for —
+/// verified against it: `foot`, `bike` and `cycling` all return the driving answer.
+/// The estimate is the host's to make; the card still states no duration.
+#[test]
+fn the_travel_mode_decides_the_duration() {
+    const CARD: &str = concat!(
+        "source o sys.search(query: state.origin, count: 1, fields: [id, name, lat, lon])\n",
+        "source d sys.search(query: state.dest, count: 1, fields: [id, name, lat, lon])\n",
+        "source trip sys.route(from_lat: o.0.lat, from_lon: o.0.lon,\n",
+        "                      to_lat: d.0.lat, to_lon: d.0.lon,\n",
+        "                      mode: state.mode, fields: [duration, distance])\n",
+        "state origin { shape: text, initial: \"A\" }\n",
+        "state dest   { shape: text, initial: \"B\" }\n",
+        "state mode   { shape: enum[drive, walk, bike], initial: .drive }\n",
+        "event pick_mode { mode: set($value) }\n",
+        "copy dr { class: vocabulary, en: \"Drive\" }\n",
+        "view root Surface {\n",
+        "  Chip(text: copy.dr, on_tap: pick_mode, value: .walk, active: mode == .walk)\n",
+        "  TextValue(value: trip.duration)\n",
+        "  TextCaption(value: trip.distance)\n",
+        "}\n"
+    );
+    assert!(
+        check_ui_l0_named("nav", CARD).valid,
+        "{:#?}",
+        check_ui_l0_named("nav", CARD).diagnostics
+    );
+
+    // Each mode must pick a DIFFERENT field off the helper. Asserting they differ
+    // is the point: a dropped argument makes all three identical, and all three
+    // plausible.
+    let mut seen = Vec::new();
+    for mode in ["drive", "walk", "bike"] {
+        let data = serde_json::json!({
+            "origin": "A", "dest": "B", "mode": mode,
+            "o": [{ "lat": 1.0, "lon": 2.0 }], "d": [{ "lat": 3.0, "lon": 4.0 }],
+            "trip": { "duration": "SEEDED", "distance": "SEEDED" },
+            "env": { "locale": {} }, "copy": { "dr": "Drive" }
+        });
+        let kit = splash_ui_l0::kit::lower(
+            &realize(CARD, &data, RealizeLimits::default())
+                .root
+                .expect("realizes"),
+        );
+        let key = ["\"min\")", "\"walk\")", "\"bike\")"]
+            .iter()
+            .find(|k| kit.contains(*k))
+            .unwrap_or_else(|| panic!("no duration field for {mode}:\n{kit}"));
+        seen.push((mode, *key));
+        // Distance is the same geometry either way and must not vary with mode.
+        assert!(
+            kit.contains("\"km\")"),
+            "{mode}: distance is the same geometry whatever the mode:\n{kit}"
+        );
+    }
+    assert_eq!(
+        seen,
+        vec![
+            ("drive", "\"min\")"),
+            ("walk", "\"walk\")"),
+            ("bike", "\"bike\")")
+        ],
+        "each mode must ask the helper for its own duration"
+    );
+}
+
+/// A trip with a stop routes THROUGH it, and the map draws the same trip.
+///
+/// `via:` was accepted by the catalog and emitted by nothing. So a card could offer
+/// "add a stop", accept a place, show it in the list — and route straight past it:
+/// the line went origin to destination, and the duration beside it was the direct
+/// trip's. Everything on screen agreed with everything else and none of it was the
+/// journey the user asked for.
+///
+/// Two bugs had to be fixed to get here, and both were silent. The list parser took
+/// every token as its own item, so `[stop.0.lat, stop.0.lon]` became six items —
+/// `stop`, `0`, `lat`, … — and resolved to nothing. And a source read from inside a
+/// list argument did not count as a read, so the stop's own `sys.search` was
+/// reported as declared and never used.
+#[test]
+fn a_trip_through_a_stop_routes_through_it() {
+    const CARD: &str = concat!(
+        "source o sys.search(query: state.origin, count: 1, fields: [id, name, lat, lon])\n",
+        "source s sys.search(query: state.stop, count: 1, fields: [id, name, lat, lon])\n",
+        "source d sys.search(query: state.dest, count: 1, fields: [id, name, lat, lon])\n",
+        "source trip sys.route(from_lat: o.0.lat, from_lon: o.0.lon,\n",
+        "                      to_lat: d.0.lat, to_lon: d.0.lon,\n",
+        "                      via: [s.0.lat, s.0.lon],\n",
+        "                      mode: .drive, fields: [duration, distance])\n",
+        "state origin { shape: text, initial: \"A\" }\n",
+        "state stop   { shape: text, initial: \"S\" }\n",
+        "state dest   { shape: text, initial: \"B\" }\n",
+        "view root Surface {\n",
+        "  TextValue(value: trip.duration)\n",
+        "  Map(mode: .plan, from: o, to: d, via: s, zoom: 14)\n",
+        "}\n"
+    );
+    let report = check_ui_l0_named("nav", CARD);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+
+    let data = serde_json::json!({
+        "origin": "A", "stop": "S", "dest": "B",
+        "o": [{ "lat": 1.0, "lon": 2.0 }], "s": [{ "lat": 5.0, "lon": 6.0 }],
+        "d": [{ "lat": 3.0, "lon": 4.0 }],
+        "trip": { "duration": "SEEDED", "distance": "SEEDED" },
+        "env": { "locale": {} }, "copy": {}
+    });
+    let root = realize(CARD, &data, RealizeLimits::default())
+        .root
+        .expect("realizes");
+
+    for (which, lowered) in [
+        ("kit", splash_ui_l0::kit::lower(&root)),
+        ("makepad", makepad::lower(&root)),
+    ] {
+        // The waypoint reaches the helper's sixth argument, assembled from the
+        // stop's own coordinate calls rather than baked as a literal.
+        let vias =
+            "\"\" + sys.searchnum(\"S\", 0, \"lat\") + \",\" + sys.searchnum(\"S\", 0, \"lon\")";
+        assert!(
+            lowered.contains(vias),
+            "{which}: the trip must be routed through the stop:\n{lowered}"
+        );
+        // BOTH the reported trip and the drawn one. A map that omits the vias
+        // draws a different journey from the numbers printed beside it.
+        assert_eq!(
+            lowered.matches(vias).count(),
+            2,
+            "{which}: the duration and the polyline must both go via the stop:\n{lowered}"
+        );
+        // And the seeded coordinates never appear as literals.
+        for seeded in ["5", "6"] {
+            assert!(
+                !lowered.contains(&format!("\"{seeded}\"")),
+                "{which}: {seeded} is the seeded stop coordinate:\n{lowered}"
+            );
+        }
+    }
+}

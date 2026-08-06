@@ -1314,15 +1314,36 @@ impl<'a> Parser<'a> {
             let value = match self.peek().cloned() {
                 Some(t) if t.is_punct("[") => {
                     self.at += 1;
-                    let mut items = Vec::new();
+                    // One item per COMMA, so a dotted path stays whole.
+                    //
+                    // This took every Ident/Str/Num token as its own item, and a
+                    // path is three of them: `via: [stop.0.lat, stop.0.lon]` became
+                    // six items — `stop`, `0`, `lat`, `stop`, `0`, `lon` — so
+                    // nothing resolved and the waypoint was dropped. The route then
+                    // went straight from origin to destination while the card
+                    // displayed a stop the trip did not visit.
+                    //
+                    // `fields: [id, name]` is unaffected: single-token items are
+                    // still one item each.
+                    let mut items: Vec<String> = Vec::new();
+                    let mut current = String::new();
                     while let Some(i) = self.peek().cloned() {
                         if i.is_punct("]") {
                             break;
                         }
-                        if matches!(i.kind, Kind::Ident | Kind::Str | Kind::Num) {
-                            items.push(i.text.clone());
+                        if i.is_punct(",") {
+                            if !current.is_empty() {
+                                items.push(std::mem::take(&mut current));
+                            }
+                        } else if matches!(i.kind, Kind::Ident | Kind::Str | Kind::Num) {
+                            current.push_str(&i.text);
+                        } else if i.is_punct(".") {
+                            current.push('.');
                         }
                         self.at += 1;
+                    }
+                    if !current.is_empty() {
+                        items.push(current);
                     }
                     self.expect_punct("]");
                     SourceArg::List(items)
@@ -2816,7 +2837,9 @@ pub mod catalog {
         // into a live call.
         (
             "sys.route",
-            &["from_lat", "from_lon", "to_lat", "to_lon", "mode", "fields"],
+            &[
+                "from_lat", "from_lon", "to_lat", "to_lon", "via", "mode", "fields",
+            ],
         ),
         // Where you are ON a route. Takes the trip's four coordinates and the
         // device's own two, and answers relative to them — the half of navigation
@@ -3551,9 +3574,29 @@ fn validate_sources(card: &Card, sink: &mut Diagnostics) {
     // A source read by another source counts: `sys.weather(lat: place.lat)`
     // makes `place` needed even though no view names it.
     for source in &card.sources {
-        for (_, arg) in &source.args {
-            if let SourceArg::Path(path) = arg {
-                read.insert(root_of(path));
+        for (name, arg) in &source.args {
+            match arg {
+                SourceArg::Path(path) => {
+                    read.insert(root_of(path));
+                }
+                // And so does one read from inside a LIST argument.
+                //
+                // `sys.route(via: [stop.0.lat, stop.0.lon])` is how a trip names a
+                // waypoint, and the items are paths like any other read. Counting
+                // only `Path` here refused a card that used one: the stop's own
+                // `sys.search` was reported as declared and never read, while the
+                // route it fed was the only reason it existed.
+                //
+                // `fields:` is exempt — its items are the FIELD NAMES being asked
+                // for (`[duration, distance]`), not paths, and treating `duration`
+                // as a read of a source called `duration` would mark any source of
+                // that name as used by every card in the corpus.
+                SourceArg::List(items) if name != "fields" => {
+                    for item in items {
+                        read.insert(root_of(item));
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -5401,7 +5444,32 @@ impl Realizer<'_> {
                 SourceArg::Text(t) => t.clone(),
                 SourceArg::Number(n) => makepad::trim_num(*n),
                 SourceArg::List(_) if name == "fields" => continue,
-                SourceArg::List(items) => items.join(","),
+                // A list of PATHS resolves item by item, each to its own live
+                // call, joined by a separator no call can contain.
+                //
+                // `sys.route(via: [stop.0.lat, stop.0.lon])` is how a trip names a
+                // waypoint. Joining the raw items gave the helper the literal text
+                // "stop.0.lat,stop.0.lon", which is not a coordinate, so the
+                // argument was discarded and the route was computed WITHOUT the
+                // stop — a card that let the user add one, drew a line that did
+                // not go through it, and reported the direct trip's time.
+                //
+                // U+0001 rather than a comma, because a resolved call contains
+                // commas of its own: `sys.searchnum("A", 0, "lat")`.
+                SourceArg::List(items) => items
+                    .iter()
+                    .map(|item| {
+                        let key = item.strip_prefix("state.").unwrap_or(item);
+                        match self.nested_source_call(key, scope) {
+                            Some(call) => call,
+                            None => scope
+                                .lookup(key)
+                                .map(|v| json_to_key(&v))
+                                .unwrap_or_else(|| item.clone()),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\u{1}"),
                 // A parent's own argument is usually card STATE — the weather
                 // fixture reads `sys.geocode(name: state.city)` — so it resolves
                 // from the scope like any other path. Returning None here
@@ -5566,7 +5634,38 @@ impl Realizer<'_> {
                 // it silently left the card ranking the whole market under
                 // whatever title it had been given.
                 SourceArg::List(_) if name == "fields" => continue,
-                SourceArg::List(items) => items.join(","),
+                // A list of PATHS resolves item by item, each to its own live
+                // call, joined by a separator no call can contain.
+                //
+                // `sys.route(via: [stop.0.lat, stop.0.lon])` is how a trip names a
+                // waypoint. Joining the raw items handed the helper the literal
+                // text "stop.0.lat,stop.0.lon", which is not a coordinate, so the
+                // argument was discarded and the route computed WITHOUT the stop:
+                // a card that let the user add one, drew a line that did not pass
+                // through it, and reported the direct trip's time.
+                //
+                // U+0001 rather than a comma, because a resolved call contains
+                // commas of its own — `sys.searchnum("A", 0, "lat")`. See
+                // `makepad::via_string`, which reads it back.
+                //
+                // A list of plain VALUES still joins with a comma: `symbols: [NVDA,
+                // AMD]` is a universe to rank, and neither item resolves to a call.
+                SourceArg::List(items) => {
+                    let resolved: Vec<String> = items
+                        .iter()
+                        .map(|item| {
+                            let key = item.strip_prefix("state.").unwrap_or(item);
+                            self.nested_source_call(key, scope)
+                                .or_else(|| scope.lookup(key).map(|v| json_to_key(&v)))
+                        })
+                        .collect::<Option<Vec<_>>>()
+                        .unwrap_or_default();
+                    if resolved.len() == items.len() {
+                        resolved.join("\u{1}")
+                    } else {
+                        items.join(",")
+                    }
+                }
             };
             args.push((name.clone(), resolved));
         }
@@ -5849,6 +5948,18 @@ pub mod makepad {
         None
     }
 
+    /// A `Map`'s waypoints, as the route helpers' `lat,lon;lat,lon` argument.
+    ///
+    /// `via:` on a `Map` names a source the same way `from:`/`to:` do, so each axis
+    /// is asked for separately and the pair is assembled by `via_string`. A source
+    /// that cannot answer a coordinate yields no vias, because a map drawn through
+    /// a place that could not be resolved is a map of a different trip.
+    pub(super) fn map_vias(node: &UiNode) -> Option<String> {
+        let lat = map_coord(node, "via", "lat")?;
+        let lon = map_coord(node, "via", "lon")?;
+        via_string(&format!("{lat}\u{1}{lon}"))
+    }
+
     /// The live position a `Map` was told to follow, if it was told one.
     ///
     /// This is the whole difference between a camera that reports where the user
@@ -5870,11 +5981,19 @@ pub mod makepad {
         let (Some(a), Some(o)) = (coord("from", "lat"), coord("from", "lon")) else {
             return ("0".into(), "0".into(), "\"\"".into());
         };
+        // The WAYPOINTS the trip passes through, as the helper's sixth argument.
+        //
+        // A map that omits them draws a different journey from the one the card
+        // reports beside it: the line goes straight from origin to destination
+        // while the duration and distance are for a route through the stop. Both
+        // halves come from the same list now, rendered the same way — see
+        // `via_string`.
+        let vias = map_vias(node);
         let poly = match (coord("to", "lat"), coord("to", "lon")) {
-            // `via` is carried by the helper's sixth argument and is not emitted
-            // yet: it is a value the card supplies as a list, and threading it
-            // needs that list rendered the way `sys.route` renders it.
-            (Some(b), Some(p)) => format!("sys.navroute({a}, {o}, {b}, {p}, \"polyline\")"),
+            (Some(b), Some(p)) => match &vias {
+                Some(v) => format!("sys.navroute({a}, {o}, {b}, {p}, \"polyline\", {v})"),
+                None => format!("sys.navroute({a}, {o}, {b}, {p}, \"polyline\")"),
+            },
             _ => "\"\"".to_owned(),
         };
         // The route is always the declared trip; only the CENTRE moves to the
@@ -5885,6 +6004,32 @@ pub mod makepad {
             Some((at_lat, at_lon)) => (at_lat, at_lon, poly),
             None => (a, o, poly),
         }
+    }
+
+    /// A `via:` list, as the route helpers' `lat,lon;lat,lon` argument.
+    ///
+    /// The items arrive already resolved to live calls and U+0001-separated (see
+    /// `source_binding`), in coordinate PAIRS. An odd count is a card that named
+    /// half a waypoint, and half a coordinate is not a place — so it yields no
+    /// vias rather than a route through the equator.
+    ///
+    /// The result is a VM expression, not a string: every coordinate is a call, so
+    /// the separators are concatenated around them at evaluation time. The leading
+    /// `""` is what makes the first `+` a string concatenation rather than an
+    /// addition of two numbers — without it a stop at 37,-122 became -85.
+    pub(super) fn via_string(joined: &str) -> Option<String> {
+        let parts: Vec<&str> = joined.split('\u{1}').filter(|p| !p.is_empty()).collect();
+        if parts.len() < 2 || parts.len() % 2 != 0 {
+            return None;
+        }
+        let mut out = String::from("\"\"");
+        for (i, pair) in parts.chunks(2).enumerate() {
+            if i > 0 {
+                out.push_str(" + \";\"");
+            }
+            let _ = write!(out, " + {} + \",\" + {}", pair[0], pair[1]);
+        }
+        Some(out)
     }
 
     /// The VM helper that answers a declared capability, if one does.
@@ -6070,8 +6215,30 @@ pub mod makepad {
             // A TRIP's own facts — how long and how far — from the same cached
             // fetch the map's polyline comes from, so asking costs nothing extra.
             "sys.route" => {
+                // `mode:` DECIDES THE DURATION, and it was being dropped.
+                //
+                // The argument was accepted, documented and never emitted, so a
+                // card that asked how long a trip takes on foot was answered with
+                // how long it takes by car — the same number under a lit "Walk"
+                // chip, which is the shape of every defect this profile keeps
+                // finding: accepted, rendered, confidently wrong.
+                //
+                // The helper's own fields are the translation. `walk` and `bike`
+                // are the host's ESTIMATES from the measured distance (~5 km/h and
+                // ~15 km/h), because the public OSRM server serves the driving
+                // graph for every profile it is asked for — verified: `foot`,
+                // `bike` and `cycling` all return the driving answer. The estimate
+                // is the host's to make and to document; what §4 forbids is the
+                // CARD stating a duration, and it still states nothing.
+                //
+                // Distance is the same geometry either way, so it does not vary.
+                let mode = arg("mode").unwrap_or_default();
                 let key = match binding.field.as_str() {
-                    "duration" => "min",
+                    "duration" => match mode.trim() {
+                        "walk" => "walk",
+                        "bike" => "bike",
+                        _ => "min",
+                    },
                     "distance" => "km",
                     // The step list is a collection a card loops over, not a
                     // scalar a call answers.
@@ -6081,7 +6248,21 @@ pub mod makepad {
                 let o = arg("from_lon")?;
                 let b = arg("to_lat")?;
                 let p = arg("to_lon")?;
-                Some(format!("sys.navroute({a}, {o}, {b}, {p}, {key:?})"))
+                // The waypoints, as the helper's sixth argument: a `lat,lon;lat,lon`
+                // string built from the coordinate calls the card listed. Emitted
+                // as CONCATENATION rather than a literal, because each coordinate
+                // is a live call and the string has to be assembled where the
+                // numbers arrive.
+                //
+                // Omitted entirely when the card named none, so a stopless trip
+                // passes "" and takes the same two-coordinate path it always did.
+                let via = via_string(&arg("via").unwrap_or_default());
+                match via {
+                    Some(vias) => {
+                        Some(format!("sys.navroute({a}, {o}, {b}, {p}, {key:?}, {vias})"))
+                    }
+                    None => Some(format!("sys.navroute({a}, {o}, {b}, {p}, {key:?})")),
+                }
             }
             // Navigation's live half, and the one place a fabricated number was
             // load-bearing in the app this replaces.
