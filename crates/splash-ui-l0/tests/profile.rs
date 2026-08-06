@@ -7112,3 +7112,109 @@ fn a_trip_through_a_stop_routes_through_it() {
         }
     }
 }
+
+/// The card stays L0 while the LOWERING emits `fn tick()` on its behalf.
+///
+/// This is the load-bearing distinction, and worth asserting because the performance
+/// work looks like it crossed the line and does not.
+///
+/// A driving card cannot be re-resolved without a visible stall — measured on a
+/// OnePlus 6, frame hitches and card re-resolves correlate 1:1, up to 327 ms — so its
+/// live values update in place from a generated `fn tick()`, exactly as the 664-line
+/// L2 exemplar does with `ui.instr.set_text()`.
+///
+/// The difference is WHO WROTE IT. That exemplar is L2 because its own source contains
+/// `fn tick()`, 30 `let` bindings and 606 operators, written by its author. This card
+/// contains none: it says `TextRow(text: step.instruction)`, and the tick is derived
+/// mechanically from that declaration. §7 classifies a CARD, and the profile constrains
+/// what a card may say — not what a compiler may emit for it, any more than
+/// `sys.navroute(...)` in the output makes a card that wrote `sys.route` into L2.
+#[test]
+fn the_card_holds_no_tick_however_much_the_lowering_emits() {
+    const NAV: &str = include_str!("fixtures/nav.card");
+    assert_eq!(check_ui_l0_named("nav", NAV).level, Level::L0);
+
+    // Not one L2 construct in the card's own declarations. The comments discuss the
+    // tick at length, which is why they are stripped rather than searched.
+    let code: String = NAV
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for construct in ["fn ", "let ", "ui.", ".set_"] {
+        assert!(
+            !code.contains(construct),
+            "the card must not contain {construct:?} — that is what would make it L2"
+        );
+    }
+}
+
+/// A lowering with every string literal removed — the code it would run.
+fn strip_literals(src: &str) -> String {
+    let mut out = String::new();
+    let mut chars = src.chars();
+    let mut in_str = false;
+    while let Some(c) = chars.next() {
+        match c {
+            // An escape consumes its partner, so `\"` never ends the literal.
+            '\\' if in_str => {
+                chars.next();
+            }
+            '"' => in_str = !in_str,
+            _ if !in_str => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Card state may change what a LITERAL contains, and nothing else.
+///
+/// State reaches generated code as an argument — a place name becomes
+/// `sys.searchnum("Saratoga High School", 0, "lat")` — and that generated code is now
+/// also the body of a `fn tick()` the VM runs every frame. So the quoting is a
+/// confinement boundary rather than a formatting detail: state that could close its own
+/// quote would be writing script into the tick.
+///
+/// Two earlier versions of this test were wrong in instructive ways. Asserting the
+/// hostile text was simply absent failed, correctly — `ui.evil` DOES appear in the
+/// output, escaped, inside a quoted argument, and is inert there. Asserting the
+/// literal-stripped skeleton held no `let ` failed too, because the kit emits its own
+/// `let node = …`. The claim is that state cannot MOVE the boundary, and a diff of the
+/// skeletons says exactly that. Verified by removing the quoting in `source_binding`:
+/// every case below then differs from the benign skeleton and the test fails.
+#[test]
+fn card_state_cannot_write_script_into_the_lowering() {
+    const CARD: &str = concat!(
+        "source found sys.search(query: state.q, count: 1, fields: [id, name, lat, lon])\n",
+        "state q { shape: text, initial: \"\" }\n",
+        "view root Surface { TextRow(text: found.0.name) }\n"
+    );
+    let lower_with = |q: &str| {
+        let data = serde_json::json!({
+            "q": q,
+            "found": [{ "id": "1", "name": "n", "lat": 1.0, "lon": 2.0 }],
+            "env": { "locale": {} }, "copy": {}
+        });
+        let kit = splash_ui_l0::kit::lower(
+            &realize(CARD, &data, RealizeLimits::default())
+                .root
+                .expect("realizes"),
+        );
+        strip_literals(&kit)
+    };
+    let benign = lower_with("Saratoga");
+
+    for hostile in [
+        "x\") ui.evil.set_text(\"owned",
+        "x\", 0, \"lat\") + sys.gps(\"lat",
+        "x\") } fn tick() { ui.a.set_text(\"",
+        "x\nlet escaped = 1",
+    ] {
+        assert_eq!(
+            lower_with(hostile),
+            benign,
+            "card state changed the CODE, not just a literal, for {hostile:?}"
+        );
+    }
+}
