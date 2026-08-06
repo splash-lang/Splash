@@ -6250,3 +6250,46 @@ fn a_forecast_rows_label_and_the_weeks_range_go_live() {
         "max_hi must translate:\n{dsl}"
     );
 }
+
+/// The satellite pane, and a row that can stop filling.
+///
+/// Both were things a card could not SAY. The shipping weather app has two map
+/// panes — 卫星云图 then 空气质量图 — and L0 had a role for the second and none for
+/// the first, so every generated weather card was missing its sky.
+///
+/// And `align: .center` on a column had no effect on a row child, because
+/// `l0_row` fills by default (a list row must) and a filling child ignores its
+/// parent's alignment — while `align` on a ROW means the cross axis, which is
+/// vertical. So the weather card's `↑37° ↓28° ≈37°` sat hard left under a centred
+/// name, icon and hero, and no attribute the card could write changed it.
+#[test]
+fn a_satellite_pane_and_a_row_that_can_stop_filling() {
+    let data = serde_json::json!({ "env": { "locale": {} }, "copy": {} });
+    let root = realize(WEATHER, &data, RealizeLimits::default())
+        .root
+        .expect("realizes");
+    let kit = splash_ui_l0::kit::lower(&root);
+    let mk = makepad::lower(&root);
+
+    // The pane names WHERE and the helper answers the image — in both backends,
+    // with LIVE coordinates, so the card never carries an observation.
+    assert!(
+        kit.contains("l0_satellite(sys.geocodenum("),
+        "the kit must ask for the sky at the resolved place:\n{kit}"
+    );
+    assert!(
+        mk.contains("sys.satellite(sys.geocodenum("),
+        "and so must makepad:\n{mk}"
+    );
+
+    // `width: .fit` is NOT a no-op on a row, whatever it is on a text role.
+    assert!(
+        kit.contains("l0_fit("),
+        "a row must be able to stop filling:\n{kit}"
+    );
+    // And it is inside the centred column, which is the point.
+    assert!(
+        kit.contains("l0_aligned("),
+        "the current block is still centred:\n{kit}"
+    );
+}

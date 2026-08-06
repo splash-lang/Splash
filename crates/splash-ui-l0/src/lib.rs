@@ -2679,9 +2679,13 @@ pub mod catalog {
                 ("width", TokenOrPath(WIDTH)),
             ],
         ),
+        // `width` says whether this row FILLS. It fills by default because a list
+        // row must, and that defeats a centred parent — the one thing a card
+        // could not say.
         (
             "Row",
             &[
+                ("width", TokenOrPath(WIDTH)),
                 ("align", Token(ALIGN)),
                 ("gap", Number),
                 ("on_tap", Event),
@@ -2759,6 +2763,11 @@ pub mod catalog {
             "AqiContour",
             &[("lat", Path), ("lon", Path), ("span", Number)],
         ),
+        // Live satellite cloud imagery (卫星云图) over a place — the one pane the
+        // shipping weather card has and L0 could not express at all. Names WHERE,
+        // like every other visualisation here, and the helper answers the image,
+        // so a card shows the sky without ever stating what is in it.
+        ("Satellite", &[("lat", Path), ("lon", Path)]),
         (
             "StockPlot",
             &[("symbol", Path), ("range", TokenOrPath(UNIT))],
@@ -6691,6 +6700,18 @@ pub mod makepad {
                     trim_num(num_of(arg(node, "phase")))
                 );
             }
+            // Live satellite cloud imagery. An IMAGE rather than a shader, so it
+            // is the one visualisation whose helper answers a URL — the widget
+            // fetches what the URL points at, and the card said only where.
+            "Satellite" => {
+                let _ = writeln!(
+                    out,
+                    "{p}Image{{ width: Fill height: 190 fit: ImageFit.CropToFill \
+                     src: http_resource(sys.satellite({}, {})) }}",
+                    expr_of(node, "lat"),
+                    expr_of(node, "lon")
+                );
+            }
             "AqiContour" => {
                 // lat/lon/span, not a field: the widget fetches its own data.
                 // Emitting `draw_bg.idx` was writing a GPU uniform from the
@@ -7952,6 +7973,7 @@ pub mod kit {
             "SunArc" => "l0_sunarc",
             "MoonPhase" => "l0_moonphase",
             "AqiContour" => "l0_aqicontour",
+            "Satellite" => "l0_satellite",
             "StockPlot" => "l0_stockplot",
             "TextHero" => "l0_hero",
             "TextTitle" => "l0_title",
@@ -8116,6 +8138,9 @@ pub mod kit {
         };
         match t.as_str() {
             "fill" => Some(("l0_wide(", ")".into())),
+            // NOT a no-op, though it is the default for a text role: `l0_row`
+            // fills, so a row can only stop filling by saying so.
+            "fit" => Some(("l0_fit(", ")".into())),
             "rank" | "day" | "temp" => Some(("l0_colw(", format!(", {t:?})"))),
             _ => None,
         }
@@ -8336,12 +8361,13 @@ pub mod kit {
             // the catalog's order — no defaults, because a bar drawn against a
             // range nobody supplied is a bar drawn against zero, and it looks
             // like data.
-            "TempBar" | "SunArc" | "MoonPhase" | "AqiContour" | "StockPlot" => {
+            "TempBar" | "SunArc" | "MoonPhase" | "AqiContour" | "StockPlot" | "Satellite" => {
                 let params: &[&str] = match node.kind.as_str() {
                     "TempBar" => &["lo", "hi", "min", "max"],
                     "SunArc" => &["rise", "set", "now"],
                     "MoonPhase" => &["phase", "illum"],
                     "AqiContour" => &["lat", "lon", "span"],
+                    "Satellite" => &["lat", "lon"],
                     _ => &["symbol", "range"],
                 };
                 let args: Vec<String> = params.iter().map(|p| scalar_of(node, p)).collect();

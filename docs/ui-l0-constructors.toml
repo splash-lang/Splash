@@ -73,7 +73,11 @@ align = { kind = "token", tokens = ["start", "center", "end"] }
 gap   = { kind = "number" }
 width = { kind = "width" }
 
+# `width` says whether this row FILLS. It fills by default, because a list row
+# must — and that defeats a centred parent, which was the one thing a card could
+# not say about a row.
 [Row]
+width  = { kind = "width" }
 align  = { kind = "token", tokens = ["start", "center", "end", "baseline"] }
 gap    = { kind = "number" }
 on_tap = { kind = "event" }
@@ -188,6 +192,12 @@ illum = { kind = "path" }
 # as the widget's own comment puts it, "that put a GPU uniform layout into the
 # authoring language — it is not a widget contract, it is an ABI". The widget
 # fetches its own field now, so a card cannot express one wrongly.
+# Live satellite cloud imagery (卫星云图) over a place. Names WHERE; the helper
+# answers the image, so a card shows the sky without stating what is in it.
+[Satellite]
+lat = { kind = "path" }
+lon = { kind = "path" }
+
 [AqiContour]
 lat  = { kind = "path" }
 lon  = { kind = "path" }
