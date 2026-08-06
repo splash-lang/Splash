@@ -4738,10 +4738,37 @@ fn the_nav_trip_planner_is_expressible_at_l0() {
     assert!(NAV.contains("Map(mode:"), "the card must name a trip");
     assert!(NAV.contains("Field(text:"), "the card must take typed text");
 
-    // And it must be SMALL. The claim is not merely that L0 can express this
-    // screen but that most of the original was working around missing
-    // machinery — a 600-line L0 card would disprove that as surely as a
-    // rejection would.
+    // Every requirement of the shipping app that is the CARD's to meet.
+    //
+    // The bound below is only worth anything next to this list: a small card that
+    // does less is not the claim. These are R4.3 (a stop the route goes through),
+    // R6.2 (per-leg times), R7.1 (mode chips), R8.2 (turn guidance) and R2.5 (the
+    // drive screen) — each a thing the 54-line version did not do.
+    for (what, needle) in [
+        ("a stop the trip routes through", "via: [stop_place"),
+        ("per-leg times", "source leg_a"),
+        ("travel modes", "mode: state.mode"),
+        ("mode chips", "active: mode == .walk"),
+        ("turn guidance", "step.instruction"),
+        ("the drive screen", "when screen == .drive"),
+    ] {
+        assert!(NAV.contains(needle), "the card must have {what}");
+    }
+
+    // And it must stay SMALL. The claim is not merely that L0 can express this
+    // screen but that most of the original was working around missing machinery —
+    // a 600-line L0 card would disprove that as surely as a rejection would.
+    //
+    // The bound was 100 and is 200. The card grew from 54 lines to ~130 by GAINING
+    // function, not by working around anything: a travel mode, a waypoint the route
+    // passes through, per-leg times, and turn-by-turn. Each cost declarations
+    // rather than machinery — a stop is two route sources because a source's
+    // arguments are fixed at declaration, so a trip with one is a different trip
+    // and the card says so. That is the price of a total form and it is visible,
+    // which is the point.
+    //
+    // The comparison it exists to make is unchanged: 664 lines at L2 against ~130
+    // at L0, now at close to the same function.
     let lines = NAV
         .lines()
         .filter(|l| {
@@ -4750,7 +4777,7 @@ fn the_nav_trip_planner_is_expressible_at_l0() {
         })
         .count();
     assert!(
-        lines < 100,
+        lines < 200,
         "the point is that it is small; this is {lines} lines"
     );
 }

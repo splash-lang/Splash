@@ -6019,7 +6019,7 @@ pub mod makepad {
     /// addition of two numbers — without it a stop at 37,-122 became -85.
     pub(super) fn via_string(joined: &str) -> Option<String> {
         let parts: Vec<&str> = joined.split('\u{1}').filter(|p| !p.is_empty()).collect();
-        if parts.len() < 2 || parts.len() % 2 != 0 {
+        if parts.len() < 2 || !parts.len().is_multiple_of(2) {
             return None;
         }
         let mut out = String::from("\"\"");

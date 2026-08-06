@@ -51,9 +51,32 @@ source dest_place   sys.search(query: state.dest,   count: 1, fields: [id, name,
 # nothing to resolve into. The duration and distance rendered `— —` under a route
 # that drew correctly, because the map resolved its endpoints and the text beside
 # it could not.
+source stop_place sys.search(query: state.stop, count: 1, fields: [id, name, lat, lon])
+
+# TWO route sources, and the reason is §5.4 rather than a preference.
+#
+# A source's arguments are fixed at declaration, so one source cannot sometimes
+# carry a waypoint. `trip` is the direct journey; `trip_via` goes through the stop.
+# The guards below pick which is on screen, so exactly one of them is ever read —
+# and the card says in its structure that a trip with a stop is a different trip,
+# which is true and which a conditional argument would have hidden.
 source trip sys.route(from_lat: origin_place.0.lat, from_lon: origin_place.0.lon,
                       to_lat:   dest_place.0.lat,   to_lon:   dest_place.0.lon,
-                      mode: .drive, fields: [duration, distance])
+                      mode: state.mode, fields: [duration, distance])
+
+source trip_via sys.route(from_lat: origin_place.0.lat, from_lon: origin_place.0.lon,
+                          to_lat:   dest_place.0.lat,   to_lon:   dest_place.0.lon,
+                          via: [stop_place.0.lat, stop_place.0.lon],
+                          mode: state.mode, fields: [duration, distance])
+
+# The LEGS, when there is a stop. R6.2: each leg shows its own time and distance,
+# and they sum to the total. Two more sources, because a leg is a trip.
+source leg_a sys.route(from_lat: origin_place.0.lat, from_lon: origin_place.0.lon,
+                       to_lat:   stop_place.0.lat,   to_lon:   stop_place.0.lon,
+                       mode: state.mode, fields: [duration, distance])
+source leg_b sys.route(from_lat: stop_place.0.lat, from_lon: stop_place.0.lon,
+                       to_lat:   dest_place.0.lat, to_lon:   dest_place.0.lon,
+                       mode: state.mode, fields: [duration, distance])
 
 # Where we are ON the trip: the next manoeuvre, and what is left of it.
 #
@@ -91,10 +114,35 @@ state query  { shape: text, initial: "" }        # what the user is typing
 # say which screen they are, which is what a card should have said anyway.
 state screen { shape: enum[plan, drive], initial: .plan }
 
+# How the trip is travelled. R7.1/R7.2 of the shipping app's contract.
+#
+# `sys.route` takes this and answers a duration for it. It used to take it and
+# drop it, so "Walk" showed the driving time — the same number under a different
+# lit chip, which is this profile's whole defect class wearing a travel mode.
+state mode { shape: enum[drive, walk, bike], initial: .drive }
+
+# ONE stop, not an unbounded list, and the difference is the whole reason this is
+# expressible at L0.
+#
+# An earlier note here said L0 could not do waypoints because it cannot accumulate
+# a user-built list. That was the wrong reading of the shipping app: it has two
+# FIXED SLOTS, `wp1` and `wp2`, and hides "Add stop" when both are used. Fixed
+# slots are declared state, so the constraint was never the language — it was that
+# a source's arguments are fixed at declaration, which means each combination of
+# filled slots needs its own declared source rather than one that varies.
+#
+# So the cost is visible: one slot is two route sources and two guarded branches.
+# A second slot would be a third. That is the honest price of a total form, and it
+# is why this card ships one stop rather than pretending two are free.
+state stop { shape: text, initial: "" }          # empty ⇒ a direct trip
+
 event set_origin  { origin: set($value), query: clear }
 event set_dest    { dest: set($value), query: clear }
 event choose_dest { dest: set($value), query: clear }
 event go          { screen: cycle(.plan, .drive) }
+event set_stop    { stop: set($value), query: clear }
+event drop_stop   { stop: clear, query: clear }
+event pick_mode   { mode: set($value) }
 
 copy where    { class: vocabulary, en: "Where to?" }
 copy from     { class: vocabulary, en: "FROM" }
@@ -105,6 +153,12 @@ copy seeking  { class: vocabulary, en: "Finding a route…" }
 copy start    { class: vocabulary, en: "Go" }
 copy stop     { class: vocabulary, en: "End" }
 copy left     { class: vocabulary, en: "left" }
+copy drive    { class: vocabulary, en: "Drive" }
+copy walk     { class: vocabulary, en: "Walk" }
+copy bike     { class: vocabulary, en: "Bike" }
+copy add_stop { class: vocabulary, en: "Add a stop" }
+copy via_lbl  { class: vocabulary, en: "VIA" }
+copy remove   { class: vocabulary, en: "Remove" }
 
 view root Surface {
   # ---- planning ------------------------------------------------------------
@@ -136,31 +190,80 @@ view root Surface {
       }
     }
 
-    when dest != "" {
-      # §5.9, where the original compared against -9999. "Not yet" and "failed"
-      # are different states and the card can say so.
-      when trip.$state == .pending { TextBody(text: copy.seeking) }
-      when trip.$state == .ready {
-        Row(align: .center, gap: 12) {
-          TextValue(value: trip.duration)
-          TextCaption(value: trip.distance, suffix: copy.away)
-          Chip(text: copy.start, on_tap: go)
+    # The stop row. One slot: present as a `Field` when it is set so it can be
+    # replaced, offered as a `Chip` when it is not.
+    when stop != "" {
+      Panel {
+        Row(align: .center, gap: 10) {
+          TextCaption(text: copy.via_lbl)
+          Field(text: stop, placeholder: copy.add_stop, on_commit: set_stop, width: .fill)
+          Chip(text: copy.remove, on_tap: drop_stop)
         }
       }
-      # The static route preview: no `at:`, so no camera that moves.
+    }
+
+    # How the trip is travelled. Three chips, one lit — `active:` is a predicate
+    # over declared state, which is why a chip can say which one it is without an
+    # expression.
+    Row(align: .center, gap: 8) {
+      Chip(text: copy.drive, on_tap: pick_mode, value: .drive, active: mode == .drive)
+      Chip(text: copy.walk,  on_tap: pick_mode, value: .walk,  active: mode == .walk)
+      Chip(text: copy.bike,  on_tap: pick_mode, value: .bike,  active: mode == .bike)
+      when stop == "" { Chip(text: copy.add_stop, on_tap: set_stop, value: "") }
+    }
+
+    # ---- the DIRECT trip ---------------------------------------------------
+    when dest != "" {
+      when stop == "" {
+        # §5.9, where the original compared against -9999. "Not yet" and "failed"
+        # are different states and the card can say so.
+        when trip.$state == .pending { TextBody(text: copy.seeking) }
+        when trip.$state == .ready {
+          Row(align: .center, gap: 12) {
+            TextValue(value: trip.duration)
+            TextCaption(value: trip.distance, suffix: copy.away)
+            Chip(text: copy.start, on_tap: go)
+          }
+        }
+        # The static route preview: no `at:`, so no camera that moves.
+        #
+        # This does NOT guard on having a fix. An earlier version wrapped it in
+        # `when here.ok == 1`, which is wrong in mechanism however right it sounds:
+        # a guard is evaluated at REALIZE time, before any live value exists, so
+        # `here.ok` reads nothing on a freshly generated card and the map is removed
+        # unconditionally. Measured — the model wrote a card containing `Map(`, and
+        # not one `MapView` reached the screen.
+        #
+        # A guard can only test something realization can see: declared state, or a
+        # source's `$state` (which the host injects). A live VALUE is not that. The
+        # impossible-centre case is handled where the number is actually known, in
+        # the widget.
+        Map(mode: .plan, from: origin_place, to: dest_place, zoom: 16)
+      }
+
+      # ---- the trip THROUGH the stop --------------------------------------
       #
-      # This does NOT guard on having a fix. An earlier version wrapped it in
-      # `when here.ok == 1`, which is wrong in mechanism however right it sounds:
-      # a guard is evaluated at REALIZE time, before any live value exists, so
-      # `here.ok` reads nothing on a freshly generated card and the map is removed
-      # unconditionally. Measured — the model wrote a card containing `Map(`, and
-      # not one `MapView` reached the screen.
-      #
-      # A guard can only test something realization can see: declared state, or a
-      # source's `$state` (which the host injects). A live VALUE is not that. The
-      # impossible-centre case is handled where the number is actually known, in
-      # the widget.
-      Map(mode: .plan, from: origin_place, to: dest_place, zoom: 16)
+      # A different source and a different map, because it is a different trip. The
+      # legs are beneath the total and sum to it — R6.2, and the reason two more
+      # sources exist: a leg is a trip, so it is routed like one.
+      when stop != "" {
+        when trip_via.$state == .pending { TextBody(text: copy.seeking) }
+        when trip_via.$state == .ready {
+          Row(align: .center, gap: 12) {
+            TextValue(value: trip_via.duration)
+            TextCaption(value: trip_via.distance, suffix: copy.away)
+            Chip(text: copy.start, on_tap: go)
+          }
+          Row(align: .center, gap: 8) {
+            TextCaption(value: leg_a.duration)
+            TextCaption(value: leg_a.distance)
+            TextCaption(text: copy.via_lbl)
+            TextCaption(value: leg_b.duration)
+            TextCaption(value: leg_b.distance)
+          }
+        }
+        Map(mode: .plan, from: origin_place, to: dest_place, via: stop_place, zoom: 16)
+      }
     }
   }
 
