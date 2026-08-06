@@ -6066,6 +6066,26 @@ pub mod makepad {
                 .find(|(n, _)| n == name)
                 .map(|(_, v)| v.clone())
         };
+        // An argument bound for a NUMERIC position, or nothing.
+        //
+        // A numeric slot is interpolated UNQUOTED — `sys.weather({lat}, {lon}, …)` —
+        // so whatever lands there is code. A string slot is safe by construction
+        // because `{:?}` quotes it; this is the other half.
+        //
+        // Without it, `sys.weather(lat: "1 + sys.navsecs(1)")` passed the checker as a
+        // perfectly ordinary L0 card and lowered to `sys.weather(1 + sys.navsecs(1),
+        // …)`: arithmetic and a host call the card never declared, in a language whose
+        // defining property is that it HAS no expression form. Found in review.
+        //
+        // Two things may appear here. A call this lowering generated, which is ours
+        // and is trusted; and a literal number. Anything else is a card trying to
+        // write code into a slot for a coordinate, and yields no translation at all —
+        // the same outcome as an unknown field, so the value stays seeded rather than
+        // becoming an injection site.
+        let num = |name: &str| -> Option<String> {
+            let v = arg(name)?;
+            (v.starts_with("sys.") || v.trim().parse::<f64>().is_ok()).then_some(v)
+        };
         match binding.helper.as_str() {
             "sys.quote" => {
                 let symbol = arg("ticker")?;
@@ -6122,8 +6142,8 @@ pub mod makepad {
             // The forecast. L0 names a FIELD; open-meteo wants a path, and the
             // daily ones are indexed by the row being drawn.
             "sys.weather" => {
-                let lat = arg("lat")?;
-                let lon = arg("lon")?;
+                let lat = num("lat")?;
+                let lon = num("lon")?;
                 let (row, field) = match binding.field.split_once('.') {
                     Some((i, f)) if i.parse::<u32>().is_ok() => (i, f),
                     _ => ("0", binding.field.as_str()),
@@ -6168,8 +6188,8 @@ pub mod makepad {
             // already fetches; `sys.daylight` answers only the arc progress, so
             // the three L0 fields come from two different helpers.
             "sys.daylight" => {
-                let lat = arg("lat")?;
-                let lon = arg("lon")?;
+                let lat = num("lat")?;
+                let lon = num("lon")?;
                 match binding.field.as_str() {
                     "rise" => Some(format!("sys.weather({lat}, {lon}, \"daily.sunrise.0\")")),
                     "set" => Some(format!("sys.weather({lat}, {lon}, \"daily.sunset.0\")")),
@@ -6184,8 +6204,8 @@ pub mod makepad {
                 _ => None,
             },
             "sys.airquality" => {
-                let lat = arg("lat")?;
-                let lon = arg("lon")?;
+                let lat = num("lat")?;
+                let lon = num("lon")?;
                 let path = match binding.field.as_str() {
                     "aqi" => "current.us_aqi",
                     "pm25" => "current.pm2_5",
@@ -6261,10 +6281,10 @@ pub mod makepad {
                     // scalar a call answers.
                     _ => return None,
                 };
-                let a = arg("from_lat")?;
-                let o = arg("from_lon")?;
-                let b = arg("to_lat")?;
-                let p = arg("to_lon")?;
+                let a = num("from_lat")?;
+                let o = num("from_lon")?;
+                let b = num("to_lat")?;
+                let p = num("to_lon")?;
                 // The waypoints, as the helper's sixth argument: a `lat,lon;lat,lon`
                 // string built from the coordinate calls the card listed. Emitted
                 // as CONCATENATION rather than a literal, because each coordinate
@@ -6307,12 +6327,12 @@ pub mod makepad {
                     "progress" => "progress",
                     _ => return None,
                 };
-                let a = arg("from_lat")?;
-                let o = arg("from_lon")?;
-                let b = arg("to_lat")?;
-                let p = arg("to_lon")?;
-                let at_lat = arg("at_lat")?;
-                let at_lon = arg("at_lon")?;
+                let a = num("from_lat")?;
+                let o = num("from_lon")?;
+                let b = num("to_lat")?;
+                let p = num("to_lon")?;
+                let at_lat = num("at_lat")?;
+                let at_lon = num("at_lon")?;
                 let along = format!("sys.navprog({a}, {o}, {b}, {p}, {at_lat}, {at_lon})");
                 if key == "progress" {
                     return Some(along);
@@ -6357,8 +6377,8 @@ pub mod makepad {
             "sys.places" => {
                 let (index, field) = binding.field.split_once('.')?;
                 index.parse::<u32>().ok()?;
-                let lat = arg("lat")?;
-                let lon = arg("lon")?;
+                let lat = num("lat")?;
+                let lon = num("lon")?;
                 let category = arg("category").unwrap_or_default();
                 // L0 says `distance`; the VM answers `dist`. Same translation
                 // job as `ticker`/`symbol` above.

@@ -6587,8 +6587,6 @@ fn every_offered_field_has_a_translation() {
         ("sys.quote", "pe"),
         ("sys.movers", "pe"),
         ("sys.watchlist", "pe"),
-        // The photo capability answers an image for a QUERY and has no fields.
-        ("sys.photo", ""),
         // ── a capability with NO translation at all ───────────────────────────
         // Every one of these renders an em dash today. `sys.route` is why the
         // nav card's duration and distance row is `— —`, and `sys.locale` is why
@@ -6687,6 +6685,19 @@ fn every_offered_field_has_a_translation() {
         .collect();
     let mut fresh: Vec<_> = missing.iter().filter(|p| !known.contains(p)).collect();
     fresh.sort();
+    // And the list may only SHRINK, exactly as `INERT` and `STALE` may.
+    //
+    // This assertion was missing here alone, and a review caught it: an entry whose
+    // gap has since been closed stays forever, so the list reads as 35 known holes
+    // when some number of them are already fixed. That is the direction that stops
+    // anyone acting on it — the same rot that kept `sys.route` listed as unanswered
+    // for releases after its translation was written.
+    let mut fixed: Vec<_> = known.iter().filter(|p| !missing.contains(p)).collect();
+    fixed.sort();
+    assert!(
+        fixed.is_empty(),
+        "these are answered now — delete them from UNANSWERED: {fixed:#?}"
+    );
     assert!(
         fresh.is_empty(),
         "the vocabulary offers these and no backend call answers them, so a card \
@@ -7224,4 +7235,66 @@ fn card_state_cannot_write_script_into_the_lowering() {
             "card state changed the CODE, not just a literal, for {hostile:?}"
         );
     }
+}
+
+/// A numeric argument may be a number or a call this lowering made. Nothing else.
+///
+/// A numeric slot is interpolated UNQUOTED — `sys.weather({lat}, {lon}, …)` — so
+/// whatever lands there is code. String slots are safe by construction because `{:?}`
+/// quotes them; this is the other half, and it was missing.
+///
+/// `source now sys.weather(lat: "1 + sys.navsecs(1)", …)` passed the checker as an
+/// ordinary L0 card and lowered to `sys.weather(1 + sys.navsecs(1), 2, …)`: arithmetic
+/// and a host call the card never declared, in a language whose defining property is
+/// that it has no expression form. Found in an external review of the refactoring.
+///
+/// The card is still ACCEPTED — a quoted string is a legitimate thing to write, and
+/// the profile does not type source arguments — but it translates to nothing, so the
+/// value stays seeded instead of becoming an injection site.
+#[test]
+fn a_numeric_argument_cannot_carry_an_expression() {
+    const HOSTILE: &str = concat!(
+        "source now sys.weather(lat: \"1 + sys.navsecs(1)\", lon: 2, days: 1, fields: [temp])\n",
+        "view root Surface { TextValue(value: now.temp) }\n"
+    );
+    let data = serde_json::json!({
+        "now": { "temp": 1.0 }, "env": { "locale": {} }, "copy": {}
+    });
+    let kit = splash_ui_l0::kit::lower(
+        &realize(HOSTILE, &data, RealizeLimits::default())
+            .root
+            .expect("realizes"),
+    );
+    assert!(
+        !kit.contains("navsecs"),
+        "an expression reached a numeric slot:\n{kit}"
+    );
+    assert!(
+        !kit.contains("sys.weather("),
+        "a rejected argument must yield NO translation, not a partial one:\n{kit}"
+    );
+
+    // And the honest case still lowers, or the guard would be a denial of service.
+    const GOOD: &str = concat!(
+        "source place sys.geocode(name: state.city)\n",
+        "source now sys.weather(lat: place.lat, lon: place.lon, days: 1, fields: [temp])\n",
+        "state city { shape: text, initial: \"Kyoto\" }\n",
+        "view root Surface { TextValue(value: now.temp) }\n"
+    );
+    let good = splash_ui_l0::kit::lower(
+        &realize(
+            GOOD,
+            &serde_json::json!({
+                "place": { "lat": 35.0, "lon": 135.8 }, "now": { "temp": 21.0 },
+                "city": "Kyoto", "env": { "locale": {} }, "copy": {}
+            }),
+            RealizeLimits::default(),
+        )
+        .root
+        .expect("realizes"),
+    );
+    assert!(
+        good.contains("sys.weather(sys.geocodenum("),
+        "a generated call is ours and must pass through:\n{good}"
+    );
 }
