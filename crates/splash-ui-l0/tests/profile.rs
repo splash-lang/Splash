@@ -4759,16 +4759,25 @@ fn the_nav_trip_planner_is_expressible_at_l0() {
     // screen but that most of the original was working around missing machinery —
     // a 600-line L0 card would disprove that as surely as a rejection would.
     //
-    // The bound was 100 and is 200. The card grew from 54 lines to ~130 by GAINING
-    // function, not by working around anything: a travel mode, a waypoint the route
-    // passes through, per-leg times, and turn-by-turn. Each cost declarations
-    // rather than machinery — a stop is two route sources because a source's
-    // arguments are fixed at declaration, so a trip with one is a different trip
-    // and the card says so. That is the price of a total form and it is visible,
-    // which is the point.
+    // The bound was 100, then 200, and is 260. The card grew from 54 lines by
+    // GAINING function, not by working around anything: a travel mode, a waypoint
+    // the route passes through, per-leg times, turn-by-turn, a preview screen, and
+    // an origin that defaults to the device.
     //
-    // The comparison it exists to make is unchanged: 664 lines at L2 against ~130
-    // at L0, now at close to the same function.
+    // Each cost declarations rather than machinery, and the last one cost the most:
+    // a trip that starts where you are is two more route sources, a step source and
+    // eight guarded branches, because a source's arguments are fixed at declaration
+    // (§5.4). So "from a place you named" and "from here" are different trips and
+    // the card says so in its structure. That is the price of a total form and it
+    // is visible, which is the point.
+    //
+    // RAISING THIS IS NOT FREE and it is the second raise. The bound exists to
+    // catch me widening the card until the comparison stops meaning anything, so
+    // the number to watch is the ratio, not the slack: 664 lines at L2 against 213
+    // here, at close to the same function. If a future increment needs 400, that is
+    // the signal to add machinery instead of declarations — the argument this whole
+    // exercise rests on is that the original was mostly compensation, and a card
+    // that grows like the original did would be evidence against it.
     let lines = NAV
         .lines()
         .filter(|l| {
@@ -4777,7 +4786,7 @@ fn the_nav_trip_planner_is_expressible_at_l0() {
         })
         .count();
     assert!(
-        lines < 200,
+        lines < 260,
         "the point is that it is small; this is {lines} lines"
     );
 }
@@ -7936,5 +7945,81 @@ fn the_journey_through_the_card_is_one_transition_and_never_loses_the_map() {
         seen,
         vec!["preview", "drive", "plan", "preview"],
         "one transition walks the whole journey and comes back round"
+    );
+}
+
+/// A trip that starts where you are must CAPTURE the fix, not reference it.
+///
+/// R11.3. The obvious form — `sys.route(from_lat: here.lat, …)` — is wrong in a way
+/// that renders perfectly: `here` is a source, so the route is re-fetched every time
+/// the fix changes, and `sys.step` then compares the route's start against the
+/// device's position when they are the SAME expression. Progress along the route is
+/// always zero and the banner holds the first manoeuvre for the whole drive.
+///
+/// `initial:` reads a path from the data once at realize and the store owns it
+/// after, so the start lowers to a LITERAL while the position stays a live call.
+/// That is R9.5's freeze — the L2 card's top-level `let` — said declaratively.
+///
+/// The test asserts the asymmetry directly, because both forms lower to something
+/// that looks like a working route.
+#[test]
+fn a_trip_from_here_freezes_its_start_and_not_its_position() {
+    const CARD: &str = concat!(
+        "source here sys.gps()\n",
+        "source d sys.search(query: state.dest, count: 1, fields: [id, name, lat, lon])\n",
+        "state from_lat { shape: number, initial: here.lat }\n",
+        "state from_lon { shape: number, initial: here.lon }\n",
+        "state dest { shape: text, initial: \"B\" }\n",
+        "state mode { shape: enum[drive, walk, bike], initial: .drive }\n",
+        "source step sys.step(from_lat: state.from_lat, from_lon: state.from_lon,\n",
+        "                     to_lat: d.0.lat, to_lon: d.0.lon,\n",
+        "                     at_lat: here.lat, at_lon: here.lon,\n",
+        "                     fields: [instruction, remaining])\n",
+        "view root Surface {\n",
+        "  TextBody(text: step.instruction)\n",
+        "  Map(mode: .drive, from_lat: from_lat, from_lon: from_lon, to: d, at: here,\n",
+        "      view: .tilted, zoom: 17)\n",
+        "}\n"
+    );
+    let checked = check_ui_l0_named("nav", CARD);
+    assert!(checked.valid, "{:#?}", checked.diagnostics);
+
+    let data = serde_json::json!({
+        "dest": "B", "mode": "drive",
+        "here": { "lat": 37.2656, "lon": -122.0294, "ok": 1 },
+        "d": [{ "id": "x", "name": "B", "lat": 37.4275, "lon": -122.1697 }],
+        "env": { "locale": {} }
+    });
+    let dsl = splash_ui_l0::kit::lower(
+        &realize(CARD, &data, RealizeLimits::default())
+            .root
+            .expect("realizes"),
+    );
+
+    // The START is a literal — captured, so it stays where the trip began.
+    assert!(
+        dsl.contains("37.2656") && dsl.contains("-122.0294"),
+        "the route's start must be captured, not called:\n{dsl}"
+    );
+    // FULL PRECISION. Formatted the way sizes are, 37.2656 becomes 37.3 — about
+    // 11 km at this latitude, and a route from there looks entirely plausible.
+    assert!(
+        !dsl.contains("37.3,") && !dsl.contains("(37.3"),
+        "a coordinate is not a display size:\n{dsl}"
+    );
+    // The POSITION stays live, or nothing moves as the device does.
+    assert!(
+        dsl.contains("sys.gps(\"lat\")"),
+        "the device's position must stay a live call:\n{dsl}"
+    );
+    // And the two must not be the same expression, which is the defect this
+    // guards: progress measured from yourself is always zero.
+    let prog = dsl
+        .find("sys.navprog(")
+        .map(|i| dsl[i..].chars().take(120).collect::<String>())
+        .expect("a step lowers through navprog");
+    assert!(
+        prog.starts_with("sys.navprog(37.2656"),
+        "progress must be measured from the captured start:\n{prog}"
     );
 }

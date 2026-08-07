@@ -2692,6 +2692,18 @@ pub mod catalog {
                 ("view", Token(MAP_VIEW)),
                 ("zoom", Number),
                 ("controls", Token(CONTROLS)),
+                // The start as TWO NUMBERS, when there is no place to name.
+                //
+                // `from:` names a source that answers a coordinate, which is right
+                // whenever a place was searched for. A trip that begins where the
+                // DEVICE is has no such place: the position is two captured numbers
+                // in card state. Without these the map fell back to geocoding the
+                // empty origin — `sys.navroute(sys.searchnum("", …))` — so the
+                // summary said "from here" and the line drew a route from nowhere,
+                // which is the drawn-versus-reported mismatch this profile exists to
+                // catch. Same shape and same reason as `sys.route`'s four numbers.
+                ("from_lat", ArgKind::Data),
+                ("from_lon", ArgKind::Data),
             ],
         ),
         // A text field. The ONE role that lets a card receive something the user
@@ -5971,6 +5983,23 @@ pub mod makepad {
     /// An endpoint names a SOURCE rather than coordinates, so each is asked for
     /// its own axis — `at: here` becomes `sys.gps("lat")` and `sys.gps("lon")`.
     fn map_coord(node: &UiNode, name: &str, axis: &str) -> Option<String> {
+        // An explicit `from_lat:`/`from_lon:` wins, because a card that supplied one
+        // meant it: it is naming a position no search would find. Card state resolves
+        // to a number at realize time, which is exactly what captured coordinates are.
+        let direct = format!("{name}_{axis}");
+        if let Some((_, b)) = node.bindings.iter().find(|(n, _)| *n == direct) {
+            if let Some(call) = vm_call(b) {
+                return Some(call);
+            }
+        }
+        if let Some(NodeValue::Number(n)) = arg(node, &direct) {
+            // FULL PRECISION, not `trim_num`. That formats to one decimal place,
+            // which is right for a zoom level or a gap and catastrophic for a
+            // coordinate: 37.2656 became 37.3, about 11 km at this latitude. The
+            // route drew from a place a quarter of the way to San Francisco and
+            // looked entirely plausible doing it.
+            return Some(format!("{n}"));
+        }
         let (_, binding) = node.bindings.iter().find(|(n, _)| n == name)?;
         // A collection answers `0.lat` and a scalar source answers `lat`.
         for field in [axis.to_owned(), format!("0.{axis}")] {

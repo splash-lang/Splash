@@ -63,6 +63,13 @@ zoom = { kind = "number" }
 # widget, and the imperative wiring this profile exists to exclude. "This map can be
 # zoomed" is a capability; the button, the glyph and the call are presentation.
 controls = { kind = "token", tokens = ["none", "zoom", "all"] }
+# The start as TWO NUMBERS, for a trip that begins where the device is. `from:`
+# names a source that answers a coordinate, which is right whenever a place was
+# searched for; a position captured from the fix has no such place. Without these
+# the map geocoded the empty origin — `sys.navroute(sys.searchnum("", …))` — so the
+# summary said "from here" and the line drew a route from nowhere.
+from_lat = { kind = "data" }
+from_lon = { kind = "data" }
 
 # A text field — the one role that lets a card receive something the user typed.
 #
