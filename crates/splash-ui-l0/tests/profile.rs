@@ -7530,3 +7530,65 @@ fn a_cycle_advances_from_the_state_the_card_is_showing() {
         );
     }
 }
+
+/// A map stands pins on the trip it draws, from the SAME coordinates as the line.
+///
+/// The widget draws pins from `nav_markers`, which was reachable only through
+/// `ui.<id>.set_route_markers(…)` — a method call, and a declarative backend sets
+/// properties. So the L0 card drew a correct route with no origin or destination pin
+/// at all, and `draw_nav_route_pins` returned on its first line. Nothing looked
+/// broken; the route was simply less legible than the card it replaced.
+///
+/// The pins are derived here rather than composed by the card, which is what stops
+/// them disagreeing with the line: one set of resolved endpoints feeds both.
+#[test]
+fn a_map_pins_the_trip_it_draws() {
+    const CARD: &str = concat!(
+        "source o sys.search(query: state.origin, count: 1, fields: [id, name, lat, lon])\n",
+        "source d sys.search(query: state.dest, count: 1, fields: [id, name, lat, lon])\n",
+        "source s sys.search(query: state.stop, count: 1, fields: [id, name, lat, lon])\n",
+        "state origin { shape: text, initial: \"A\" }\n",
+        "state dest   { shape: text, initial: \"B\" }\n",
+        "state stop   { shape: text, initial: \"\" }\n",
+        "view root Surface {\n",
+        "  when stop == \"\" { Map(mode: .plan, from: o, to: d) }\n",
+        "  when stop != \"\" { Map(mode: .plan, from: o, to: d, via: s) }\n",
+        "}\n"
+    );
+    let checked = check_ui_l0_named("nav", CARD);
+    assert!(checked.valid, "{:#?}", checked.diagnostics);
+
+    let lower = |stop: &str| {
+        let data = serde_json::json!({
+            "origin": "A", "dest": "B", "stop": stop,
+            "o": [{ "lat": 1.0, "lon": 2.0 }], "d": [{ "lat": 3.0, "lon": 4.0 }],
+            "s": [{ "lat": 5.0, "lon": 6.0 }], "env": { "locale": {} }
+        });
+        splash_ui_l0::kit::lower(
+            &realize(CARD, &data, RealizeLimits::default())
+                .root
+                .expect("realizes"),
+        )
+    };
+
+    // Direct: origin (kind 0) and destination (kind 2), and no stop pin to place.
+    let direct = lower("");
+    assert!(
+        direct.contains("\",0\"") && direct.contains("\",2\""),
+        "a direct trip pins both ends:\n{direct}"
+    );
+    assert!(
+        !direct.contains("\",1\""),
+        "and has no stop to pin:\n{direct}"
+    );
+
+    // Through a stop: a third pin, and it must be the SAME place the route detours
+    // through — so the pin's coordinates also appear in the polyline's vias.
+    let via = lower("C");
+    assert!(via.contains("\",1\""), "a stop is pinned:\n{via}");
+    let stop_lat = "sys.searchnum(\"C\", 0, \"lat\")";
+    assert!(
+        via.matches(stop_lat).count() >= 2,
+        "the pinned stop must be the one the line detours through:\n{via}"
+    );
+}

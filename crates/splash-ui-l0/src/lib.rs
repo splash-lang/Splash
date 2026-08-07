@@ -6042,6 +6042,30 @@ pub mod makepad {
     /// the separators are concatenated around them at evaluation time. The leading
     /// `""` is what makes the first `+` a string concatenation rather than an
     /// addition of two numbers — without it a stop at 37,-122 became -85.
+    /// The PINS a map stands on the route it draws: origin, each stop, destination.
+    ///
+    /// Built from the same coordinates as the polyline, and that is the point. The
+    /// L2 card composed this string by hand and pushed it with
+    /// `ui.<id>.set_route_markers(mk)`; deriving it here from the SAME resolved
+    /// endpoints means the pins cannot land somewhere the line does not go.
+    ///
+    /// `None` when there is no complete trip — a lone origin pin on a map with no
+    /// route reads as a dropped destination rather than a route still arriving.
+    pub(super) fn map_pins(node: &UiNode) -> Option<String> {
+        let coord = |name: &str, axis: &str| map_coord(node, name, axis);
+        let (a, o) = (coord("from", "lat")?, coord("from", "lon")?);
+        let (b, p) = (coord("to", "lat")?, coord("to", "lon")?);
+        // kind 0 origin, 1 a stop, 2 the destination — the widget's own encoding.
+        let mut out = format!("\"\" + {a} + \",\" + {o} + \",0\"");
+        // The same resolution the polyline's waypoints use, so a stop that routes
+        // through gets a pin and one that does not, does not.
+        if let (Some(vlat), Some(vlon)) = (coord("via", "lat"), coord("via", "lon")) {
+            let _ = write!(out, " + \";\" + {vlat} + \",\" + {vlon} + \",1\"");
+        }
+        let _ = write!(out, " + \";\" + {b} + \",\" + {p} + \",2\"");
+        Some(out)
+    }
+
     pub(super) fn via_string(joined: &str) -> Option<String> {
         let parts: Vec<&str> = joined.split('\u{1}').filter(|p| !p.is_empty()).collect();
         if parts.len() < 2 || !parts.len().is_multiple_of(2) {
@@ -9104,9 +9128,13 @@ pub mod kit {
                 // constant expression. See `update_nav_camera`.
                 let _ = write!(
                     out,
-                    "{f}({:?}, {}, {lat}, {lon}, {poly})",
+                    "{f}({:?}, {}, {lat}, {lon}, {poly}, {})",
                     makepad::map_mode(node),
                     scalar_of(node, "zoom"),
+                    // The pins. `""` rather than omitted, because the widget reads
+                    // an empty marker string as "no pins" and that is exactly what a
+                    // map with no complete trip has.
+                    makepad::map_pins(node).unwrap_or_else(|| "\"\"".to_owned()),
                 );
             }
             // `cond` is a NUMBER — the WMO code the forecast returns — and this
