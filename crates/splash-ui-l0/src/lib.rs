@@ -2719,6 +2719,12 @@ pub mod catalog {
                 ("text", Path),
                 ("placeholder", ArgKind::Data),
                 ("on_commit", Event),
+                // Per KEYSTROKE, where `on_commit` is per return. A search box wants
+                // both: results while you type, a destination when you commit. The
+                // cost is a card re-resolve per character — measured at 18-19 ms on
+                // the planning screen of a OnePlus 6, which is what makes this
+                // expressible rather than merely declarable.
+                ("on_change", Event),
                 ("width", TokenOrPath(WIDTH)),
             ],
         ),
@@ -8876,7 +8882,13 @@ pub mod kit {
     /// the target is assembled at that moment from the value the backend hands
     /// back. `$$` is the placeholder the backend substitutes.
     fn commit_target(node: &UiNode) -> Option<String> {
-        let Some(NodeValue::Event(event)) = arg(node, "on_commit") else {
+        field_target(node, "on_commit")
+    }
+
+    /// A field's target for one of its two moments. `$$` is where the typed text
+    /// goes, assembled at the moment rather than baked at lowering time.
+    fn field_target(node: &UiNode, arg_name: &str) -> Option<String> {
+        let Some(NodeValue::Event(event)) = arg(node, arg_name) else {
             return None;
         };
         let json = serde_json::json!({ "e": event, "k": node.key, "v": "$$" });
@@ -8909,10 +8921,11 @@ pub mod kit {
         if node.kind == "Field" {
             let _ = write!(
                 out,
-                "l0_field({}, {}, {:?})",
+                "l0_field({}, {}, {:?}, {:?})",
                 makepad::expr_of(node, "text"),
                 makepad::expr_of(node, "placeholder"),
-                commit_target(node).unwrap_or_default()
+                commit_target(node).unwrap_or_default(),
+                field_target(node, "on_change").unwrap_or_default()
             );
             return;
         }

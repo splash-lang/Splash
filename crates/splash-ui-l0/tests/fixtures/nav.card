@@ -162,6 +162,10 @@ event set_origin  { origin: set($value), query: clear }
 # (so the route draws to the best match immediately) and it is the query (so the
 # alternatives are listed underneath, and one tap refines the choice).
 event set_dest    { dest: set($value), query: set($value) }
+# What is being typed, per keystroke. Separate from `set_dest` because the two mean
+# different things: a query is a question and a destination is an answer, and until
+# you commit, only the question exists.
+event typing      { query: set($value) }
 event choose_dest { dest: set($value), query: clear }
 # ONE event for the whole journey through the card, because `cycle` names an order
 # and the order IS the flow: plan → preview → drive → plan. Three chips on three
@@ -204,7 +208,8 @@ view root Surface {
       Rule()
       Row(align: .center, gap: 10) {
         TextCaption(text: copy.to)
-        Field(text: dest, placeholder: copy.where, on_commit: set_dest, width: .fill)
+        Field(text: dest, placeholder: copy.where, on_commit: set_dest,
+              on_change: typing, width: .fill)
       }
     }
 

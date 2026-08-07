@@ -8032,3 +8032,56 @@ fn a_trip_from_here_freezes_its_start_and_not_its_position() {
         "progress must be measured from the captured start:\n{prog}"
     );
 }
+
+/// A field has TWO moments, and they mean different things.
+///
+/// `on_commit` is the return key: this is my destination. `on_change` is every
+/// keystroke: this is what I am asking about. A search box needs both — results
+/// while you type, a trip when you commit — and collapsing them loses one or the
+/// other: commit-only means no results until you press return, change-only means
+/// every character sets a destination and routes to it.
+///
+/// The test checks they stay SEPARATE and that a field asking for neither gets
+/// neither, because an unasked-for keystroke event is a fetch per character.
+#[test]
+fn a_field_can_answer_a_keystroke_and_a_commit_differently() {
+    const CARD: &str = concat!(
+        "state dest  { shape: text, initial: \"\" }\n",
+        "state query { shape: text, initial: \"\" }\n",
+        "event set_dest { dest: set($value), query: set($value) }\n",
+        "event typing   { query: set($value) }\n",
+        "copy to { class: vocabulary, en: \"TO\" }\n",
+        "view root Surface {\n",
+        "  Field(text: dest, placeholder: copy.to, on_commit: set_dest, on_change: typing, width: .fill)\n",
+        "  Field(text: query, placeholder: copy.to, on_commit: set_dest, width: .fill)\n",
+        "}\n"
+    );
+    let checked = check_ui_l0_named("nav", CARD);
+    assert!(checked.valid, "{:#?}", checked.diagnostics);
+
+    let data = serde_json::json!({
+        "dest": "", "query": "", "env": { "locale": {} }, "copy": { "to": "TO" }
+    });
+    let dsl = splash_ui_l0::kit::lower(
+        &realize(CARD, &data, RealizeLimits::default())
+            .root
+            .expect("realizes"),
+    );
+    let fields: Vec<&str> = dsl.lines().filter(|l| l.contains("l0_field(")).collect();
+    let joined = fields.join("\n");
+    // The first field carries BOTH, and they are different events.
+    assert!(
+        joined.contains("\\\"e\\\":\\\"typing\\\"") && joined.contains("\\\"e\\\":\\\"set_dest\\\""),
+        "a field may answer both moments:\n{joined}"
+    );
+    // The second asked for no keystroke event and must not have acquired one: a
+    // change target it never declared is a search on every character.
+    let second = fields
+        .iter()
+        .find(|l| !l.contains("typing"))
+        .unwrap_or_else(|| panic!("a field with no on_change:\n{joined}"));
+    assert!(
+        second.ends_with("\"\")") || second.contains(", \"\")"),
+        "a field that asked for no keystroke event gets none:\n{second}"
+    );
+}

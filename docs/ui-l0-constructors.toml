@@ -82,6 +82,9 @@ from_lon = { kind = "data" }
 text        = { kind = "path" }
 placeholder = { kind = "data" }
 on_commit   = { kind = "event" }
+# Per KEYSTROKE, where on_commit is per return — results while you type. Costs a
+# card re-resolve per character: 18-19 ms on a OnePlus 6 planning screen.
+on_change   = { kind = "event" }
 width       = { kind = "width" }
 
 # Where a panel sits when the card is a MAP.
