@@ -4769,11 +4769,14 @@ fn the_nav_trip_planner_is_expressible_at_l0() {
     // trip and the card says so. That is the price of a total form and it is
     // visible, which is the point.
     //
-    // It went to 260, then 230, for an origin that defaults to the device (R11.3),
-    // and both times the feature came back out. The bound goes with it: one left
-    // high after its feature is removed measures nothing.
+    // It is 230, for an origin that defaults to the device (R11.3): two route
+    // sources, a step source and eight guarded branches, because a source arguments
+    // are fixed at declaration and "from a place you named" is a different trip from
+    // "from here". It went to 260 and back to 200 twice before that, for the same
+    // feature written two ways that could not work — the bound follows the feature,
+    // or it measures nothing.
     //
-    // The comparison it exists to make: 664 lines at L2 against 162 here, at close
+    // The comparison it exists to make: 664 lines at L2 against 217 here, at close
     // to the same function. If an increment ever needs 400, that is the signal to add
     // machinery instead of declarations — this whole exercise rests on the original
     // being mostly compensation, and a card that grew like the original did would be
@@ -4786,7 +4789,7 @@ fn the_nav_trip_planner_is_expressible_at_l0() {
         })
         .count();
     assert!(
-        lines < 200,
+        lines < 230,
         "the point is that it is small; this is {lines} lines"
     );
 }
@@ -8168,4 +8171,71 @@ fn a_map_routes_through_both_of_its_stops() {
     // And both are PINNED, or the map marks one stop on a line through two.
     let pins = dsl.matches("\",1\"").count();
     assert_eq!(pins, 2, "both stops are pinned:\n{dsl}");
+}
+
+/// An `initial:` from a SOURCE is a capture, and the realizer says so.
+///
+/// The difference between an initial value and a value that follows its source is
+/// whether anyone writes it down. Left in the data it re-resolves on every
+/// realization: an origin declared as "where I am" then chases the device, and a
+/// route from it is re-fetched before it can answer — measured, three times, in
+/// three different disguises.
+///
+/// So realization REPORTS what it took from a source, and a host writes it once. The
+/// realizer owns the precedence; only the host owns the store. This asserts the
+/// report, which is the part the profile is responsible for.
+#[test]
+fn an_initial_taken_from_a_source_is_reported_as_captured() {
+    const CARD: &str = concat!(
+        "source here sys.gps()\n",
+        "state from_lat { shape: number, initial: here.lat }\n",
+        "state mode { shape: enum[drive, walk, bike], initial: .drive }\n",
+        "copy m { class: vocabulary, en: \"m\" }\n",
+        "view root Surface {\n",
+        "  TextValue(value: from_lat)\n",
+        "  TextCaption(text: copy.m)\n",
+        "}\n"
+    );
+    let checked = check_ui_l0_named("nav", CARD);
+    assert!(checked.valid, "{:#?}", checked.diagnostics);
+
+    // A source that has answered: the value is taken, and reported.
+    let data = serde_json::json!({
+        "here": { "lat": 37.2656, "lon": -122.0294, "ok": 1 },
+        "env": { "locale": {} }, "copy": { "m": "m" }
+    });
+    let report = realize(CARD, &data, RealizeLimits::default());
+    assert_eq!(
+        report.captured,
+        vec![("from_lat".to_string(), serde_json::json!(37.2656))],
+        "a value taken from a source must be reported for the host to freeze"
+    );
+    // A literal initial is NOT a capture — there is nothing to freeze, and reporting
+    // it would have the host write a cell the card can never change.
+    assert!(
+        !report.captured.iter().any(|(p, _)| p == "mode"),
+        "a literal initial needs no capturing: {:?}",
+        report.captured
+    );
+
+    // A source that has NOT answered: nothing to capture, and the state falls to its
+    // shape default rather than freezing an absence.
+    let empty = serde_json::json!({ "env": { "locale": {} }, "copy": { "m": "m" } });
+    assert!(
+        realize(CARD, &empty, RealizeLimits::default())
+            .captured
+            .is_empty(),
+        "a source with no answer captures nothing"
+    );
+
+    // And once the store HOLDS it, the capture does not repeat — that is what makes
+    // it a capture rather than a re-read.
+    let mut store = splash_ui_l0::InstanceStore::default();
+    store.set_cell(splash_ui_l0::CARD_STATE_KEY, "from_lat", serde_json::json!(1.5));
+    let held = splash_ui_l0::realize_with_state(CARD, &data, &store, RealizeLimits::default());
+    assert!(
+        held.captured.is_empty(),
+        "a stored value is already captured: {:?}",
+        held.captured
+    );
 }

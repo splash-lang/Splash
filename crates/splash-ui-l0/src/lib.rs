@@ -4876,6 +4876,20 @@ pub struct RealizeReport {
     /// Nodes carried over from a previous tree by [`realize_patch`] rather than
     /// rebuilt. Zero for a full realization.
     pub reused: usize,
+    /// Card state whose value came from a declared `initial: <source path>` this
+    /// realization — the first answer a source gave for it.
+    ///
+    /// A HOST should write these into the store, and that write is what makes the
+    /// capture a capture. Left unwritten, an `initial:` re-resolves on every
+    /// realization and the state follows its source: an origin declared as "where I
+    /// am" then chases the device, and a route declared from it is re-fetched before
+    /// it can answer. Written once, the state holds the value the source had when it
+    /// first had one — which is what "where I was when I started" means, and what
+    /// R9.5's `let` does by freezing at build without being able to wait for data.
+    ///
+    /// Only what an `initial_path` produced. A literal initial needs no capturing and
+    /// a value already in the store is already captured.
+    pub captured: Vec<(String, serde_json::Value)>,
 }
 
 /// Realize a card against resolved data.
@@ -4905,6 +4919,7 @@ fn realize_inner(
             truncated: false,
             live_keys: Vec::new(),
             reused: 0,
+            captured: Vec::new(),
         };
     }
 
@@ -4918,6 +4933,7 @@ fn realize_inner(
                 truncated: false,
                 live_keys: Vec::new(),
                 reused: 0,
+                captured: Vec::new(),
             }
         }
     };
@@ -4932,6 +4948,7 @@ fn realize_inner(
             truncated: false,
             live_keys: Vec::new(),
             reused: 0,
+            captured: Vec::new(),
         };
     };
 
@@ -4951,14 +4968,28 @@ fn realize_inner(
     // would apply and be invisible at the next realization — and a guard on a
     // state with no value at all would take the wrong branch on first render.
     let mut frames: Vec<Frame> = Vec::new();
+    let mut captured: Vec<(String, serde_json::Value)> = Vec::new();
     for state in &card.states {
-        let value = store
+        let stored = store
             .and_then(|s| s.get(CARD_STATE_KEY, &state.path))
             .cloned()
             .or_else(|| data.get(&state.path).cloned())
-            .or_else(|| state.initial.clone())
-            .or_else(|| state.initial_path.as_ref().and_then(|p| data_path(data, p)))
-            .unwrap_or_else(|| initial_for(&state.shape));
+            .or_else(|| state.initial.clone());
+        let value = match stored {
+            Some(v) => v,
+            None => {
+                // From a SOURCE, so it is a capture: report it, and the host writes
+                // it once. Until that write this re-resolves every realization, and
+                // a state that follows its source is not an initial value.
+                match state.initial_path.as_ref().and_then(|p| data_path(data, p)) {
+                    Some(v) => {
+                        captured.push((state.path.clone(), v.clone()));
+                        v
+                    }
+                    None => initial_for(&state.shape),
+                }
+            }
+        };
         frames.push((state.path.clone(), value, None));
     }
     let mut scope = ValueScope {
@@ -4979,6 +5010,7 @@ fn realize_inner(
         nodes,
         truncated,
         live_keys,
+        captured,
     }
 }
 
@@ -7552,6 +7584,13 @@ pub struct InstanceStore {
 impl InstanceStore {
     pub fn get(&self, key: &str, field: &str) -> Option<&serde_json::Value> {
         self.cells.get(key)?.get(field)
+    }
+
+    /// Write a cell. Public because a HOST owns when a captured initial becomes
+    /// durable — see `RealizeReport::captured`. The realizer decides what was
+    /// captured; only the host can decide it is now the state's value.
+    pub fn set_cell(&mut self, key: &str, field: &str, value: serde_json::Value) {
+        self.set(key, field, value);
     }
 
     fn set(&mut self, key: &str, field: &str, value: serde_json::Value) {
