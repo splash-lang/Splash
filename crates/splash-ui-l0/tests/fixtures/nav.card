@@ -504,11 +504,11 @@ view root Surface {
     # widget, which has both the fix and the route and can tell -9999 from a place.
     when origin != "" {
       Map(mode: .drive, from: origin_place, to: dest_place, at: here,
-          view: .tilted, zoom: 17)
+          view: .tilted, zoom: 15)
     }
     when origin == "" {
       Map(mode: .drive, from_lat: from_lat, from_lon: from_lon, to: dest_place,
-          at: here, view: .tilted, zoom: 17)
+          at: here, view: .tilted, zoom: 15)
     }
   }
 }
