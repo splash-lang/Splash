@@ -149,6 +149,15 @@ state screen { shape: enum[plan, preview, drive], initial: .plan }
 # lit chip, which is this profile's whole defect class wearing a travel mode.
 state mode { shape: enum[drive, walk, bike], initial: .drive }
 
+# FLAT or TILTED while driving — R8.3's on-map toggle, as declared state.
+#
+# The card this replaces wires a button to a widget method and swaps `nav_mode`
+# imperatively. Here the camera is a `view:` the card STATES, so the toggle is a
+# state and a guard. The cost is visible and it is the honest one: this state
+# multiplies with `origin`, so the drive screen carries four `Map`s where it carried
+# two, and exactly one is ever on screen.
+state view { shape: enum[tilted, flat], initial: .tilted }
+
 # ONE stop, not an unbounded list, and the difference is the whole reason this is
 # expressible at L0.
 #
@@ -204,6 +213,7 @@ event go          { screen: cycle(.plan, .preview, .drive) }
 event set_stop    { stop: set($value), query: clear }
 event drop_stop   { stop: clear, query: clear }
 event pick_mode   { mode: set($value) }
+event flip_view   { view: cycle(.tilted, .flat) }
 
 copy where    { class: vocabulary, en: "Where to?" }
 copy from     { class: vocabulary, en: "FROM" }
@@ -221,6 +231,8 @@ copy bike     { class: vocabulary, en: "Bike" }
 copy add_stop { class: vocabulary, en: "Add a stop" }
 copy via_lbl  { class: vocabulary, en: "VIA" }
 copy remove   { class: vocabulary, en: "Remove" }
+copy flat_lbl { class: vocabulary, en: "2D" }
+copy tilt_lbl { class: vocabulary, en: "3D" }
 
 view root Surface {
   # ---- planning ------------------------------------------------------------
@@ -456,6 +468,10 @@ view root Surface {
       # reads at a glance, truncated. `TextBody` is the role that wraps.
       when origin != "" { TextBody(text: step.instruction, width: .fill) }
       when origin == "" { TextBody(text: step_here.instruction, width: .fill) }
+      # The toggle names the view it would switch TO, which is what the button on
+      # the card being replaced is labelled.
+      when view == .tilted { Chip(text: copy.flat_lbl, on_tap: flip_view) }
+      when view == .flat   { Chip(text: copy.tilt_lbl, on_tap: flip_view) }
     }
 
     # The summary sheet, docked to the bottom and SWIPEABLE — the shipping app's
@@ -502,13 +518,16 @@ view root Surface {
     #
     # The impossible centre is handled where the number is actually known — in the
     # widget, which has both the fix and the route and can tell -9999 from a place.
+    # `view: view` — the STATE, not a token. A camera the card states is a camera a
+    # card can let the user choose, so R8.3's toggle costs a state and two chips
+    # rather than a whole `Map` per branch it would otherwise multiply with.
     when origin != "" {
       Map(mode: .drive, from: origin_place, to: dest_place, at: here,
-          view: .tilted, zoom: 15)
+          view: view, zoom: 15)
     }
     when origin == "" {
       Map(mode: .drive, from_lat: from_lat, from_lon: from_lon, to: dest_place,
-          at: here, view: .tilted, zoom: 15)
+          at: here, view: view, zoom: 15)
     }
   }
 }

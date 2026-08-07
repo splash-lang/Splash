@@ -2696,7 +2696,13 @@ pub mod catalog {
                 // view. Only meaningful with `at:`: a preview has no camera to
                 // tilt, and a tilted camera with no position to follow is the
                 // fabrication `map_mode` refuses.
-                ("view", Token(MAP_VIEW)),
+                // A TOKEN OR A PATH, like `unit` and `width`. `view: .tilted` is
+                // fixed; `view: view` follows card state, which is what makes an
+                // on-map 2D/3D toggle a state and a guard instead of two whole
+                // `Map` declarations per branch it multiplies with. Realization
+                // resolves the path to a token before the lowering reads it, so
+                // nothing downstream changes.
+                ("view", TokenOrPath(MAP_VIEW)),
                 ("zoom", Number),
                 ("controls", Token(CONTROLS)),
                 // The start as TWO NUMBERS, when there is no place to name.

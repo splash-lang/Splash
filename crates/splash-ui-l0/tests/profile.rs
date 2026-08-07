@@ -2559,6 +2559,7 @@ fn every_constructor_argument_agrees_with_the_toml() {
             ("unit", TokenOrPath(set)) => *set == catalog::UNIT,
             ("format", Token(set)) => *set == catalog::FORMAT,
             ("width", TokenOrPath(set)) => *set == catalog::WIDTH,
+            ("mapview", TokenOrPath(set)) => *set == catalog::MAP_VIEW,
             _ => false,
         }
     };
