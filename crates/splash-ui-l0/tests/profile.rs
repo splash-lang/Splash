@@ -4777,7 +4777,7 @@ fn the_nav_trip_planner_is_expressible_at_l0() {
     // feature written two ways that could not work — the bound follows the feature,
     // or it measures nothing.
     //
-    // The comparison it exists to make: 664 lines at L2 against 217 here, at close
+    // The comparison it exists to make: 664 lines at L2 against 242 here, at close
     // to the same function. If an increment ever needs 400, that is the signal to add
     // machinery instead of declarations — this whole exercise rests on the original
     // being mostly compensation, and a card that grew like the original did would be
@@ -4790,7 +4790,7 @@ fn the_nav_trip_planner_is_expressible_at_l0() {
         })
         .count();
     assert!(
-        lines < 230,
+        lines < 250,
         "the point is that it is small; this is {lines} lines"
     );
 }
@@ -6762,18 +6762,34 @@ fn the_nav_card_routes_between_two_editable_places() {
         .expect("realizes");
     let kit = splash_ui_l0::kit::lower(&root);
 
-    // THREE fields, always: origin, destination and the stop. None behind a branch
-    // that never fires.
+    // TWO fields on the resting sheet — origin and destination — and a THIRD when
+    // the stop row is asked for. An always-visible "Add a stop" cost a whole row of a
+    // sheet that sits over a map, to say something most trips never need.
     //
-    // The stop was a `Chip(..., value: "")` and a review found it could never work —
-    // an empty value becomes no payload, so the transition wrote nothing and the
-    // control was incapable of adding a stop. It looked right, and the trip THROUGH a
-    // stop had been verified by seeding the state, which proves the routing and never
-    // touches the control. A field is how text enters an L0 card.
+    // Both halves, because the risk in hiding a control is that it hides for good.
+    // The stop was once a `Chip(..., value: "")` that a review found could never
+    // work — an empty value becomes no payload, so the transition wrote nothing and
+    // the control was incapable of adding a stop while looking right. A field is how
+    // text enters an L0 card; this asserts the field is REACHABLE, not merely
+    // declared.
     assert_eq!(
         kit.matches("l0_field(").count(),
+        2,
+        "an origin and a destination, editable and always on screen:\n{kit}"
+    );
+    let opened = {
+        let mut store = splash_ui_l0::InstanceStore::default();
+        splash_ui_l0::dispatch_reporting(NAV, &mut store, "root", "add_stop", None, &data);
+        splash_ui_l0::kit::lower(
+            &splash_ui_l0::realize_with_state(NAV, &data, &store, RealizeLimits::default())
+                .root
+                .expect("realizes"),
+        )
+    };
+    assert_eq!(
+        opened.matches("l0_field(").count(),
         3,
-        "an origin, a destination and a stop, each editable:\n{kit}"
+        "and a stop, one tap away:\n{opened}"
     );
     // The trip's facts, live, from the coordinates of the places that were found.
     assert!(

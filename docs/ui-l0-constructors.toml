@@ -202,7 +202,7 @@ active = { kind = "bool" }        # a predicate is a bool operand
 # What the action MEANS, not what it looks like. `.danger` is the one that ends
 # something — the theme decides that reads red and full-width, because a card that
 # named a colour would be stating presentation, which §4 keeps out of the ledger.
-tone   = { kind = "token", tokens = ["normal", "danger"] }
+tone   = { kind = "token", tokens = ["normal", "primary", "danger"] }
 
 # ─── data-visualisation roles ─────────────────────────────────────────────────
 # Every argument is a path. These render live data and hold no authored values —

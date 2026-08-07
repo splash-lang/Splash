@@ -186,6 +186,11 @@ state view { shape: enum[tilted, flat], initial: .tilted }
 # gap and not a claim of parity.
 state stop { shape: text, initial: "" }          # empty ⇒ a direct trip
 
+# WHETHER the stop row is on screen. An always-visible "Add a stop" field cost a
+# whole row of the sheet to say something most trips never need; the `+` beside `Go`
+# says it in an icon's worth of space and this is what it opens.
+state stop_row { shape: enum[hidden, shown], initial: .hidden }
+
 event set_origin  { origin: set($value), query: clear }
 # `query` is SET, not cleared — this is the line that made search reachable.
 #
@@ -211,7 +216,8 @@ event choose_dest { dest: set($value), query: clear }
 # which screen follows which.
 event go          { screen: cycle(.plan, .preview, .drive) }
 event set_stop    { stop: set($value), query: clear }
-event drop_stop   { stop: clear, query: clear }
+event drop_stop   { stop: clear, query: clear, stop_row: set(.hidden) }
+event add_stop    { stop_row: set(.shown) }
 event pick_mode   { mode: set($value) }
 event flip_view   { view: cycle(.tilted, .flat) }
 
@@ -233,6 +239,8 @@ copy via_lbl  { class: vocabulary, en: "VIA" }
 copy remove   { class: vocabulary, en: "Remove" }
 copy flat_lbl { class: vocabulary, en: "2D" }
 copy tilt_lbl { class: vocabulary, en: "3D" }
+copy plus     { class: vocabulary, en: "+" }
+copy onward   { class: vocabulary, en: "»" }
 
 view root Surface {
   # ---- planning ------------------------------------------------------------
@@ -315,21 +323,32 @@ view root Surface {
     #
     # A `Field` is how text enters an L0 card. There is nothing for a chip to do
     # here that the field does not do better.
-    Panel {
-      Row(align: .center, gap: 10) {
-        TextCaption(text: copy.via_lbl, width: .label)
-        Field(text: stop, placeholder: copy.add_stop, on_commit: set_stop, width: .fill)
-        when stop != "" { Chip(text: copy.remove, on_tap: drop_stop) }
+    when stop_row == .shown {
+      Panel {
+        Row(align: .center, gap: 10) {
+          TextCaption(text: copy.via_lbl, width: .label)
+          Field(text: stop, placeholder: copy.add_stop, on_commit: set_stop, width: .fill)
+          Chip(text: copy.remove, on_tap: drop_stop)
+        }
       }
     }
 
     # How the trip is travelled. Three chips, one lit — `active:` is a predicate
     # over declared state, which is why a chip can say which one it is without an
     # expression.
-    Row(align: .center, gap: 8) {
-      Chip(text: copy.drive, on_tap: pick_mode, value: .drive, active: mode == .drive)
-      Chip(text: copy.walk,  on_tap: pick_mode, value: .walk,  active: mode == .walk)
-      Chip(text: copy.bike,  on_tap: pick_mode, value: .bike,  active: mode == .bike)
+    # CENTRED. `align:` on a row is its CROSS axis — the one the flow does not
+    # already decide — so centring three chips along the row means centring the row
+    # inside a column, whose cross axis is the horizontal one.
+    Col(align: .center) {
+      # `width: .fit` is what makes the centring mean anything: a row that FILLS
+      # already spans the sheet, so centring it moves nothing and its chips stay
+      # against the left edge. Hugging its content gives the column something to
+      # centre.
+      Row(align: .center, gap: 8, width: .fit) {
+        Chip(text: copy.drive, on_tap: pick_mode, value: .drive, active: mode == .drive)
+        Chip(text: copy.walk,  on_tap: pick_mode, value: .walk,  active: mode == .walk)
+        Chip(text: copy.bike,  on_tap: pick_mode, value: .bike,  active: mode == .bike)
+      }
     }
 
     # ---- the DIRECT trip ---------------------------------------------------
@@ -342,20 +361,32 @@ view root Surface {
         when origin != "" {
           when trip.$state == .pending { TextBody(text: copy.seeking) }
           when trip.$state == .ready {
-            Row(align: .center, gap: 12) {
-              TextValue(value: trip.duration)
-              TextCaption(value: trip.distance, suffix: copy.away)
-              Chip(text: copy.start, on_tap: go)
+            Col(align: .center) {
+              Row(align: .center, gap: 12, width: .fit) {
+                TextValue(value: trip.duration)
+                TextCaption(value: trip.distance, suffix: copy.away)
+              }
+              # The two things you can DO, as icons: add a stop, or set off.
+              Row(align: .center, gap: 8, width: .fit) {
+                Chip(text: copy.plus, on_tap: add_stop, tone: .primary)
+                Chip(text: copy.onward, on_tap: go, tone: .primary)
+              }
             }
           }
         }
         when origin == "" {
           when trip_here.$state == .pending { TextBody(text: copy.seeking) }
           when trip_here.$state == .ready {
-            Row(align: .center, gap: 12) {
-              TextValue(value: trip_here.duration)
-              TextCaption(value: trip_here.distance, suffix: copy.away)
-              Chip(text: copy.start, on_tap: go)
+            Col(align: .center) {
+              Row(align: .center, gap: 12, width: .fit) {
+                TextValue(value: trip_here.duration)
+                TextCaption(value: trip_here.distance, suffix: copy.away)
+              }
+              # The two things you can DO, as icons: add a stop, or set off.
+              Row(align: .center, gap: 8, width: .fit) {
+                Chip(text: copy.plus, on_tap: add_stop, tone: .primary)
+                Chip(text: copy.onward, on_tap: go, tone: .primary)
+              }
             }
           }
         }

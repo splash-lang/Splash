@@ -2654,7 +2654,9 @@ pub mod catalog {
     /// method call are all presentation.
     pub const CONTROLS: &[&str] = &["none", "zoom", "all"];
     /// What an action means. The theme decides what that looks like.
-    pub const TONE: &[&str] = &["normal", "danger"];
+    /// `primary` is the action a screen is FOR — the one thing you came to do. The
+    /// theme draws it larger; the card only says which action it is.
+    pub const TONE: &[&str] = &["normal", "primary", "danger"];
     pub const ALIGN: &[&str] = &["start", "center", "end", "baseline"];
     pub const PAD: &[&str] = &["page", "tight", "none"];
     pub const ICON_SIZE: &[&str] = &["hero", "row", "tile"];
@@ -9148,6 +9150,12 @@ pub mod kit {
                     }
                     out.push(']');
                 }
+                // Whether anything is DOCKED at the top. The theme cannot ask a list
+                // its length, and a band drawn for an empty one is a dark pill
+                // floating over the map saying nothing — which is what every
+                // planning screen had.
+                let has_top = node.children.iter().any(|c| docked_top(&c));
+                let _ = write!(out, ", {}", u8::from(has_top));
                 out.push(')');
             }
             "Surface" => {
@@ -9230,6 +9238,13 @@ pub mod kit {
                 // the thing.
                 if matches!(arg(node, "tone"), Some(NodeValue::Token(t)) if t == "danger") {
                     let _ = write!(out, "l0_chip_danger({})", makepad::expr_of(node, "text"));
+                } else if matches!(arg(node, "tone"), Some(NodeValue::Token(t)) if t == "primary")
+                {
+                    // The same reasoning as `.danger`: a primary action is bigger
+                    // type AND a rounder target AND a lit fill, and threading three
+                    // presentation decisions through a flag reads worse than naming
+                    // the thing the theme is being asked for.
+                    let _ = write!(out, "l0_chip_primary({})", makepad::expr_of(node, "text"));
                 } else {
                     let on = i32::from(matches!(arg(node, "active"), Some(NodeValue::Bool(true))));
                     let _ = write!(out, "{f}({}, {on})", makepad::expr_of(node, "text"));
