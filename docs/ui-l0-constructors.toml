@@ -45,6 +45,11 @@ mode = { kind = "token", tokens = ["plan", "drive", "flat"] }
 from = { kind = "path" }
 to   = { kind = "path" }
 via  = { kind = "path" }
+# A SECOND fixed slot. Not a list: role arguments route through the expression
+# grammar, so admitting one there is a change to the whole grammar for one argument.
+# The app being replaced has exactly two waypoint slots and hides "add stop" when
+# both are full.
+via2 = { kind = "path" }
 # The live position the camera follows — a source answering `lat`/`lon`, in
 # practice `sys.gps`. This is what makes `.drive` mean the chase camera instead of
 # the static preview: without it there is no measured position and a follow camera

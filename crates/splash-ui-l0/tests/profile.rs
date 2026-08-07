@@ -5557,16 +5557,20 @@ const INERT: &[(&str, &str)] = &[
     // a card asks for `.tight`.
     ("Surface", "pad"),
     ("Photo", "pad"),
-    // `from`/`to`/`via` name SOURCES, and this check varies a state-bound value
-    // — which a `Map` correctly ignores, because a trip endpoint is a place and
-    // not a number. Their liveness is asserted by
+    // `from`/`to`/`via`/`via2` name SOURCES, and this check varies a state-bound
+    // value — which a `Map` correctly ignores, because a trip endpoint is a place
+    // and not a number. Their liveness is asserted by
     // `a_bound_attribute_must_lower_to_a_live_call` instead, which binds a real
-    // capability. `via` is additionally not emitted yet: the helper carries it in
-    // a sixth argument and threading a card's list through needs the list
-    // rendered the way `sys.route` renders it.
+    // capability, and by `a_map_routes_through_both_of_its_stops` for the two
+    // waypoint slots.
+    //
+    // The note that used to sit here — "`via` is additionally not emitted yet" —
+    // was stale: it reaches both the polyline and the pins, and a trip through a
+    // stop has been verified on device.
     ("Map", "from"),
     ("Map", "to"),
     ("Map", "via"),
+    ("Map", "via2"),
     // `at` is the same: a live POSITION, so a state cell holding a number is
     // correctly ignored. Its liveness — that it centres the map on the fix and
     // turns `.drive` into the follow camera — is asserted by
@@ -8084,4 +8088,84 @@ fn a_field_can_answer_a_keystroke_and_a_commit_differently() {
         second.ends_with("\"\")") || second.contains(", \"\")"),
         "a field that asked for no keystroke event gets none:\n{second}"
     );
+}
+
+/// A map routes through BOTH stops, or it draws a different trip from the one
+/// reported beside it.
+///
+/// R4.5. The first attempt at a second stop was reverted for exactly this: the route
+/// line went through one waypoint while the duration next to it was for a trip
+/// through two — the drawn-versus-reported mismatch this profile exists to catch, and
+/// invisible in a screenshot where both are plausible lines.
+///
+/// It is two named slots rather than a list because role arguments route through the
+/// expression grammar, so admitting `[a, b]` there is a change to the whole grammar
+/// for one argument. The app being replaced has exactly two waypoint slots.
+///
+/// The test counts SEPARATORS. Both stops appearing somewhere is not the claim; the
+/// claim is that the helper is handed two waypoints, and `;` is how it is told.
+#[test]
+fn a_map_routes_through_both_of_its_stops() {
+    const CARD: &str = concat!(
+        "source o sys.search(query: state.origin, count: 1, fields: [id, name, lat, lon])\n",
+        "source d sys.search(query: state.dest, count: 1, fields: [id, name, lat, lon])\n",
+        "source s1 sys.search(query: state.stop1, count: 1, fields: [id, name, lat, lon])\n",
+        "source s2 sys.search(query: state.stop2, count: 1, fields: [id, name, lat, lon])\n",
+        "state origin { shape: text, initial: \"A\" }\n",
+        "state dest   { shape: text, initial: \"B\" }\n",
+        "state stop1  { shape: text, initial: \"C\" }\n",
+        "state stop2  { shape: text, initial: \"D\" }\n",
+        "view root Surface {\n",
+        "  Map(mode: .plan, from: o, to: d, via: s1, via2: s2, zoom: 14)\n",
+        "}\n"
+    );
+    let checked = check_ui_l0_named("nav", CARD);
+    assert!(checked.valid, "{:#?}", checked.diagnostics);
+
+    let data = serde_json::json!({
+        "origin": "A", "dest": "B", "stop1": "C", "stop2": "D",
+        "o": [{ "lat": 1.0, "lon": 2.0 }], "d": [{ "lat": 3.0, "lon": 4.0 }],
+        "s1": [{ "lat": 5.0, "lon": 6.0 }], "s2": [{ "lat": 7.0, "lon": 8.0 }],
+        "env": { "locale": {} }
+    });
+    let dsl = splash_ui_l0::kit::lower(
+        &realize(CARD, &data, RealizeLimits::default())
+            .root
+            .expect("realizes"),
+    );
+
+    // The polyline's waypoint argument: two pairs are joined by ONE separator.
+    // The route call ALONE. A fixed-width window swept in the pin string, which
+    // legitimately carries three separators — origin, two stops, destination — and
+    // made a correct lowering look like four waypoints.
+    let start = dsl.find("sys.navroute(").expect("a map with a trip lowers a route");
+    let mut depth = 0usize;
+    let mut end = start;
+    for (i, c) in dsl[start..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = start + i + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let route = &dsl[start..end];
+    assert!(
+        route.contains("sys.searchnum(\"C\"") && route.contains("sys.searchnum(\"D\""),
+        "both stops must reach the route:\n{route}"
+    );
+    assert_eq!(
+        route.matches("\";\"").count(),
+        1,
+        "two waypoints are one separator — a missing one is a trip through the first \
+         stop only, reported as a trip through both:\n{route}"
+    );
+    // And both are PINNED, or the map marks one stop on a line through two.
+    let pins = dsl.matches("\",1\"").count();
+    assert_eq!(pins, 2, "both stops are pinned:\n{dsl}");
 }

@@ -2681,6 +2681,13 @@ pub mod catalog {
                 ("from", Path),
                 ("to", Path),
                 ("via", Path),
+                // A SECOND fixed slot, not a list. The role parser routes arguments
+                // through the expression grammar, so admitting `[a, b]` there means a
+                // list literal in every operand position — a change to the whole
+                // grammar for one argument. The app being replaced has exactly two
+                // waypoint slots, `wp1` and `wp2`, and hides "add stop" when both are
+                // full; two named arguments say the same thing and stay total.
+                ("via2", Path),
                 // The live position the camera follows. See `map_mode`: this is
                 // what lets `.drive` mean the chase camera rather than the static
                 // preview, because a followed position is a measured one.
@@ -6031,9 +6038,19 @@ pub mod makepad {
     /// that cannot answer a coordinate yields no vias, because a map drawn through
     /// a place that could not be resolved is a map of a different trip.
     pub(super) fn map_vias(node: &UiNode) -> Option<String> {
-        let lat = map_coord(node, "via", "lat")?;
-        let lon = map_coord(node, "via", "lon")?;
-        via_string(&format!("{lat}\u{1}{lon}"))
+        let mut pairs: Vec<String> = Vec::new();
+        for slot in ["via", "via2"] {
+            let (Some(lat), Some(lon)) = (map_coord(node, slot, "lat"), map_coord(node, slot, "lon"))
+            else {
+                continue;
+            };
+            pairs.push(lat);
+            pairs.push(lon);
+        }
+        if pairs.is_empty() {
+            return None;
+        }
+        via_string(&pairs.join("\u{1}"))
     }
 
     /// The live position a `Map` was told to follow, if it was told one.
@@ -6121,9 +6138,11 @@ pub mod makepad {
         // kind 0 origin, 1 a stop, 2 the destination — the widget's own encoding.
         let mut out = format!("\"\" + {a} + \",\" + {o} + \",0\"");
         // The same resolution the polyline's waypoints use, so a stop that routes
-        // through gets a pin and one that does not, does not.
-        if let (Some(vlat), Some(vlon)) = (coord("via", "lat"), coord("via", "lon")) {
-            let _ = write!(out, " + \";\" + {vlat} + \",\" + {vlon} + \",1\"");
+        // through gets a pin and one that does not, does not — for both slots.
+        for slot in ["via", "via2"] {
+            if let (Some(vlat), Some(vlon)) = (coord(slot, "lat"), coord(slot, "lon")) {
+                let _ = write!(out, " + \";\" + {vlat} + \",\" + {vlon} + \",1\"");
+            }
         }
         let _ = write!(out, " + \";\" + {b} + \",\" + {p} + \",2\"");
         Some(out)
