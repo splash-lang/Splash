@@ -6064,6 +6064,18 @@ pub mod makepad {
     /// `None` when there is no complete trip — a lone origin pin on a map with no
     /// route reads as a dropped destination rather than a route still arriving.
     pub(super) fn map_pins(node: &UiNode) -> Option<String> {
+        // A CHASE map gets none, and this is not a preference.
+        //
+        // R3.12 is a plan-screen requirement: pins mark the ends of a route you are
+        // looking at. A follow camera already draws the driver's puck, and in 3D the
+        // widget appends pin geometry to the ribbon rather than drawing it
+        // separately — measured on device, a follow3d map handed markers rendered
+        // NO route and NO tiles at all, a blank beige screen. The plan map with the
+        // same pins was fine, which is how it went unnoticed: I verified pins on the
+        // screen the requirement is about and not on the other one.
+        if live_position(node).is_some() {
+            return None;
+        }
         let coord = |name: &str, axis: &str| map_coord(node, name, axis);
         let (a, o) = (coord("from", "lat")?, coord("from", "lon")?);
         let (b, p) = (coord("to", "lat")?, coord("to", "lon")?);

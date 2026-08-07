@@ -7593,18 +7593,22 @@ fn a_map_pins_the_trip_it_draws() {
     );
 }
 
-/// With no fix, the camera must not chase one.
+/// A card's map must survive a data blob that has not answered yet.
 ///
-/// `sys.gps` answers **-9999** for a latitude it does not have. A chase camera
-/// pointed at that is not a camera that lags — it is a map off the coast of Africa
-/// with the trip's route drawn nowhere near it, and the turn banner above it still
-/// reading like guidance. The card being replaced guards with `sys.gps("ok") >= 1`;
-/// L0 says the same thing with a guard, where the checker can see it.
+/// I guarded the drive map on `here.ok` to handle a missing GPS fix, and that is the
+/// one mistake this card already carries a note about: a guard is evaluated at
+/// REALIZE time, so it can only test what realization can see — declared state, or a
+/// source's `$state`. A live value reads NOTHING on a freshly generated card, so
+/// BOTH branches were false and the drive screen lowered with no map at all.
 ///
-/// The test is differential because both branches draw a map, and a card that lost
-/// the guard would still render something map-shaped.
+/// The test that let it through seeded `here` in the blob, which is precisely the
+/// case where the bug is invisible. So this one does the opposite: it omits `here`
+/// entirely, which is what a card looks like before its first fix lands.
+///
+/// The sentinel is refused in the widget instead, where the fix and the route are
+/// both known — see `is_a_place`.
 #[test]
-fn a_missing_fix_falls_back_to_the_trip_not_to_nowhere() {
+fn a_map_survives_a_source_that_has_not_answered() {
     const CARD: &str = concat!(
         "source here sys.gps()\n",
         "source o sys.search(query: state.origin, count: 1, fields: [id, name, lat, lon])\n",
@@ -7612,47 +7616,31 @@ fn a_missing_fix_falls_back_to_the_trip_not_to_nowhere() {
         "state origin { shape: text, initial: \"A\" }\n",
         "state dest   { shape: text, initial: \"B\" }\n",
         "view root Surface {\n",
-        "  when here.ok == 1 { Map(mode: .drive, from: o, to: d, at: here, view: .tilted, zoom: 17) }\n",
-        "  when here.ok == 0 { Map(mode: .plan, from: o, to: d, zoom: 14) }\n",
+        "  Map(mode: .drive, from: o, to: d, at: here, view: .tilted, zoom: 17)\n",
         "}\n"
     );
     let checked = check_ui_l0_named("nav", CARD);
     assert!(checked.valid, "{:#?}", checked.diagnostics);
 
-    let lower = |lat: f64, lon: f64, ok: i64| {
-        let data = serde_json::json!({
-            "origin": "A", "dest": "B",
-            "o": [{ "lat": 1.0, "lon": 2.0 }], "d": [{ "lat": 3.0, "lon": 4.0 }],
-            "here": { "lat": lat, "lon": lon, "ok": ok }, "env": { "locale": {} }
-        });
-        splash_ui_l0::kit::lower(
-            &realize(CARD, &data, RealizeLimits::default())
-                .root
-                .expect("realizes"),
-        )
-    };
-
-    // A fix: the chase camera, following the declared position.
-    let fixed = lower(37.2656, -122.0294, 1);
-    assert!(
-        fixed.contains("l0_map(\"follow3d\""),
-        "a fix earns the chase camera:\n{fixed}"
+    // NO `here` — the state every generated card starts in.
+    let data = serde_json::json!({
+        "origin": "A", "dest": "B",
+        "o": [{ "lat": 1.0, "lon": 2.0 }], "d": [{ "lat": 3.0, "lon": 4.0 }],
+        "env": { "locale": {} }
+    });
+    let dsl = splash_ui_l0::kit::lower(
+        &realize(CARD, &data, RealizeLimits::default())
+            .root
+            .expect("realizes"),
     );
-
-    // No fix: the trip, framed — and crucially NOT a camera aimed at the sentinel.
-    let lost = lower(-9999.0, -9999.0, 0);
-    assert!(
-        lost.contains("l0_map(\"plan\""),
-        "no fix falls back to the trip:\n{lost}"
+    assert_eq!(
+        dsl.matches("l0_map(").count(),
+        1,
+        "a map whose position has not arrived is still a map:\n{dsl}"
     );
     assert!(
-        !lost.contains("follow"),
-        "and must not follow anything:\n{lost}"
-    );
-    // The sentinel must not reach the widget as a coordinate at all.
-    assert!(
-        !lost.contains("-9999"),
-        "the no-fix sentinel is not a place:\n{lost}"
+        dsl.contains("sys.gps(\"lat\")"),
+        "and it still follows the declared position:\n{dsl}"
     );
 }
 
@@ -7808,4 +7796,55 @@ fn a_card_names_a_map_control_and_never_calls_the_widget() {
             "{name}: a card must not reach a widget at all:\n{dsl}"
         );
     }
+}
+
+/// Pins belong to a map you are LOOKING at, not one that is chasing you.
+///
+/// R3.12 is a plan-screen requirement. A follow camera already draws the driver's
+/// puck, and in 3D the widget appends pin geometry to the route ribbon rather than
+/// drawing it separately — measured on a OnePlus 6, a `follow3d` map handed markers
+/// rendered no route and no tiles at all, a blank beige screen.
+///
+/// It went unnoticed for a build because I verified the pins on the screen the
+/// requirement names and not on the other one. So this asserts BOTH screens.
+#[test]
+fn a_chase_map_carries_no_pins() {
+    const CARD: &str = concat!(
+        "source here sys.gps()\n",
+        "source o sys.search(query: state.origin, count: 1, fields: [id, name, lat, lon])\n",
+        "source d sys.search(query: state.dest, count: 1, fields: [id, name, lat, lon])\n",
+        "state origin { shape: text, initial: \"A\" }\n",
+        "state dest   { shape: text, initial: \"B\" }\n",
+        "state screen { shape: enum[plan, drive], initial: .plan }\n",
+        "view root Surface {\n",
+        "  when screen == .plan  { Map(mode: .plan, from: o, to: d, zoom: 14) }\n",
+        "  when screen == .drive { Map(mode: .drive, from: o, to: d, at: here, view: .tilted, zoom: 17) }\n",
+        "}\n"
+    );
+    let checked = check_ui_l0_named("nav", CARD);
+    assert!(checked.valid, "{:#?}", checked.diagnostics);
+
+    let lower = |screen: &str| {
+        let data = serde_json::json!({
+            "origin": "A", "dest": "B", "screen": screen,
+            "o": [{ "lat": 1.0, "lon": 2.0 }], "d": [{ "lat": 3.0, "lon": 4.0 }],
+            "here": { "lat": 1.5, "lon": 2.5, "ok": 1 }, "env": { "locale": {} }
+        });
+        splash_ui_l0::kit::lower(
+            &realize(CARD, &data, RealizeLimits::default())
+                .root
+                .expect("realizes"),
+        )
+    };
+    // The overview pins both ends — that is the requirement.
+    let plan = lower("plan");
+    assert!(plan.contains("\",0\"") && plan.contains("\",2\""), "plan pins:\n{plan}");
+    // The chase map passes an EMPTY marker string, which the widget reads as
+    // "no pins" — not a missing argument, which would be an arity error.
+    let drive = lower("drive");
+    assert!(drive.contains("follow3d"), "drive is the chase camera:\n{drive}");
+    assert!(
+        !drive.contains("\",0\"") && !drive.contains("\",2\""),
+        "a chase map must carry no pins:\n{drive}"
+    );
 }
