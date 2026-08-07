@@ -7819,6 +7819,25 @@ fn dispatch_writes(
             .find(|(t, _, _)| *t == transition.target)
             .map(|(_, v, _)| v.clone())
             .or_else(|| store.get(instance_key, &transition.target).cloned())
+            // The HOST-SEEDED value, and it has to be here because it is here in
+            // the renderer.
+            //
+            // Card state resolves store → data → initial when the screen is drawn.
+            // A transition resolved store → initial, skipping the middle, so a
+            // state the host seeded was cycled from a value nobody was looking at:
+            // the nav card seeded `screen: "drive"`, the drive screen rendered, and
+            // `End` — a `cycle(.plan, .drive)` — read the declared initial `.plan`
+            // and advanced to `.drive`. The tap applied, the store changed, the card
+            // re-resolved, and it landed on the screen it was already on. Every
+            // layer reported success.
+            //
+            // Card scope only, since that is the only scope the renderer reads the
+            // blob for; a component's cells are per-instance and have no key in it.
+            .or_else(|| {
+                (instance_key == CARD_STATE_KEY)
+                    .then(|| data.get(&transition.target).cloned())
+                    .flatten()
+            })
             .or_else(|| declared_initial.clone())
             .unwrap_or_else(|| initial_for(&state.shape));
 

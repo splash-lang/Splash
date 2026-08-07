@@ -7482,3 +7482,51 @@ fn a_docked_panel_does_not_draw_a_second_panel_inside_the_dock() {
         "the sheet centres what is in it:\n{mp}"
     );
 }
+
+/// A transition reads the value that is ON SCREEN, not the one the card declared.
+///
+/// Card state resolves store → data → initial when the card is drawn, so a host that
+/// seeds `screen: "drive"` gets the drive screen. A transition resolved store →
+/// initial and skipped the middle, which made every cycle on a seeded state advance
+/// from a value nobody was looking at.
+///
+/// Concretely, and this is how it was found: `End` on the nav card is
+/// `cycle(.plan, .drive)`. Seeded onto the drive screen, it read the declared initial
+/// `.plan` and advanced to `.drive` — the screen it was already on. The tap applied,
+/// the store changed, the card re-resolved and nothing moved. Three layers reported
+/// success and the button was inert.
+#[test]
+fn a_cycle_advances_from_the_state_the_card_is_showing() {
+    const CARD: &str = concat!(
+        "state screen { shape: enum[plan, drive], initial: .plan }\n",
+        "event go { screen: cycle(.plan, .drive) }\n",
+        "copy end { class: vocabulary, en: \"End\" }\n",
+        "view root Surface {\n",
+        "  when screen == .plan  { TextTitle(text: copy.end) }\n",
+        "  when screen == .drive { Chip(text: copy.end, on_tap: go) }\n",
+        "}\n"
+    );
+    let checked = check_ui_l0_named("nav", CARD);
+    assert!(checked.valid, "{:#?}", checked.diagnostics);
+
+    // Seeded onto the SECOND member, which is the case that was broken: from the
+    // first, a cycle that ignores the seed and one that honours it agree.
+    for (seed, after_one_tap) in [("drive", "plan"), ("plan", "drive")] {
+        let data = serde_json::json!({
+            "screen": seed, "env": { "locale": {} }, "copy": { "end": "End" }
+        });
+        let mut store = splash_ui_l0::InstanceStore::default();
+        splash_ui_l0::dispatch_reporting(CARD, &mut store, "root", "go", None, &data);
+        let dsl = splash_ui_l0::kit::lower(
+            &splash_ui_l0::realize_with_state(CARD, &data, &store, RealizeLimits::default())
+                .root
+                .expect("realizes"),
+        );
+        // The drive branch is the one with the tap on it.
+        let now = if dsl.contains("l0_chip") { "drive" } else { "plan" };
+        assert_eq!(
+            now, after_one_tap,
+            "seeded on {seed:?}, one tap must reach {after_one_tap:?}, not {now:?}:\n{dsl}"
+        );
+    }
+}
