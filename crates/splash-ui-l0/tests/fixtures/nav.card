@@ -60,19 +60,6 @@ source stop_place sys.search(query: state.stop, count: 1, fields: [id, name, lat
 # The guards below pick which is on screen, so exactly one of them is ever read —
 # and the card says in its structure that a trip with a stop is a different trip,
 # which is true and which a conditional argument would have hidden.
-# The same trip, begun from the device rather than from a named place. Two sources
-# because a source's arguments are fixed at declaration — the cost §5.4 makes
-# visible, and the reason the card says in its structure that "from here" and "from
-# a place you named" are different trips.
-source trip_here sys.route(from_lat: state.from_lat, from_lon: state.from_lon,
-                           to_lat: dest_place.0.lat, to_lon: dest_place.0.lon,
-                           mode: state.mode, fields: [duration, distance])
-
-source step_here sys.step(from_lat: state.from_lat, from_lon: state.from_lon,
-                          to_lat:   dest_place.0.lat, to_lon: dest_place.0.lon,
-                          at_lat:   here.lat,         at_lon: here.lon,
-                          fields: [instruction, remaining, eta])
-
 source trip sys.route(from_lat: origin_place.0.lat, from_lon: origin_place.0.lon,
                       to_lat:   dest_place.0.lat,   to_lon:   dest_place.0.lon,
                       mode: state.mode, fields: [duration, distance])
@@ -113,22 +100,7 @@ source env.locale sys.locale()
 # opened with the trip already known — which is every card whose request named
 # the places — had no input at all. Measured: the model generated a card
 # containing only a `Map`, and there was no way to change where you were going.
-state origin { shape: text, initial: "" }        # empty ⇒ start from the device
-
-# WHERE THE TRIP BEGAN, captured once. R11.3.
-#
-# `initial:` reads a path from the data at REALIZE time and the store owns it after,
-# so these lower to literal numbers while `here.lat` stays a live call. That
-# distinction is the whole requirement: a route declared `from_lat: here.lat` is
-# re-fetched every time the fix changes, and `sys.step` would compare the route's
-# start against the device's position when they are the SAME expression — progress
-# always zero, the banner stuck on the first manoeuvre for the whole drive. Checked,
-# not assumed: `sys.navprog`'s first and fifth arguments came out identical.
-#
-# This is R9.5's "freeze" pattern — the L2 card's top-level `let`, which freezes at
-# build — said declaratively, where the card cannot get the freezing wrong.
-state from_lat { shape: number, initial: here.lat }
-state from_lon { shape: number, initial: here.lon }
+state origin { shape: text, initial: "" }        # empty ⇒ nothing to route from
 state dest   { shape: text, initial: "" }        # empty ⇒ nothing to route to
 state query  { shape: text, initial: "" }        # what the user is typing
 
@@ -310,26 +282,12 @@ view root Surface {
       when stop == "" {
         # §5.9, where the original compared against -9999. "Not yet" and "failed"
         # are different states and the card can say so.
-        # NAMED origin, or the one the device captured. R11.3: a trip that names no
-        # origin starts from where you are, which is what `from_lat` froze.
-        when origin != "" {
-          when trip.$state == .pending { TextBody(text: copy.seeking) }
-          when trip.$state == .ready {
-            Row(align: .center, gap: 12) {
-              TextValue(value: trip.duration)
-              TextCaption(value: trip.distance, suffix: copy.away)
-              Chip(text: copy.start, on_tap: go)
-            }
-          }
-        }
-        when origin == "" {
-          when trip_here.$state == .pending { TextBody(text: copy.seeking) }
-          when trip_here.$state == .ready {
-            Row(align: .center, gap: 12) {
-              TextValue(value: trip_here.duration)
-              TextCaption(value: trip_here.distance, suffix: copy.away)
-              Chip(text: copy.start, on_tap: go)
-            }
+        when trip.$state == .pending { TextBody(text: copy.seeking) }
+        when trip.$state == .ready {
+          Row(align: .center, gap: 12) {
+            TextValue(value: trip.duration)
+            TextCaption(value: trip.distance, suffix: copy.away)
+            Chip(text: copy.start, on_tap: go)
           }
         }
         # The static route preview: no `at:`, so no camera that moves.
@@ -345,15 +303,7 @@ view root Surface {
         # source's `$state` (which the host injects). A live VALUE is not that. The
         # impossible-centre case is handled where the number is actually known, in
         # the widget.
-        when origin != "" {
-          Map(mode: .plan, from: origin_place, to: dest_place, zoom: 16, controls: .all)
-        }
-        # From the captured position: there is no place to name, so the map is given
-        # the same two numbers the route was.
-        when origin == "" {
-          Map(mode: .plan, from_lat: from_lat, from_lon: from_lon, to: dest_place,
-              zoom: 16, controls: .all)
-        }
+        Map(mode: .plan, from: origin_place, to: dest_place, zoom: 16, controls: .all)
       }
 
       # ---- the trip THROUGH the stop --------------------------------------
@@ -396,27 +346,12 @@ view root Surface {
   # `trip` and `trip_via` are two sources.
   when screen == .preview {
     when stop == "" {
-      when origin != "" {
-        Panel(dock: .bottom) {
-          TextHero(value: trip.duration)
-          TextCaption(value: trip.distance, suffix: copy.away)
-          Chip(text: copy.begin, on_tap: go)
-        }
+      Panel(dock: .bottom) {
+        TextHero(value: trip.duration)
+        TextCaption(value: trip.distance, suffix: copy.away)
+        Chip(text: copy.begin, on_tap: go)
       }
-      when origin == "" {
-        Panel(dock: .bottom) {
-          TextHero(value: trip_here.duration)
-          TextCaption(value: trip_here.distance, suffix: copy.away)
-          Chip(text: copy.begin, on_tap: go)
-        }
-      }
-      when origin != "" {
-        Map(mode: .plan, from: origin_place, to: dest_place, zoom: 16, controls: .all)
-      }
-      when origin == "" {
-        Map(mode: .plan, from_lat: from_lat, from_lon: from_lon, to: dest_place,
-            zoom: 16, controls: .all)
-      }
+      Map(mode: .plan, from: origin_place, to: dest_place, zoom: 16, controls: .all)
     }
     when stop != "" {
       Panel(dock: .bottom) {
@@ -439,8 +374,7 @@ view root Surface {
       # WRAPS. A manoeuvre is a whole street name and "Continue onto South De Anza
       # Boulevard" was clipped mid-word at the card's edge — the one thing a driver
       # reads at a glance, truncated. `TextBody` is the role that wraps.
-      when origin != "" { TextBody(text: step.instruction, width: .fill) }
-      when origin == "" { TextBody(text: step_here.instruction, width: .fill) }
+      TextBody(text: step.instruction, width: .fill)
     }
 
     # The summary sheet, docked to the bottom and SWIPEABLE — the shipping app's
@@ -458,11 +392,9 @@ view root Surface {
       # "when do I arrive" is the question, and the distance is how it is answered.
       # `unit: .duration` because "34" beside "26.8 km" reads as another distance; the
       # theme supplies the word.
-      when origin != "" { TextHero(value: step.eta, unit: .duration) }
-      when origin == "" { TextHero(value: step_here.eta, unit: .duration) }
+      TextHero(value: step.eta, unit: .duration)
       # The distance, small, beneath it — the shipping card's `remrest`.
-      when origin != "" { TextCaption(value: step.remaining) }
-      when origin == "" { TextCaption(value: step_here.remaining) }
+      TextCaption(value: step.remaining)
       Reveal {
         # `.danger` says what the action MEANS. Ending navigation is destructive, and
         # the theme renders that red, full-width and centred — the shipping card's
@@ -487,13 +419,7 @@ view root Surface {
     #
     # The impossible centre is handled where the number is actually known — in the
     # widget, which has both the fix and the route and can tell -9999 from a place.
-    when origin != "" {
-      Map(mode: .drive, from: origin_place, to: dest_place, at: here,
-          view: .tilted, zoom: 17)
-    }
-    when origin == "" {
-      Map(mode: .drive, from_lat: from_lat, from_lon: from_lon, to: dest_place,
-          at: here, view: .tilted, zoom: 17)
-    }
+    Map(mode: .drive, from: origin_place, to: dest_place, at: here,
+        view: .tilted, zoom: 17)
   }
 }

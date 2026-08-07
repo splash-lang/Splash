@@ -4761,25 +4761,22 @@ fn the_nav_trip_planner_is_expressible_at_l0() {
     // screen but that most of the original was working around missing machinery —
     // a 600-line L0 card would disprove that as surely as a rejection would.
     //
-    // The bound was 100, then 200, and is 260. The card grew from 54 lines by
-    // GAINING function, not by working around anything: a travel mode, a waypoint
-    // the route passes through, per-leg times, turn-by-turn, a preview screen, and
-    // an origin that defaults to the device.
+    // The bound was 100 and is 200. The card grew from 54 lines by GAINING function,
+    // not by working around anything: a travel mode, a waypoint the route passes
+    // through, per-leg times, turn-by-turn, and a preview screen. Each cost
+    // declarations rather than machinery — a stop is two route sources because a
+    // source's arguments are fixed at declaration, so a trip with one is a different
+    // trip and the card says so. That is the price of a total form and it is
+    // visible, which is the point.
     //
-    // Each cost declarations rather than machinery, and the last one cost the most:
-    // a trip that starts where you are is two more route sources, a step source and
-    // eight guarded branches, because a source's arguments are fixed at declaration
-    // (§5.4). So "from a place you named" and "from here" are different trips and
-    // the card says so in its structure. That is the price of a total form and it
-    // is visible, which is the point.
+    // It went to 260 for a while, for an origin that defaults to the device (R11.3):
+    // two more route sources, a step source and eight guarded branches. That work is
+    // backed out — it could not work until the host writes fetched values into a
+    // card's data — and the bound comes back down with it. A bound raised for a
+    // feature and left up after the feature is removed is a bound that no longer
+    // measures anything.
     //
-    // RAISING THIS IS NOT FREE and it is the second raise. The bound exists to
-    // catch me widening the card until the comparison stops meaning anything, so
-    // the number to watch is the ratio, not the slack: 664 lines at L2 against 213
-    // here, at close to the same function. If a future increment needs 400, that is
-    // the signal to add machinery instead of declarations — the argument this whole
-    // exercise rests on is that the original was mostly compensation, and a card
-    // that grows like the original did would be evidence against it.
+    // The comparison it exists to make: 664 lines at L2 against 162 here.
     let lines = NAV
         .lines()
         .filter(|l| {
@@ -4788,7 +4785,7 @@ fn the_nav_trip_planner_is_expressible_at_l0() {
         })
         .count();
     assert!(
-        lines < 260,
+        lines < 200,
         "the point is that it is small; this is {lines} lines"
     );
 }
@@ -7964,6 +7961,15 @@ fn the_journey_through_the_card_is_one_transition_and_never_loses_the_map() {
 ///
 /// The test asserts the asymmetry directly, because both forms lower to something
 /// that looks like a working route.
+///
+/// **This is not yet a recommendation.** The nav card used it and it was backed out:
+/// realize happens before the first fix lands, so the capture froze `sys.gps`'s
+/// -9999 sentinel permanently — which is the SAME "freezes at build, before the
+/// fetch lands" defect that the card's own header cites as the reason the L2
+/// version needed `tick()`. Capturing is the right shape and realize is the wrong
+/// moment; what is missing is the host writing fetched values into a card's data, so
+/// that there is a fix to capture at all. Kept as a test because the mechanism and
+/// the precision rule are both real and both worth pinning.
 #[test]
 fn a_trip_from_here_freezes_its_start_and_not_its_position() {
     const CARD: &str = concat!(
