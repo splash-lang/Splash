@@ -6795,12 +6795,15 @@ pub mod makepad {
     /// drift.
     pub(super) fn hero_points(node: &UiNode, emitted: &str) -> u32 {
         let measured = sizing_text(node, emitted);
+        // The ramp, at 70%. Every text size in the theme came down by the same
+        // factor, so the hierarchy between a hero, a value and a caption is
+        // unchanged — only the scale is.
         match measured.trim_matches('"').chars().count() {
-            0..=4 => 62,
-            5..=6 => 50,
-            7..=8 => 40,
-            9..=12 => 32,
-            _ => 24,
+            0..=4 => 43,
+            5..=6 => 35,
+            7..=8 => 28,
+            9..=12 => 22,
+            _ => 17,
         }
     }
 

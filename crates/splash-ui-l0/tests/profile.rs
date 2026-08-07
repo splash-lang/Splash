@@ -4441,11 +4441,13 @@ fn a_hero_is_sized_by_what_it_draws_not_by_what_it_emits() {
         hero.contains("sys.stock"),
         "the hero must be live for this test to mean anything:\n{hero}"
     );
-    // "$184.20" is 7 glyphs, which is the 40pt bucket. The emitted expression is
-    // 33 characters, which is the 24pt one.
+    // "$184.20" is 7 glyphs, which is the 28pt bucket. The emitted expression is
+    // 33 characters, which is the 17pt one. The two numbers moved when the theme
+    // came down to 70%; what the test asserts did not — the hero must be sized by
+    // what it DRAWS, and the gap between the buckets is what proves it.
     assert!(
-        hero.contains("font_size: 40"),
-        "sized by the drawn value (7 glyphs -> 40pt), not the emitted 33:\n{hero}"
+        hero.contains("font_size: 28"),
+        "sized by the drawn value (7 glyphs -> 28pt), not the emitted 33:\n{hero}"
     );
 }
 
