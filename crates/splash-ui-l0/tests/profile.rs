@@ -7655,3 +7655,89 @@ fn a_missing_fix_falls_back_to_the_trip_not_to_nowhere() {
         "the no-fix sentinel is not a place:\n{lost}"
     );
 }
+
+/// Search has to be REACHABLE, not merely present.
+///
+/// The nav card rendered a search field, a results panel and five tappable rows and
+/// could not search: every event cleared `query` and nothing set it, so
+/// `sys.search(query: state.query)` always ran on `""`. A review caught it, and
+/// nothing on screen could have — an empty results list looks exactly like a query
+/// with no matches.
+///
+/// Worse, the panel was guarded on `dest == ""` while the field that fills it binds
+/// to `dest`, so the only state in which results could appear was the one before
+/// anything had been typed. Two guards fighting: one waiting for a query, the other
+/// requiring that nothing had been asked for.
+///
+/// So this walks the whole interaction, because each step passes on its own: commit
+/// a query, see the candidates, pick one, see the list close.
+#[test]
+fn typing_a_destination_produces_candidates_and_picking_one_closes_them() {
+    const CARD: &str = concat!(
+        "source found sys.search(query: state.query, count: 5, fields: [id, name, lat, lon])\n",
+        "state dest  { shape: text, initial: \"\" }\n",
+        "state query { shape: text, initial: \"\" }\n",
+        "event set_dest    { dest: set($value), query: set($value) }\n",
+        "event choose_dest { dest: set($value), query: clear }\n",
+        "copy to { class: vocabulary, en: \"TO\" }\n",
+        "view root Surface {\n",
+        "  Field(text: dest, placeholder: copy.to, on_commit: set_dest, width: .fill)\n",
+        "  when query != \"\" {\n",
+        "    for f, i in found key f.id {\n",
+        "      Row(align: .center, gap: 10, on_tap: choose_dest, value: f.id) {\n",
+        "        TextRow(text: f.name)\n",
+        "      }\n",
+        "    }\n",
+        "  }\n",
+        "}\n"
+    );
+    let checked = check_ui_l0_named("nav", CARD);
+    assert!(checked.valid, "{:#?}", checked.diagnostics);
+
+    let data = serde_json::json!({
+        "dest": "", "query": "",
+        "found": [
+            { "id": "a", "name": "Stanford University", "lat": 37.43, "lon": -122.17 },
+            { "id": "b", "name": "Stanford Shopping Center", "lat": 37.44, "lon": -122.17 },
+            { "id": "c", "name": "Stanford Stadium", "lat": 37.43, "lon": -122.16 }
+        ],
+        "env": { "locale": {} }, "copy": { "to": "TO" }
+    });
+    let rows = |store: &splash_ui_l0::InstanceStore| {
+        let dsl = splash_ui_l0::kit::lower(
+            &splash_ui_l0::realize_with_state(CARD, &data, store, RealizeLimits::default())
+                .root
+                .expect("realizes"),
+        );
+        dsl.matches("l0_row_text(").count()
+    };
+
+    let mut store = splash_ui_l0::InstanceStore::default();
+    assert_eq!(rows(&store), 0, "nothing asked for, nothing listed");
+
+    // Commit a query: the candidates appear. This is the step that was impossible.
+    splash_ui_l0::dispatch_reporting(
+        CARD,
+        &mut store,
+        "root",
+        "set_dest",
+        Some(&serde_json::Value::String("Stanford".into())),
+        &data,
+    );
+    assert_eq!(
+        rows(&store),
+        3,
+        "committing a query must list what the search found"
+    );
+
+    // Pick one: the list closes, because `choose_dest` clears the query.
+    splash_ui_l0::dispatch_reporting(
+        CARD,
+        &mut store,
+        "root",
+        "choose_dest",
+        Some(&serde_json::Value::String("a".into())),
+        &data,
+    );
+    assert_eq!(rows(&store), 0, "picking a candidate closes the list");
+}

@@ -150,7 +150,18 @@ state mode { shape: enum[drive, walk, bike], initial: .drive }
 state stop { shape: text, initial: "" }          # empty ⇒ a direct trip
 
 event set_origin  { origin: set($value), query: clear }
-event set_dest    { dest: set($value), query: clear }
+# `query` is SET, not cleared — this is the line that made search reachable.
+#
+# Every event here cleared `query` and nothing ever set it, so `found` — which is
+# `sys.search(query: state.query)` — always ran on "" and the results list was
+# permanently empty. The card rendered a search field, a results panel and five
+# tappable rows, and could not search. A review caught it; nothing on screen could,
+# because an empty list looks exactly like a query with no matches.
+#
+# Committing "Stanford" now does both things it plainly means: it is the destination
+# (so the route draws to the best match immediately) and it is the query (so the
+# alternatives are listed underneath, and one tap refines the choice).
+event set_dest    { dest: set($value), query: set($value) }
 event choose_dest { dest: set($value), query: clear }
 event go          { screen: cycle(.plan, .drive) }
 event set_stop    { stop: set($value), query: clear }
@@ -191,27 +202,41 @@ view root Surface {
       }
     }
 
-    # What the user is choosing between.
+    # R5.4's "your trip" defaults: before anything is typed, the trip's own places
+    # are the pickable items — tap the origin while the destination is empty and the
+    # trip reverses.
     when dest == "" {
-      Panel {
-        # R5.4's "your trip" defaults: before anything is typed, the trip's own
-        # places are the pickable items — tap the origin while the destination is
-        # empty and the trip reverses. They are shown when the QUERY is empty,
-        # because that is when a results list would otherwise be a blank panel with
-        # nothing to say why.
-        when query == "" {
+      when query == "" {
+        Panel {
           Row(align: .center, gap: 10, on_tap: choose_dest, value: origin) {
             TextCaption(text: copy.from)
             TextRow(text: origin)
           }
-          Rule()
         }
-        for f, i in found key f.id {
-          Row(align: .center, gap: 10, on_tap: choose_dest, value: f.id) {
-            TextRow(text: f.name)
-          }
-          Rule()
+      }
+    }
+
+    # THE RESULTS, gated on the query rather than on an empty destination.
+    #
+    # They used to sit inside `when dest == ""`, and the field that fills them binds
+    # to `dest` — so the only state in which results could show was the one before
+    # anything had been typed, and typing something was precisely what closed it.
+    # Two guards fighting: one waiting for a query, the other requiring that nothing
+    # had been asked for.
+    #
+    # Keyed on the query, the list appears when there is something to list and
+    # `choose_dest` clears the query, so picking closes it.
+    # NO PANEL AROUND THEM, and that is not a style choice. A `for` over a source
+    # iterates the DATA, so zero rows inside a `Panel` is a panel with nothing in
+    # it — an empty rounded box between TO and VIA, which is what this looked like
+    # on device the first time. L0 has no predicate for "this list has rows", so the
+    # container has to be the thing that cannot render empty: no rows, no nodes.
+    when query != "" {
+      for f, i in found key f.id {
+        Row(align: .center, gap: 10, on_tap: choose_dest, value: f.id) {
+          TextRow(text: f.name)
         }
+        Rule()
       }
     }
 
