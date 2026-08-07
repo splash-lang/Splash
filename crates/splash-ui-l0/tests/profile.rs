@@ -7848,3 +7848,93 @@ fn a_chase_map_carries_no_pins() {
         "a chase map must carry no pins:\n{drive}"
     );
 }
+
+/// Three screens, one transition, and a map on every one of them.
+///
+/// R2.2's preview is a SCREEN rather than a state of the planning one: the chosen
+/// trip, the two numbers that decide whether to take it, and one button that
+/// commits. Everything on it was already on the plan screen; what was missing was
+/// it being a separate step.
+///
+/// `cycle` names an order and the order IS the flow, so "Go", "Start" and "End" are
+/// one transition seen from three places. Three separate events would have been
+/// three chances to disagree about which screen follows which — so the test walks
+/// the whole loop rather than checking a single hop.
+///
+/// The map count is the other half. Adding a screen is the easiest way to end up
+/// with one that draws no map at all, which is a failure the checker cannot see and
+/// a screenshot of the WRONG screen would not show.
+#[test]
+fn the_journey_through_the_card_is_one_transition_and_never_loses_the_map() {
+    const CARD: &str = concat!(
+        "source o sys.search(query: state.origin, count: 1, fields: [id, name, lat, lon])\n",
+        "source d sys.search(query: state.dest, count: 1, fields: [id, name, lat, lon])\n",
+        "source here sys.gps()\n",
+        "source trip sys.route(from_lat: o.0.lat, from_lon: o.0.lon,\n",
+        "                      to_lat: d.0.lat, to_lon: d.0.lon,\n",
+        "                      mode: state.mode, fields: [duration, distance])\n",
+        "state origin { shape: text, initial: \"A\" }\n",
+        "state dest   { shape: text, initial: \"B\" }\n",
+        "state mode   { shape: enum[drive, walk, bike], initial: .drive }\n",
+        "state screen { shape: enum[plan, preview, drive], initial: .plan }\n",
+        "event go { screen: cycle(.plan, .preview, .drive) }\n",
+        "copy begin { class: vocabulary, en: \"Start\" }\n",
+        "view root Surface {\n",
+        "  when screen == .plan {\n",
+        "    Field(text: dest, placeholder: copy.begin, on_commit: go, width: .fill)\n",
+        "    Map(mode: .plan, from: o, to: d, zoom: 14)\n",
+        "  }\n",
+        "  when screen == .preview {\n",
+        "    Panel(dock: .bottom) { TextHero(value: trip.duration) Chip(text: copy.begin, on_tap: go) }\n",
+        "    Map(mode: .plan, from: o, to: d, zoom: 16)\n",
+        "  }\n",
+        "  when screen == .drive {\n",
+        "    Map(mode: .drive, from: o, to: d, at: here, view: .tilted, zoom: 17)\n",
+        "  }\n",
+        "}\n"
+    );
+    let checked = check_ui_l0_named("nav", CARD);
+    assert!(checked.valid, "{:#?}", checked.diagnostics);
+
+    let data = serde_json::json!({
+        "origin": "A", "dest": "B", "mode": "drive", "screen": "plan",
+        "o": [{ "lat": 1.0, "lon": 2.0 }], "d": [{ "lat": 3.0, "lon": 4.0 }],
+        "here": { "lat": 1.5, "lon": 2.5, "ok": 1 },
+        "trip": { "duration": "30 min", "distance": "27 km" },
+        "env": { "locale": {} }, "copy": { "begin": "Start" }
+    });
+    let mut store = splash_ui_l0::InstanceStore::default();
+    let screen = |store: &splash_ui_l0::InstanceStore| {
+        let dsl = splash_ui_l0::kit::lower(
+            &splash_ui_l0::realize_with_state(CARD, &data, store, RealizeLimits::default())
+                .root
+                .expect("realizes"),
+        );
+        // EVERY screen draws exactly one map. A screen that lost its map is the
+        // failure a screenshot of a different screen would never show.
+        assert_eq!(
+            dsl.matches("l0_map(").count(),
+            1,
+            "every screen draws one map:\n{dsl}"
+        );
+        if dsl.contains("follow") {
+            "drive"
+        } else if dsl.contains("l0_field(") {
+            "plan"
+        } else {
+            "preview"
+        }
+    };
+
+    assert_eq!(screen(&store), "plan");
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        splash_ui_l0::dispatch_reporting(CARD, &mut store, "root", "go", None, &data);
+        seen.push(screen(&store));
+    }
+    assert_eq!(
+        seen,
+        vec!["preview", "drive", "plan", "preview"],
+        "one transition walks the whole journey and comes back round"
+    );
+}
