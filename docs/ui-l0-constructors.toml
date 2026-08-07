@@ -342,7 +342,7 @@ answers = ["lat", "lon", "accuracy", "ok"]
 # receive from the user.
 [sources."sys.search"]
 args = ["query", "count", "fields"]
-answers = ["id", "name", "lat", "lon", "distance"]
+answers = ["id", "name", "label", "query", "lat", "lon", "distance"]
 
 # A trip's facts — duration, distance, the step list. The ROUTE ITSELF is the
 # `Map` widget's to fetch; this is what the card needs to write on the screen

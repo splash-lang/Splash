@@ -38,7 +38,7 @@
 # the turn instruction, the distance remaining — moves because the device did.
 source here sys.gps()
 
-source found sys.search(query: state.query, count: 5, fields: [id, name, lat, lon])
+source found sys.search(query: state.query, count: 5, fields: [name, label, query, lat, lon])
 
 # Both endpoints, each resolved by the search that found it.
 source origin_place sys.search(query: state.origin, count: 1, fields: [id, name, lat, lon])
@@ -238,9 +238,19 @@ view root Surface {
     # on device the first time. L0 has no predicate for "this list has rows", so the
     # container has to be the thing that cannot render empty: no rows, no nodes.
     when query != "" {
-      for f, i in found key f.id {
-        Row(align: .center, gap: 10, on_tap: choose_dest, value: f.id) {
-          TextRow(text: f.name)
+      # KEYED ON THE NAME, not on `id`. `sys.search` answers name/label/lat/lon and
+      # the backend has no translation for `id` at all, so a row keyed on it had no
+      # identity and a tap carried nothing. The name is what the search returns and
+      # what `sys.search(query: state.dest)` can find again.
+      for f, i in found key f.label {
+        Row(align: .center, gap: 10, on_tap: choose_dest, value: f.query) {
+          Col(gap: 2) {
+            TextRow(text: f.name)
+            # WHICH Stanford. The name alone is not a choice — the helper answers
+            # five places called "Stanford" and this is the line that tells them
+            # apart, so it is also what keys the row.
+            TextCaption(text: f.label)
+          }
         }
         Rule()
       }

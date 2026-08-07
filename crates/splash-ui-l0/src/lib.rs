@@ -2981,7 +2981,11 @@ pub mod catalog {
         ("sys.photo", &[]),
         ("sys.locale", &["lang", "temp_unit"]),
         ("sys.gps", &["lat", "lon", "accuracy", "ok"]),
-        ("sys.search", &["id", "name", "lat", "lon", "distance"]),
+        // `label` is the secondary line — city, region, country. Without it a search
+        // for "Stanford" renders five rows all reading "Stanford", which is what
+        // Photon actually returns and is useless to choose between. The backend has
+        // answered this field all along; the catalog simply never admitted it.
+        ("sys.search", &["id", "name", "label", "query", "lat", "lon", "distance"]),
         ("sys.route", &["duration", "distance", "steps"]),
         ("sys.step", &["instruction", "remaining", "progress", "eta"]),
         (
@@ -6457,7 +6461,16 @@ pub mod makepad {
                 let query = arg("query")?;
                 match field {
                     "lat" | "lon" => Some(format!("sys.searchnum({query:?}, {index}, {field:?})")),
-                    "name" => Some(format!("sys.search({query:?}, {index}, \"name\")")),
+                    // `label` is the secondary line the helper has always answered —
+                    // city, region, country. Five results named "Stanford" are what
+                    // Photon returns for "Stanford", and without this they render as
+                    // five identical rows nobody can choose between.
+                    // `query` is the text that finds this hit again — what a
+                    // results row must carry, or picking the third "Stanford" sets
+                    // state to "Stanford" and routes to the first.
+                    "name" | "label" | "query" => {
+                        Some(format!("sys.search({query:?}, {index}, {field:?})"))
+                    }
                     // `id` and `distance` have no answer in the helper, so they
                     // fall back rather than emitting a call that returns "".
                     _ => None,
