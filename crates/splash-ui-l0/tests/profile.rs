@@ -7741,3 +7741,71 @@ fn typing_a_destination_produces_candidates_and_picking_one_closes_them() {
     );
     assert_eq!(rows(&store), 0, "picking a candidate closes the list");
 }
+
+/// A card NAMES a map control; only the backend may call the widget.
+///
+/// This is the split §1.1 asks for, on the one requirement that most obviously
+/// tempts a card to break it. The L2 card draws its own zoom pill and writes
+/// `on_click: || ui.themap.nav_zoom_by("0.7")` — a method call on a named widget,
+/// which is the imperative wiring L0 exists to exclude. "This map can be zoomed" is
+/// a capability; the button, the glyph and the call are presentation.
+///
+/// So the test has two halves and the second is the one that matters: the control
+/// must appear when asked for, and the CARD must still contain no call.
+#[test]
+fn a_card_names_a_map_control_and_never_calls_the_widget() {
+    let card = |controls: &str| {
+        format!(
+            concat!(
+                "source o sys.search(query: state.origin, count: 1, fields: [id, name, lat, lon])\n",
+                "source d sys.search(query: state.dest, count: 1, fields: [id, name, lat, lon])\n",
+                "state origin {{ shape: text, initial: \"A\" }}\n",
+                "state dest   {{ shape: text, initial: \"B\" }}\n",
+                "view root Surface {{\n",
+                "  Map(mode: .plan, from: o, to: d, zoom: 14{})\n",
+                "}}\n"
+            ),
+            controls
+        )
+    };
+    let data = serde_json::json!({
+        "origin": "A", "dest": "B",
+        "o": [{ "lat": 1.0, "lon": 2.0 }], "d": [{ "lat": 3.0, "lon": 4.0 }],
+        "env": { "locale": {} }
+    });
+    let lower = |src: &str| {
+        let checked = check_ui_l0_named("nav", src);
+        assert!(checked.valid, "{:#?}", checked.diagnostics);
+        splash_ui_l0::kit::lower(
+            &realize(src, &data, RealizeLimits::default())
+                .root
+                .expect("realizes"),
+        )
+    };
+
+    // Unasked-for: a map that grows buttons a card never mentioned would be the
+    // theme deciding what a screen OFFERS, not how it looks.
+    let bare = lower(&card(""));
+    assert!(
+        bare.contains("\"none\""),
+        "no controls unless the card says so:\n{bare}"
+    );
+    // Asked for: the theme is told, and told which.
+    let zoom = lower(&card(", controls: .zoom"));
+    assert!(zoom.contains("\"zoom\""), "a zoom pill was asked for:\n{zoom}");
+    let all = lower(&card(", controls: .all"));
+    assert!(all.contains("\"all\""), "recenter too:\n{all}");
+
+    // THE HALF THAT MATTERS. Whatever the theme goes on to draw, no lowering of a
+    // card may contain a call on a widget — that is the L2 form this replaces.
+    for (name, dsl) in [("none", &bare), ("zoom", &zoom), ("all", &all)] {
+        assert!(
+            !dsl.contains("nav_zoom_by") && !dsl.contains("set_nav_recenter"),
+            "{name}: a card must not call the widget:\n{dsl}"
+        );
+        assert!(
+            !dsl.contains("ui."),
+            "{name}: a card must not reach a widget at all:\n{dsl}"
+        );
+    }
+}

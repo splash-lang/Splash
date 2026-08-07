@@ -2642,6 +2642,17 @@ pub mod catalog {
     pub const MAP_VIEW: &[&str] = &["flat", "tilted"];
     /// Where a panel sits when the card is a map.
     pub const DOCK: &[&str] = &["top", "bottom"];
+    /// The controls a map offers. A card NAMES the affordance; the theme draws it
+    /// and the backend wires it.
+    ///
+    /// This is the argument that let R3.6 and R3.9 exist at L0 at all. The card
+    /// being replaced draws its own pill and writes
+    /// `on_click: || ui.themap.nav_zoom_by("0.7")` — a method call on a named
+    /// widget, which is the imperative wiring this profile exists to exclude. The
+    /// split §1.1 asks for is that the CARD may not say it and the BACKEND must:
+    /// "this map can be zoomed" is a capability, and the button, the glyph and the
+    /// method call are all presentation.
+    pub const CONTROLS: &[&str] = &["none", "zoom", "all"];
     /// What an action means. The theme decides what that looks like.
     pub const TONE: &[&str] = &["normal", "danger"];
     pub const ALIGN: &[&str] = &["start", "center", "end", "baseline"];
@@ -2680,6 +2691,7 @@ pub mod catalog {
                 // fabrication `map_mode` refuses.
                 ("view", Token(MAP_VIEW)),
                 ("zoom", Number),
+                ("controls", Token(CONTROLS)),
             ],
         ),
         // A text field. The ONE role that lets a card receive something the user
@@ -9126,9 +9138,16 @@ pub mod kit {
                 // that changes every second is not a property, so routing it through
                 // one bought nothing and cost a frozen camera when the property was a
                 // constant expression. See `update_nav_camera`.
+                // The controls the card asked for. `none` unless it said otherwise,
+                // because a map that grows buttons a card never mentioned is the
+                // theme deciding what a screen OFFERS rather than how it looks.
+                let controls = match arg(node, "controls") {
+                    Some(NodeValue::Token(t)) => t.clone(),
+                    _ => "none".to_owned(),
+                };
                 let _ = write!(
                     out,
-                    "{f}({:?}, {}, {lat}, {lon}, {poly}, {})",
+                    "{f}({:?}, {}, {lat}, {lon}, {poly}, {}, {controls:?})",
                     makepad::map_mode(node),
                     scalar_of(node, "zoom"),
                     // The pins. `""` rather than omitted, because the widget reads

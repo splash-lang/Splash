@@ -297,7 +297,7 @@ view root Surface {
         # source's `$state` (which the host injects). A live VALUE is not that. The
         # impossible-centre case is handled where the number is actually known, in
         # the widget.
-        Map(mode: .plan, from: origin_place, to: dest_place, zoom: 16)
+        Map(mode: .plan, from: origin_place, to: dest_place, zoom: 16, controls: .all)
       }
 
       # ---- the trip THROUGH the stop --------------------------------------
@@ -321,7 +321,8 @@ view root Surface {
             TextCaption(value: leg_b.distance)
           }
         }
-        Map(mode: .plan, from: origin_place, to: dest_place, via: stop_place, zoom: 16)
+        Map(mode: .plan, from: origin_place, to: dest_place, via: stop_place, zoom: 16,
+            controls: .all)
       }
     }
   }

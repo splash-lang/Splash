@@ -56,6 +56,13 @@ at   = { kind = "path" }
 # a preview has no camera to tilt.
 view = { kind = "token", tokens = ["flat", "tilted"] }
 zoom = { kind = "number" }
+# The controls the map offers. `.zoom` is a +/- pill; `.all` adds a recenter
+# button. The card NAMES the affordance and the theme draws it — which is the whole
+# reason these are expressible here at all. The L2 card draws its own pill and
+# writes `on_click: || ui.themap.nav_zoom_by("0.7")`: a method call on a named
+# widget, and the imperative wiring this profile exists to exclude. "This map can be
+# zoomed" is a capability; the button, the glyph and the call are presentation.
+controls = { kind = "token", tokens = ["none", "zoom", "all"] }
 
 # A text field — the one role that lets a card receive something the user typed.
 #
