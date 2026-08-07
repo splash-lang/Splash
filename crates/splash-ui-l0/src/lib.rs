@@ -2632,7 +2632,7 @@ pub mod catalog {
         "time",
         "date",
     ];
-    pub const WIDTH: &[&str] = &["fill", "fit", "day", "rank", "temp"];
+    pub const WIDTH: &[&str] = &["fill", "fit", "day", "rank", "temp", "label"];
 
     /// How a map presents a trip. These are the shipping widget's own modes:
     /// `plan` shows the whole route, `drive` follows the vehicle, and `flat` is
@@ -8928,7 +8928,7 @@ pub mod kit {
             // NOT a no-op, though it is the default for a text role: `l0_row`
             // fills, so a row can only stop filling by saying so.
             "fit" => Some(("l0_fit(", ")".into())),
-            "rank" | "day" | "temp" => Some(("l0_colw(", format!(", {t:?})"))),
+            "rank" | "day" | "temp" | "label" => Some(("l0_colw(", format!(", {t:?})"))),
             _ => None,
         }
     }

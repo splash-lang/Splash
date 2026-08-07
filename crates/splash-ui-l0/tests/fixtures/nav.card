@@ -230,12 +230,12 @@ view root Surface {
     # — no branch, no two-step "clear then retype".
     Panel {
       Row(align: .center, gap: 10) {
-        TextCaption(text: copy.from)
+        TextCaption(text: copy.from, width: .label)
         Field(text: origin, placeholder: copy.here_now, on_commit: set_origin, width: .fill)
       }
       Rule()
       Row(align: .center, gap: 10) {
-        TextCaption(text: copy.to)
+        TextCaption(text: copy.to, width: .label)
         Field(text: dest, placeholder: copy.where, on_commit: set_dest,
               on_change: typing, width: .fill)
       }
@@ -248,7 +248,7 @@ view root Surface {
       when query == "" {
         Panel {
           Row(align: .center, gap: 10, on_tap: choose_dest, value: origin) {
-            TextCaption(text: copy.from)
+            TextCaption(text: copy.from, width: .label)
             TextRow(text: origin)
           }
         }
@@ -305,7 +305,7 @@ view root Surface {
     # here that the field does not do better.
     Panel {
       Row(align: .center, gap: 10) {
-        TextCaption(text: copy.via_lbl)
+        TextCaption(text: copy.via_lbl, width: .label)
         Field(text: stop, placeholder: copy.add_stop, on_commit: set_stop, width: .fill)
         when stop != "" { Chip(text: copy.remove, on_tap: drop_stop) }
       }
@@ -387,7 +387,7 @@ view root Surface {
           Row(align: .center, gap: 8) {
             TextCaption(value: leg_a.duration)
             TextCaption(value: leg_a.distance)
-            TextCaption(text: copy.via_lbl)
+            TextCaption(text: copy.via_lbl, width: .label)
             TextCaption(value: leg_b.duration)
             TextCaption(value: leg_b.distance)
           }

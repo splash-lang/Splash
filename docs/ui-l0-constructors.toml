@@ -282,7 +282,7 @@ tokens  = ["money", "signed_money", "signed_pct", "compact", "ratio", "time", "d
 
 [kinds.width]
 accepts = ["token", "number"]
-tokens  = ["fill", "fit", "day", "rank", "temp"]
+tokens  = ["fill", "fit", "day", "rank", "temp", "label"]
 
 # ─── source capabilities ──────────────────────────────────────────────────────
 # The CLOSED set of helpers a `source` may name. Like the constructor catalog
