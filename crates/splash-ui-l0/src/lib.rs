@@ -2642,6 +2642,8 @@ pub mod catalog {
     pub const MAP_VIEW: &[&str] = &["flat", "tilted"];
     /// Where a panel sits when the card is a map.
     pub const DOCK: &[&str] = &["top", "bottom"];
+    /// What an action means. The theme decides what that looks like.
+    pub const TONE: &[&str] = &["normal", "danger"];
     pub const ALIGN: &[&str] = &["start", "center", "end", "baseline"];
     pub const PAD: &[&str] = &["page", "tight", "none"];
     pub const ICON_SIZE: &[&str] = &["hero", "row", "tile"];
@@ -2786,6 +2788,8 @@ pub mod catalog {
                 ("on_tap", Event),
                 ("value", Any),
                 ("active", Bool),
+                // What the action MEANS. The theme decides `.danger` is red.
+                ("tone", Token(TONE)),
             ],
         ),
         ("WeatherIcon", &[("cond", Path), ("size", Token(ICON_SIZE))]),
@@ -8792,7 +8796,13 @@ pub mod kit {
             let asked_to_fill =
                 matches!(arg(node, "width"), Some(NodeValue::Token(t)) if t == "fill");
             let intrinsic =
-                node.kind == "Chip" || (node.kind.starts_with("Text") && !asked_to_fill);
+                // A `.danger` chip is the exception: it SPANS the sheet, so a
+                // fit-width hit target is the one thing that can hide it. It emitted
+                // a `width: Fill` bar inside a `width: Fit` wrapper and the End
+                // button rendered as an empty gap — the same Fill-inside-Fit trap
+                // that resolves to nothing, three times over in this card now.
+                (node.kind == "Chip" && !matches!(arg(node, "tone"), Some(NodeValue::Token(t)) if t == "danger"))
+                    || (node.kind.starts_with("Text") && !asked_to_fill);
             let f = if intrinsic { "l0_tap_fit" } else { "l0_tap" };
             let _ = write!(out, "{f}({target}, ");
             element_untapped(node, depth, out);
@@ -8973,8 +8983,16 @@ pub mod kit {
                 );
             }
             "Chip" => {
-                let on = i32::from(matches!(arg(node, "active"), Some(NodeValue::Bool(true))));
-                let _ = write!(out, "{f}({}, {on})", makepad::expr_of(node, "text"));
+                // `.danger` is a different role in the kit, not a parameter: it is
+                // full width and centred as well as red, and threading three
+                // presentation decisions through one flag reads worse than naming
+                // the thing.
+                if matches!(arg(node, "tone"), Some(NodeValue::Token(t)) if t == "danger") {
+                    let _ = write!(out, "l0_chip_danger({})", makepad::expr_of(node, "text"));
+                } else {
+                    let on = i32::from(matches!(arg(node, "active"), Some(NodeValue::Bool(true))));
+                    let _ = write!(out, "{f}({}, {on})", makepad::expr_of(node, "text"));
+                }
             }
             // A `Photo` WITH children is not an image, it is the page: the
             // weather card wraps the whole card in one, and a lowering that made

@@ -324,9 +324,16 @@ view root Surface {
     # toggle the renderer wires directly, exactly as the L2 card does with
     # `ui.endrow.set_visible`, so opening the sheet never touches the map.
     Panel(dock: .bottom) {
-      TextCaption(value: step.remaining, suffix: copy.left)
+      # BIG and centred. What is left of the trip is the one number a driver glances
+      # at, and it was a caption — the smallest role on the card. `TextHero` is the
+      # role for the number a screen exists to show; the sheet centres it, as the
+      # shipping card centres its `remmin`.
+      TextHero(value: step.remaining)
       Reveal {
-        Chip(text: copy.stop, on_tap: go)
+        # `.danger` says what the action MEANS. Ending navigation is destructive, and
+        # the theme renders that red, full-width and centred — the shipping card's
+        # `endrow`. A card naming a colour would be stating presentation.
+        Chip(text: copy.stop, on_tap: go, tone: .danger)
       }
     }
     # `at:` is what makes `.drive` mean the chase camera rather than the preview.
