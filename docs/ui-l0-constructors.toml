@@ -73,6 +73,9 @@ controls = { kind = "token", tokens = ["none", "zoom", "all"] }
 # searched for; a position captured from the fix has no such place. Without these
 # the map geocoded the empty origin — `sys.navroute(sys.searchnum("", …))` — so the
 # summary said "from here" and the line drew a route from nowhere.
+# The trip whose cost labels the drawn route — a source, so the bubble and the line
+# describe one journey.
+summary = { kind = "path" }
 from_lat = { kind = "data" }
 from_lon = { kind = "data" }
 

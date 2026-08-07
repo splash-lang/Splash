@@ -5575,6 +5575,10 @@ const INERT: &[(&str, &str)] = &[
     ("Map", "to"),
     ("Map", "via"),
     ("Map", "via2"),
+    // `summary` names the SOURCE whose cost labels the route, so a state-bound
+    // number is correctly ignored — a trip's duration is not a number a card holds.
+    // Asserted live by `a_map_labels_the_route_with_what_it_costs`.
+    ("Map", "summary"),
     // `at` is the same: a live POSITION, so a state cell holding a number is
     // correctly ignored. Its liveness — that it centres the map on the fix and
     // turns `.drive` into the follow camera — is asserted by
@@ -8254,5 +8258,62 @@ fn an_initial_taken_from_a_source_is_reported_as_captured() {
         held.captured.is_empty(),
         "a stored value is already captured: {:?}",
         held.captured
+    );
+}
+
+/// A route says what it costs ON the route.
+///
+/// iOS Maps labels each line it draws with the time that line takes; a sheet can only
+/// name one. So `Map(summary: trip)` puts the duration and distance on the path, and
+/// it names the SAME source the sheet reads — which is the point: the bubble and the
+/// line have to describe one journey, and two separately-bound numbers are two
+/// chances to disagree.
+#[test]
+fn a_map_labels_the_route_with_what_it_costs() {
+    const CARD: &str = concat!(
+        "source o sys.search(query: state.origin, count: 1, fields: [id, name, lat, lon])\n",
+        "source d sys.search(query: state.dest, count: 1, fields: [id, name, lat, lon])\n",
+        "source trip sys.route(from_lat: o.0.lat, from_lon: o.0.lon,\n",
+        "                      to_lat: d.0.lat, to_lon: d.0.lon,\n",
+        "                      mode: state.mode, fields: [duration, distance])\n",
+        "state origin { shape: text, initial: \"A\" }\n",
+        "state dest   { shape: text, initial: \"B\" }\n",
+        "state mode   { shape: enum[drive, walk, bike], initial: .drive }\n",
+        "view root Surface {\n",
+        "  TextValue(value: trip.duration)\n",
+        "  Map(mode: .plan, from: o, to: d, zoom: 14, summary: trip)\n",
+        "}\n"
+    );
+    let checked = check_ui_l0_named("nav", CARD);
+    assert!(checked.valid, "{:#?}", checked.diagnostics);
+
+    let data = serde_json::json!({
+        "origin": "A", "dest": "B", "mode": "drive",
+        "o": [{ "lat": 1.0, "lon": 2.0 }], "d": [{ "lat": 3.0, "lon": 4.0 }],
+        "trip": { "duration": "SEEDED", "distance": "SEEDED" },
+        "env": { "locale": {} }
+    });
+    let dsl = splash_ui_l0::kit::lower(
+        &realize(CARD, &data, RealizeLimits::default())
+            .root
+            .expect("realizes"),
+    );
+
+    // Both halves reach the badge, joined for the widget to split. Two lines,
+    // because a duration and a distance are two facts and stacking them is the
+    // theme's business, not a string the card wrote.
+    assert!(
+        dsl.contains(" + \"|\" + "),
+        "a badge is emitted, two facts joined for the widget to split:\n{dsl}"
+    );
+    // Both facts, and the SAME source the text reads — one journey, described once.
+    // The duration appears twice: on the path and in the sheet, from one call.
+    assert!(
+        dsl.contains("\"min\") + \"|\" + ") && dsl.contains("\"km\")"),
+        "the badge carries the duration and the distance:\n{dsl}"
+    );
+    assert!(
+        dsl.matches("\"min\")").count() >= 2,
+        "the badge and the summary must come from one trip:\n{dsl}"
     );
 }

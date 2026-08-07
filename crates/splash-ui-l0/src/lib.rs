@@ -2717,6 +2717,11 @@ pub mod catalog {
                 // summary said "from here" and the line drew a route from nowhere,
                 // which is the drawn-versus-reported mismatch this profile exists to
                 // catch. Same shape and same reason as `sys.route`'s four numbers.
+                // The trip whose COST labels the drawn route. A source, not two
+                // strings: the map already draws this trip, and naming the same
+                // source that answers its duration is what keeps the bubble and the
+                // line describing one journey.
+                ("summary", Path),
                 ("from_lat", ArgKind::Data),
                 ("from_lon", ArgKind::Data),
             ],
@@ -6159,6 +6164,31 @@ pub mod makepad {
     ///
     /// `None` when there is no complete trip — a lone origin pin on a map with no
     /// route reads as a dropped destination rather than a route still arriving.
+    /// The two lines of a route's badge — its duration over its distance.
+    ///
+    /// Joined by `\u{1}` here rather than composed by the card, for the same reason
+    /// the pin string is: it is a payload the widget parses, not text anyone reads
+    /// as written. The card names WHICH trip; both halves come from that one source,
+    /// so the bubble cannot describe a different journey from the line under it.
+    pub(super) fn map_badge(node: &UiNode) -> Option<String> {
+        let (_, binding) = node.bindings.iter().find(|(n, _)| n == "summary")?;
+        let field = |f: &str| {
+            vm_call(&SourceBinding {
+                field: f.to_owned(),
+                ..binding.clone()
+            })
+        };
+        let (Some(dur), Some(dist)) = (field("duration"), field("distance")) else {
+            return None;
+        };
+        // A PRINTABLE separator. `\u{1}` is the obvious choice and does not survive:
+        // emitted through `{:?}` it becomes the six characters `\u{1}` in the DSL,
+        // which the VM hands to the widget as literal text, so the split never fires
+        // and both facts render as one run. A pipe cannot occur in a duration or a
+        // distance and survives every hop as itself.
+        Some(format!("{dur} + \"|\" + {dist}"))
+    }
+
     pub(super) fn map_pins(node: &UiNode) -> Option<String> {
         // A CHASE map gets none, and this is not a preference.
         //
@@ -9296,13 +9326,14 @@ pub mod kit {
                 };
                 let _ = write!(
                     out,
-                    "{f}({:?}, {}, {lat}, {lon}, {poly}, {}, {controls:?})",
+                    "{f}({:?}, {}, {lat}, {lon}, {poly}, {}, {controls:?}, {})",
                     makepad::map_mode(node),
                     scalar_of(node, "zoom"),
                     // The pins. `""` rather than omitted, because the widget reads
                     // an empty marker string as "no pins" and that is exactly what a
                     // map with no complete trip has.
                     makepad::map_pins(node).unwrap_or_else(|| "\"\"".to_owned()),
+                    makepad::map_badge(node).unwrap_or_else(|| "\"\"".to_owned()),
                 );
             }
             // `cond` is a NUMBER — the WMO code the forecast returns — and this
