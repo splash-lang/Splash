@@ -7343,3 +7343,142 @@ fn a_numeric_argument_cannot_carry_an_expression() {
         "a generated call is ours and must pass through:\n{good}"
     );
 }
+
+/// The sheet's two numbers must be two DIFFERENT questions.
+///
+/// A driver reads "how long" and "how far", and the helper answers them from
+/// separate fields — `remmin` and `rem`. The failure this guards is the one this
+/// profile keeps producing: `eta` falling through to the distance's field, so the
+/// sheet shows the same measurement twice, once big and once small, both correct
+/// and neither the arrival time. Nothing on such a screen looks wrong.
+///
+/// Both backends, because the device renders the kit one and the desk renders the
+/// other, and a field mapped in one is not mapped in both.
+#[test]
+fn how_long_is_left_and_how_far_is_left_are_different_questions() {
+    const CARD: &str = concat!(
+        "source o sys.search(query: state.origin, count: 1, fields: [id, name, lat, lon])\n",
+        "source d sys.search(query: state.dest, count: 1, fields: [id, name, lat, lon])\n",
+        "source here sys.gps()\n",
+        "source step sys.step(from_lat: o.0.lat, from_lon: o.0.lon,\n",
+        "                     to_lat: d.0.lat, to_lon: d.0.lon,\n",
+        "                     at_lat: here.lat, at_lon: here.lon,\n",
+        "                     fields: [instruction, remaining, eta])\n",
+        "state origin { shape: text, initial: \"A\" }\n",
+        "state dest   { shape: text, initial: \"B\" }\n",
+        "view root Surface {\n",
+        "  TextHero(value: step.eta, unit: .duration)\n",
+        "  TextCaption(value: step.remaining)\n",
+        "}\n"
+    );
+    let checked = check_ui_l0_named("nav", CARD);
+    assert!(checked.valid, "{:#?}", checked.diagnostics);
+
+    let data = serde_json::json!({
+        "origin": "A", "dest": "B",
+        "o": [{ "lat": 1.0, "lon": 2.0 }], "d": [{ "lat": 3.0, "lon": 4.0 }],
+        "here": { "lat": 1.5, "lon": 2.5 },
+        "step": { "instruction": "SEEDED", "remaining": "SEEDED", "eta": "SEEDED" },
+        "env": { "locale": {} }
+    });
+    let root = realize(CARD, &data, RealizeLimits::default())
+        .root
+        .expect("realizes");
+
+    for (backend, dsl) in [
+        ("kit", splash_ui_l0::kit::lower(&root)),
+        ("makepad", splash_ui_l0::makepad::lower(&root)),
+    ] {
+        assert!(
+            dsl.contains("\"remmin\")"),
+            "{backend}: the hero must ask how many minutes are left:\n{dsl}"
+        );
+        assert!(
+            dsl.contains("\"rem\")"),
+            "{backend}: the caption must ask how far is left:\n{dsl}"
+        );
+        // The unit is the theme's word, and without it "34" beside "26.8 km"
+        // is a second distance.
+        assert!(
+            dsl.contains("\"remmin\") + \" min\""),
+            "{backend}: a bare minute count reads as a distance:\n{dsl}"
+        );
+    }
+}
+
+/// A docked panel's content sits IN the dock, not in a box inside it.
+///
+/// `l0_surface_map` draws the band and the sheet itself. Emitting the `Panel` as
+/// well nested an `l0_panel` inside each — a second rounded fill, and because that
+/// wrapper is full-width the sheet's centring applied to the wrapper rather than
+/// to the number in it, so the hero left-aligned and the caption under it was
+/// pushed off the bottom of the screen by the wrapper's own margin.
+///
+/// The second half of the test is the part that would otherwise rot: an UNdocked
+/// child must still be emitted whole. Unwrapping everything would emit a chip's
+/// children and silently drop the chip.
+#[test]
+fn a_docked_panel_does_not_draw_a_second_panel_inside_the_dock() {
+    const CARD: &str = concat!(
+        "source o sys.search(query: state.origin, count: 1, fields: [id, name, lat, lon])\n",
+        "source d sys.search(query: state.dest, count: 1, fields: [id, name, lat, lon])\n",
+        "state origin { shape: text, initial: \"A\" }\n",
+        "state dest   { shape: text, initial: \"B\" }\n",
+        "copy go { class: vocabulary, en: \"Go\" }\n",
+        "event start { origin: set(\"A\") }\n",
+        "view root Surface {\n",
+        "  Panel(dock: .top) { TextBody(text: copy.go) }\n",
+        "  Panel(dock: .bottom) { TextHero(text: copy.go) }\n",
+        "  Chip(text: copy.go, on_tap: start)\n",
+        "  Map(mode: .plan, from: o, to: d)\n",
+        "}\n"
+    );
+    let checked = check_ui_l0_named("nav", CARD);
+    assert!(checked.valid, "{:#?}", checked.diagnostics);
+
+    let data = serde_json::json!({
+        "origin": "A", "dest": "B",
+        "o": [{ "lat": 1.0, "lon": 2.0 }], "d": [{ "lat": 3.0, "lon": 4.0 }],
+        "env": { "locale": {} }, "copy": { "go": "Go" }
+    });
+    let dsl = splash_ui_l0::kit::lower(
+        &realize(CARD, &data, RealizeLimits::default())
+            .root
+            .expect("realizes"),
+    );
+    assert!(
+        dsl.contains("l0_surface_map("),
+        "a card with a Map lowers to the map surface:\n{dsl}"
+    );
+    assert!(
+        !dsl.contains("l0_panel("),
+        "the surface already draws the dock; a panel inside it is a second box:\n{dsl}"
+    );
+    // The undocked chip is still there, chip and all.
+    assert!(
+        dsl.contains("l0_chip("),
+        "an undocked child is emitted whole, not unwrapped:\n{dsl}"
+    );
+
+    // The other backend draws the same two docks with its own boxes, and had the
+    // same nested wrapper. Both, or the desk and the device disagree about a
+    // driving screen — which is how this one survived being looked at.
+    let mp = splash_ui_l0::makepad::lower(
+        &realize(CARD, &data, RealizeLimits::default())
+            .root
+            .expect("realizes"),
+    );
+    let sheet = mp
+        .lines()
+        .position(|l| l.contains("draw_bg.border_radius: 22"))
+        .expect("the sheet is the rounded box at the bottom");
+    // The line after the sheet opens is its content, not another box.
+    assert!(
+        !mp.lines().nth(sheet + 1).unwrap_or("").contains("RoundedView{"),
+        "a second box inside the sheet:\n{mp}"
+    );
+    assert!(
+        mp.lines().nth(sheet).unwrap_or("").contains("align: Align{x: 0.5}"),
+        "the sheet centres what is in it:\n{mp}"
+    );
+}

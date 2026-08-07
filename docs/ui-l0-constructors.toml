@@ -252,7 +252,7 @@ range  = { kind = "unit" }
 # Admits a token OR a path: `unit: .pct` is fixed, `unit: units` follows card
 # state. This is the argument that forced tokens to be lexically marked.
 accepts = ["token", "path"]
-tokens  = ["c", "f", "pct", "speed", "pressure", "index", "distance", "money"]
+tokens  = ["c", "f", "pct", "speed", "pressure", "index", "distance", "money", "duration"]
 
 [kinds.format]
 accepts = ["token"]
@@ -352,7 +352,7 @@ answers = ["duration", "distance", "steps"]
 # instruction only advances because the device did.
 [sources."sys.step"]
 args = ["from_lat", "from_lon", "to_lat", "to_lon", "at_lat", "at_lon", "fields"]
-answers = ["instruction", "remaining", "progress"]
+answers = ["instruction", "remaining", "progress", "eta"]
 
 [sources."sys.places"]
 args = ["lat", "lon", "category", "count", "fields"]

@@ -91,7 +91,7 @@ source leg_b sys.route(from_lat: stop_place.0.lat, from_lon: stop_place.0.lon,
 source step sys.step(from_lat: origin_place.0.lat, from_lon: origin_place.0.lon,
                      to_lat:   dest_place.0.lat,   to_lon:   dest_place.0.lon,
                      at_lat:   here.lat,           at_lon:   here.lon,
-                     fields: [instruction, remaining])
+                     fields: [instruction, remaining, eta])
 source env.locale sys.locale()
 
 # BOTH endpoints are editable state, and both are always on screen.
@@ -324,11 +324,14 @@ view root Surface {
     # toggle the renderer wires directly, exactly as the L2 card does with
     # `ui.endrow.set_visible`, so opening the sheet never touches the map.
     Panel(dock: .bottom) {
-      # BIG and centred. What is left of the trip is the one number a driver glances
-      # at, and it was a caption — the smallest role on the card. `TextHero` is the
-      # role for the number a screen exists to show; the sheet centres it, as the
-      # shipping card centres its `remmin`.
-      TextHero(value: step.remaining)
+      # BIG and centred: how long is left. The shipping card's sheet puts `remmin`
+      # at 22pt and the distance under it at 13, and it has the ordering right —
+      # "when do I arrive" is the question, and the distance is how it is answered.
+      # `unit: .duration` because "34" beside "26.8 km" reads as another distance; the
+      # theme supplies the word.
+      TextHero(value: step.eta, unit: .duration)
+      # The distance, small, beneath it — the shipping card's `remrest`.
+      TextCaption(value: step.remaining)
       Reveal {
         # `.danger` says what the action MEANS. Ending navigation is destructive, and
         # the theme renders that red, full-width and centred — the shipping card's

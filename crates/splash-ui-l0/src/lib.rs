@@ -2621,7 +2621,7 @@ pub mod catalog {
     }
 
     pub const UNIT: &[&str] = &[
-        "c", "f", "pct", "speed", "pressure", "index", "distance", "money",
+        "c", "f", "pct", "speed", "pressure", "index", "distance", "money", "duration",
     ];
     pub const FORMAT: &[&str] = &[
         "money",
@@ -2959,7 +2959,7 @@ pub mod catalog {
         ("sys.gps", &["lat", "lon", "accuracy", "ok"]),
         ("sys.search", &["id", "name", "lat", "lon", "distance"]),
         ("sys.route", &["duration", "distance", "steps"]),
-        ("sys.step", &["instruction", "remaining", "progress"]),
+        ("sys.step", &["instruction", "remaining", "progress", "eta"]),
         (
             "sys.places",
             &["id", "name", "distance", "lat", "lon", "category"],
@@ -6332,6 +6332,10 @@ pub mod makepad {
                     // above a blank distance, which reads as "still loading"
                     // rather than "asked for the wrong key".
                     "remaining" => "rem",
+                    // How long is left, in minutes. The helper spells it
+                    // `remmin`; a card asks for `eta`, which is what the
+                    // number MEANS to whoever is driving.
+                    "eta" => "remmin",
                     "progress" => "progress",
                     _ => return None,
                 };
@@ -6576,6 +6580,12 @@ pub mod makepad {
                 Some(NodeValue::Token(t)) if t == "c" || t == "f" => "°",
                 Some(NodeValue::Text(t)) if t == "c" || t == "f" => "°",
                 Some(NodeValue::Token(t)) if t == "pct" => "%",
+                // A duration is minutes, and "34" alone is not a duration —
+                // beside a distance it reads as another distance. The word is
+                // the theme's to supply, not the card's: a card that wrote
+                // `suffix: "min"` would be asserting the unit its own number
+                // came in, and would be wrong the day the helper answers hours.
+                Some(NodeValue::Token(t)) if t == "duration" => " min",
                 _ => "",
             },
             glyph: match arg(node, "glyph") {
@@ -6958,13 +6968,23 @@ pub mod makepad {
                     c.kind == "Panel"
                         && matches!(arg(c, "dock"), Some(NodeValue::Token(t)) if t == "top")
                 };
+                // A docked panel contributes its CHILDREN, not itself — the band and
+                // the sheet below ARE the panel's chrome, drawn here. Emitting the
+                // `Panel` too nested a second rounded fill inside each, and because
+                // that inner box is full-width the sheet's centring applied to the box
+                // rather than to the number in it. The kit backend had the same fault.
+                let docked_children = |child: &UiNode, depth: usize, out: &mut String| {
+                    for inner in &child.children {
+                        element(inner, depth, out);
+                    }
+                };
                 for child in node.children.iter().filter(|c| docked_top(c)) {
                     let _ = writeln!(
                         out,
                         "{p}  View{{ width: Fill height: Fit flow: Down align: Align{{x: 0.5 y: 0.0}} \
                          margin: Inset{{left: 8 top: 46 right: 8}}"
                     );
-                    element(child, depth + 2, out);
+                    docked_children(child, depth + 2, out);
                     let _ = writeln!(out, "{p}  }}");
                 }
                 let _ = writeln!(
@@ -6975,15 +6995,23 @@ pub mod makepad {
                     out,
                     "{p}    RoundedView{{ width: Fill height: Fit flow: Down \
                      draw_bg.color: #0f1620 draw_bg.border_radius: 22 \
-                     margin: Inset{{left: 8 right: 8 bottom: 76}} \
-                     padding: Inset{{left: 14 top: 12 right: 14 bottom: 14}}"
+                     align: Align{{x: 0.5}} \
+                     margin: Inset{{left: 8 right: 8 bottom: 40}} \
+                     padding: Inset{{left: 14 top: 4 right: 14 bottom: 8}}"
                 );
                 for child in node
                     .children
                     .iter()
                     .filter(|c| c.kind != "Map" && !docked_top(c))
                 {
-                    element(child, depth + 3, out);
+                    // Docked panels unwrap here too; anything else placed straight on
+                    // the surface is emitted whole, or a lone chip floated over the
+                    // map would lose the chip and keep its label.
+                    if child.kind == "Panel" && arg(child, "dock").is_some() {
+                        docked_children(child, depth + 3, out);
+                    } else {
+                        element(child, depth + 3, out);
+                    }
                 }
                 let _ = writeln!(out, "{p}    }}");
                 let _ = writeln!(out, "{p}  }}");
@@ -8899,11 +8927,35 @@ pub mod kit {
                         .iter()
                         .filter(|c| c.kind != "Map" && (docked_top(c) == (pass == 0)))
                     {
-                        if !first {
-                            out.push_str(", ");
+                        // A docked panel contributes its CHILDREN, not itself.
+                        //
+                        // `l0_surface_map` already draws the dock: the band at the
+                        // top and the sheet at the bottom are its own chrome. Emitting
+                        // the `Panel` as well put an `l0_panel` inside each of them —
+                        // a second rounded box, with its own fill, `pady: 12` and
+                        // `margintop: 16`. Three faults, one wrapper: the sheet had a
+                        // visible box drawn inside it; the wrapper is `fillw`, so the
+                        // sheet's `alignx` centred the wrapper and nothing inside it,
+                        // and the hero went left; and the 40 extra units it added
+                        // pushed the distance under the bottom of the screen.
+                        // Only a DOCKED panel unwraps — that is the one whose
+                        // chrome the surface has already drawn. Anything else
+                        // placed directly on the surface is emitted whole, or a
+                        // card that floats a lone chip over the map would have
+                        // emitted the chip's children and lost the chip.
+                        let docked = child.kind == "Panel" && arg(child, "dock").is_some();
+                        let emit: Vec<&UiNode> = if docked {
+                            child.children.iter().collect()
+                        } else {
+                            vec![child]
+                        };
+                        for one in emit {
+                            if !first {
+                                out.push_str(", ");
+                            }
+                            first = false;
+                            element(one, depth + 1, out);
                         }
-                        first = false;
-                        element(child, depth + 1, out);
                     }
                     out.push(']');
                 }
