@@ -4769,14 +4769,15 @@ fn the_nav_trip_planner_is_expressible_at_l0() {
     // trip and the card says so. That is the price of a total form and it is
     // visible, which is the point.
     //
-    // It went to 260 for a while, for an origin that defaults to the device (R11.3):
-    // two more route sources, a step source and eight guarded branches. That work is
-    // backed out — it could not work until the host writes fetched values into a
-    // card's data — and the bound comes back down with it. A bound raised for a
-    // feature and left up after the feature is removed is a bound that no longer
-    // measures anything.
+    // It went to 260, then 230, for an origin that defaults to the device (R11.3),
+    // and both times the feature came back out. The bound goes with it: one left
+    // high after its feature is removed measures nothing.
     //
-    // The comparison it exists to make: 664 lines at L2 against 162 here.
+    // The comparison it exists to make: 664 lines at L2 against 162 here, at close
+    // to the same function. If an increment ever needs 400, that is the signal to add
+    // machinery instead of declarations — this whole exercise rests on the original
+    // being mostly compensation, and a card that grew like the original did would be
+    // evidence against it.
     let lines = NAV
         .lines()
         .filter(|l| {
