@@ -2640,6 +2640,8 @@ pub mod catalog {
     pub const MAP_MODE: &[&str] = &["plan", "drive", "flat"];
     /// Flat or tilted, while driving — the shipping app's R8.1 chase view.
     pub const MAP_VIEW: &[&str] = &["flat", "tilted"];
+    /// Where a panel sits when the card is a map.
+    pub const DOCK: &[&str] = &["top", "bottom"];
     pub const ALIGN: &[&str] = &["start", "center", "end", "baseline"];
     pub const PAD: &[&str] = &["page", "tight", "none"];
     pub const ICON_SIZE: &[&str] = &["hero", "row", "tile"];
@@ -2694,7 +2696,9 @@ pub mod catalog {
                 ("width", TokenOrPath(WIDTH)),
             ],
         ),
-        ("Panel", &[]),
+        ("Panel", &[("dock", Token(DOCK))]),
+        // Content a swipe reveals. See the catalog.
+        ("Reveal", &[]),
         ("Card", &[("on_tap", Event), ("value", Any)]),
         // A column may say how WIDE, because a row of columns has to divide the
         // line somehow and only the card knows which column is the one that
@@ -6943,6 +6947,22 @@ pub mod makepad {
                 // at the top sits exactly where the widget put the route. Measured:
                 // the trip's Saratoga end was behind the panel, and the camera was
                 // doing its job.
+                // A `.top` panel floats in its own band, above everything. That is
+                // where a turn instruction belongs and where the app this replaces
+                // puts it; the summary sheet is the bottom one.
+                let docked_top = |c: &UiNode| {
+                    c.kind == "Panel"
+                        && matches!(arg(c, "dock"), Some(NodeValue::Token(t)) if t == "top")
+                };
+                for child in node.children.iter().filter(|c| docked_top(c)) {
+                    let _ = writeln!(
+                        out,
+                        "{p}  View{{ width: Fill height: Fit flow: Down align: Align{{x: 0.5 y: 0.0}} \
+                         margin: Inset{{left: 8 top: 46 right: 8}}"
+                    );
+                    element(child, depth + 2, out);
+                    let _ = writeln!(out, "{p}  }}");
+                }
                 let _ = writeln!(
                     out,
                     "{p}  View{{ width: Fill height: Fill flow: Down align: Align{{x: 0.5 y: 1.0}}"
@@ -6954,7 +6974,11 @@ pub mod makepad {
                      margin: Inset{{left: 8 right: 8 bottom: 76}} \
                      padding: Inset{{left: 14 top: 12 right: 14 bottom: 14}}"
                 );
-                for child in node.children.iter().filter(|c| c.kind != "Map") {
+                for child in node
+                    .children
+                    .iter()
+                    .filter(|c| c.kind != "Map" && !docked_top(c))
+                {
                     element(child, depth + 3, out);
                 }
                 let _ = writeln!(out, "{p}    }}");
@@ -7277,6 +7301,15 @@ pub mod makepad {
                     "{p}{role}{{{width} text: {body} draw_text.color: {colour}{size}{} }}",
                     tap_binding(node)
                 );
+            }
+            // Content a swipe reveals — hidden until then. See the catalog.
+            "Reveal" => {
+                let _ = writeln!(
+                    out,
+                    "{p}l0reveal := View{{ width: Fill height: Fit flow: Down visible: false"
+                );
+                children(node, depth, out);
+                let _ = writeln!(out, "{p}}}");
             }
             // The one role that lets a card receive something the user typed.
             //
@@ -8481,6 +8514,7 @@ pub mod kit {
             "Field" => "l0_field",
             "Map" => "l0_map",
             "Surface" => "l0_surface",
+            "Reveal" => "l0_reveal",
             "Col" => "l0_col",
             "Row" => "l0_row",
             "Grid" => "l0_grid",
@@ -8837,18 +8871,33 @@ pub mod kit {
                     .iter()
                     .find(|c| c.kind == "Map")
                     .expect("guarded above");
+                // THREE slots: the map, the band docked to the top, and the sheet at
+                // the bottom. A turn instruction belongs in the top band and the
+                // summary in the sheet, which is how the app this replaces arranges
+                // its driving screen and how every map app does.
+                let docked_top = |c: &&UiNode| {
+                    c.kind == "Panel"
+                        && matches!(arg(c, "dock"), Some(NodeValue::Token(t)) if t == "top")
+                };
                 out.push_str("l0_surface_map(");
                 element(map, depth, out);
-                out.push_str(", [");
-                let mut first = true;
-                for child in node.children.iter().filter(|c| c.kind != "Map") {
-                    if !first {
-                        out.push_str(", ");
+                for pass in 0..2 {
+                    out.push_str(", [");
+                    let mut first = true;
+                    for child in node
+                        .children
+                        .iter()
+                        .filter(|c| c.kind != "Map" && (docked_top(c) == (pass == 0)))
+                    {
+                        if !first {
+                            out.push_str(", ");
+                        }
+                        first = false;
+                        element(child, depth + 1, out);
                     }
-                    first = false;
-                    element(child, depth + 1, out);
+                    out.push(']');
                 }
-                out.push_str("])");
+                out.push(')');
             }
             "Surface" => {
                 let _ = write!(out, "{f}(");
@@ -8933,6 +8982,12 @@ pub mod kit {
             // attempt made, and it is why `l0_surface_photo` exists — image,
             // scrim, then the content, so text stays legible over whatever the
             // image turns out to be.
+            // Content a swipe reveals — hidden until then. See the catalog.
+            "Reveal" => {
+                out.push_str("l0_reveal(");
+                children(node, depth, out);
+                out.push(')');
+            }
             "Photo" if !node.children.is_empty() => {
                 let _ = write!(out, "l0_surface_photo({}, ", makepad::expr_of(node, "src"));
                 children(node, depth, out);

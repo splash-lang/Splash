@@ -303,13 +303,29 @@ view root Surface {
 
   # ---- driving -------------------------------------------------------------
   when screen == .drive {
-    # The banner. Every value in it is a measurement: the manoeuvre and the
-    # distance left both come from the device's own position projected onto the
-    # route, so this row changes when the car moves and at no other time.
-    Panel {
-      TextRow(text: step.instruction)
-      Row(align: .center, gap: 12) {
-        TextCaption(value: step.remaining, suffix: copy.left)
+    # The turn instruction, DOCKED TO THE TOP — where a driver looks for it, and
+    # where the app this replaces puts its `roadpill`. Every value in it is a
+    # measurement: the manoeuvre comes from the device's own position projected onto
+    # the route, so it changes when the car moves and at no other time.
+    Panel(dock: .top) {
+      # WRAPS. A manoeuvre is a whole street name and "Continue onto South De Anza
+      # Boulevard" was clipped mid-word at the card's edge — the one thing a driver
+      # reads at a glance, truncated. `TextBody` is the role that wraps.
+      TextBody(text: step.instruction, width: .fill)
+    }
+
+    # The summary sheet, docked to the bottom and SWIPEABLE — the shipping app's
+    # R8.3. What remains is always on screen; `End` is one swipe away rather than
+    # sitting under the driver's thumb for the whole trip.
+    #
+    # `Reveal` is not card state, and that matters more here than it reads. A state
+    # change re-resolves the card, re-parses the document and rebuilds the `MapView`
+    # inside it — measured at up to 327 ms of frozen map. The reveal is a visibility
+    # toggle the renderer wires directly, exactly as the L2 card does with
+    # `ui.endrow.set_visible`, so opening the sheet never touches the map.
+    Panel(dock: .bottom) {
+      TextCaption(value: step.remaining, suffix: copy.left)
+      Reveal {
         Chip(text: copy.stop, on_tap: go)
       }
     }

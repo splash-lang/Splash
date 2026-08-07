@@ -70,7 +70,15 @@ placeholder = { kind = "data" }
 on_commit   = { kind = "event" }
 width       = { kind = "width" }
 
+# Where a panel sits when the card is a MAP.
+#
+# A map card is an overlay: the map fills it and the panels float over it (see
+# `l0_surface_map`). `.top` is the band a turn instruction belongs in and `.bottom`
+# is the summary sheet — which is how the app this replaces arranges its driving
+# screen, and how every map app does. Ignored by a card with no map, where panels
+# simply stack.
 [Panel]
+dock = { kind = "token", tokens = ["top", "bottom"] }
 
 [Card]
 on_tap = { kind = "event" }
@@ -95,6 +103,18 @@ value  = { kind = "any" }
 
 [Grid]
 cols = { kind = "number" }
+
+# Content that a swipe reveals.
+#
+# Inside a docked panel, everything in a `Reveal` starts hidden and a swipe up on the
+# panel shows it; a swipe down hides it again. That is the shipping nav app's drive
+# sheet: a compact time-remaining chip by default, `End` revealed on demand.
+#
+# It is not card STATE. A state change re-resolves the card, which re-parses the
+# document and rebuilds the `MapView` inside it — measured at up to 327 ms of frozen
+# map. The reveal is a visibility toggle the renderer wires directly, exactly as the
+# L2 card does with `ui.endrow.set_visible`, so the map is never touched.
+[Reveal]
 
 [Rule]
 

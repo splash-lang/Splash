@@ -5568,6 +5568,11 @@ const INERT: &[(&str, &str)] = &[
     // static mode. The tilted case is asserted in `a_map_lowers_a_live_route`,
     // where a real position is declared.
     ("Map", "view"),
+    // `dock` places a panel in a MAP card's top band or bottom sheet, and this probe
+    // builds neither — a card with no map simply stacks its panels, where docking
+    // correctly means nothing. Asserted in
+    // `a_card_holding_a_map_floats_its_content_over_it`, which builds the real thing.
+    ("Panel", "dock"),
     // `Field.width` used to sit here: "a text input is not wrapped by the width
     // composer — the `Field` branch returns before it". That was true of both
     // backends because neither lowered `Field` AT ALL in one of them: the makepad
@@ -6908,6 +6913,46 @@ fn a_card_holding_a_map_floats_its_content_over_it() {
         mk.contains("draw_bg.color: #0f1620") && mk.contains("Align{x: 0.5 y: 1.0}"),
         "the sheet must be opaque and bottom-aligned:\n{mk}"
     );
+    // A `.top` panel goes in its own band ABOVE the sheet, which is where a turn
+    // instruction belongs and where the app this replaces puts it.
+    const DOCKED: &str = concat!(
+        "copy a { class: vocabulary, en: \"turn left\" }\n",
+        "copy b { class: vocabulary, en: \"2 km\" }\n",
+        "source o sys.search(query: state.q, count: 1, fields: [id, name, lat, lon])\n",
+        "state q { shape: text, initial: \"A\" }\n",
+        "view root Surface {\n",
+        "  Panel(dock: .top) { TextRow(text: copy.a) }\n",
+        "  Panel(dock: .bottom) { TextRow(text: copy.b) Reveal { Rule() } }\n",
+        "  Map(mode: .plan, from: o, to: o, zoom: 14)\n",
+        "}\n"
+    );
+    let docked_report = check_ui_l0_named("nav", DOCKED);
+    assert!(docked_report.valid, "{:#?}", docked_report.diagnostics);
+    let docked = splash_ui_l0::kit::lower(
+        &realize(
+            DOCKED,
+            &serde_json::json!({
+                "o": [{ "id": "1", "name": "n", "lat": 1.0, "lon": 2.0 }], "q": "A",
+                "env": { "locale": {} }, "copy": { "a": "turn left", "b": "2 km" }
+            }),
+            RealizeLimits::default(),
+        )
+        .root
+        .expect("realizes"),
+    );
+    // Three slots: the map, then the top band, then the sheet — in that order, so
+    // the top panel's content precedes the bottom panel's.
+    let top_at = docked.find("turn left").expect("the top panel");
+    let bottom_at = docked.find("2 km").expect("the sheet");
+    assert!(
+        top_at < bottom_at,
+        "a .top panel must be emitted into the top band, before the sheet:\n{docked}"
+    );
+    assert!(
+        docked.contains("l0_reveal("),
+        "a Reveal must lower to the kit's hidden container:\n{docked}"
+    );
+
     // And a card with NO map keeps the ordinary column — this is a map's rule.
     const PLAIN: &str = "copy a { class: vocabulary, en: \"x\" }\n                         view root Surface { TextRow(text: copy.a) }\n";
     let plain = makepad::lower(
