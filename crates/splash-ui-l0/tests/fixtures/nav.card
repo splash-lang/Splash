@@ -345,7 +345,22 @@ view root Surface {
     # the vector tiles. It follows the SAME declared position as the flat one; the
     # widget's own `3d` mode drives a simulated vehicle, and pointing this at it
     # would put back the invented motion the whole rule exists to refuse.
-    Map(mode: .drive, from: origin_place, to: dest_place, at: here,
-        view: .tilted, zoom: 17)
+    #
+    # GUARDED ON WHETHER THERE IS A FIX. `sys.gps` answers -9999 for a latitude it
+    # does not have, and a chase camera pointed at -9999 is not a camera that lags —
+    # it is a map somewhere off the coast of Africa with a route drawn nowhere near
+    # it. The card this replaces guards the same way (`sys.gps("ok") >= 1`) and falls
+    # back; L0 says it with a guard instead of an `if`, which is the same decision
+    # written where the checker can see it.
+    when here.ok == 1 {
+      Map(mode: .drive, from: origin_place, to: dest_place, at: here,
+          view: .tilted, zoom: 17)
+    }
+    # No fix: show the TRIP, framed, rather than a chase camera with nothing to
+    # chase. The banner above still says what the next manoeuvre is — it is
+    # declared, and a card does not get to decide it has no data.
+    when here.ok == 0 {
+      Map(mode: .plan, from: origin_place, to: dest_place, zoom: 14)
+    }
   }
 }

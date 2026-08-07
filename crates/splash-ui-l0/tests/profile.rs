@@ -7592,3 +7592,66 @@ fn a_map_pins_the_trip_it_draws() {
         "the pinned stop must be the one the line detours through:\n{via}"
     );
 }
+
+/// With no fix, the camera must not chase one.
+///
+/// `sys.gps` answers **-9999** for a latitude it does not have. A chase camera
+/// pointed at that is not a camera that lags — it is a map off the coast of Africa
+/// with the trip's route drawn nowhere near it, and the turn banner above it still
+/// reading like guidance. The card being replaced guards with `sys.gps("ok") >= 1`;
+/// L0 says the same thing with a guard, where the checker can see it.
+///
+/// The test is differential because both branches draw a map, and a card that lost
+/// the guard would still render something map-shaped.
+#[test]
+fn a_missing_fix_falls_back_to_the_trip_not_to_nowhere() {
+    const CARD: &str = concat!(
+        "source here sys.gps()\n",
+        "source o sys.search(query: state.origin, count: 1, fields: [id, name, lat, lon])\n",
+        "source d sys.search(query: state.dest, count: 1, fields: [id, name, lat, lon])\n",
+        "state origin { shape: text, initial: \"A\" }\n",
+        "state dest   { shape: text, initial: \"B\" }\n",
+        "view root Surface {\n",
+        "  when here.ok == 1 { Map(mode: .drive, from: o, to: d, at: here, view: .tilted, zoom: 17) }\n",
+        "  when here.ok == 0 { Map(mode: .plan, from: o, to: d, zoom: 14) }\n",
+        "}\n"
+    );
+    let checked = check_ui_l0_named("nav", CARD);
+    assert!(checked.valid, "{:#?}", checked.diagnostics);
+
+    let lower = |lat: f64, lon: f64, ok: i64| {
+        let data = serde_json::json!({
+            "origin": "A", "dest": "B",
+            "o": [{ "lat": 1.0, "lon": 2.0 }], "d": [{ "lat": 3.0, "lon": 4.0 }],
+            "here": { "lat": lat, "lon": lon, "ok": ok }, "env": { "locale": {} }
+        });
+        splash_ui_l0::kit::lower(
+            &realize(CARD, &data, RealizeLimits::default())
+                .root
+                .expect("realizes"),
+        )
+    };
+
+    // A fix: the chase camera, following the declared position.
+    let fixed = lower(37.2656, -122.0294, 1);
+    assert!(
+        fixed.contains("l0_map(\"follow3d\""),
+        "a fix earns the chase camera:\n{fixed}"
+    );
+
+    // No fix: the trip, framed — and crucially NOT a camera aimed at the sentinel.
+    let lost = lower(-9999.0, -9999.0, 0);
+    assert!(
+        lost.contains("l0_map(\"plan\""),
+        "no fix falls back to the trip:\n{lost}"
+    );
+    assert!(
+        !lost.contains("follow"),
+        "and must not follow anything:\n{lost}"
+    );
+    // The sentinel must not reach the widget as a coordinate at all.
+    assert!(
+        !lost.contains("-9999"),
+        "the no-fix sentinel is not a place:\n{lost}"
+    );
+}
