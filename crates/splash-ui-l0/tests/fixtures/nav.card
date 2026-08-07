@@ -240,7 +240,9 @@ copy remove   { class: vocabulary, en: "Remove" }
 copy flat_lbl { class: vocabulary, en: "2D" }
 copy tilt_lbl { class: vocabulary, en: "3D" }
 copy plus     { class: vocabulary, en: "+" }
-copy onward   { class: vocabulary, en: "»" }
+copy onward   { class: vocabulary, en: "GO" }
+copy title    { class: vocabulary, en: "Directions" }
+copy add_row  { class: vocabulary, en: "Add Stop" }
 
 view root Surface {
   # ---- planning ------------------------------------------------------------
@@ -248,6 +250,25 @@ view root Surface {
     # Two fields, ALWAYS. A `Field` shows the state it is bound to and commits a
     # replacement, so each row is both the current value and the way to change it
     # — no branch, no two-step "clear then retype".
+    # WHAT THE SHEET IS. iOS Maps titles its directions sheet, and the title is what
+    # tells a glance apart from the map behind it.
+    TextTitle(text: copy.title)
+
+    # CENTRED. `align:` on a row is its CROSS axis — the one the flow does not
+    # already decide — so centring three chips along the row means centring the row
+    # inside a column, whose cross axis is the horizontal one.
+    Col(align: .center) {
+      # `width: .fit` is what makes the centring mean anything: a row that FILLS
+      # already spans the sheet, so centring it moves nothing and its chips stay
+      # against the left edge. Hugging its content gives the column something to
+      # centre.
+      Row(align: .center, gap: 8, width: .fit) {
+        Chip(text: copy.drive, on_tap: pick_mode, value: .drive, active: mode == .drive)
+        Chip(text: copy.walk,  on_tap: pick_mode, value: .walk,  active: mode == .walk)
+        Chip(text: copy.bike,  on_tap: pick_mode, value: .bike,  active: mode == .bike)
+      }
+    }
+
     Panel {
       Row(align: .center, gap: 10) {
         TextCaption(text: copy.from, width: .label)
@@ -258,6 +279,25 @@ view root Surface {
         TextCaption(text: copy.to, width: .label)
         Field(text: dest, placeholder: copy.where, on_commit: set_dest,
               on_change: typing, width: .fill)
+      }
+      # The stop lives in the SAME group, under the destination, which is where iOS
+      # Maps puts it — a third row of one card, not a second card.
+      when stop_row == .shown {
+        Rule()
+        Row(align: .center, gap: 10) {
+          TextCaption(text: copy.via_lbl, width: .label)
+          Field(text: stop, placeholder: copy.add_stop, on_commit: set_stop, width: .fill)
+          Chip(text: copy.remove, on_tap: drop_stop)
+        }
+      }
+      # And `Add Stop` is a row of the group too, reading as an action rather than
+      # sitting apart as a button.
+      when stop_row == .hidden {
+        Rule()
+        Row(align: .center, gap: 10, on_tap: add_stop, value: "1") {
+          TextCaption(text: copy.plus, width: .label)
+          TextRow(text: copy.add_row)
+        }
       }
     }
 
@@ -323,33 +363,11 @@ view root Surface {
     #
     # A `Field` is how text enters an L0 card. There is nothing for a chip to do
     # here that the field does not do better.
-    when stop_row == .shown {
-      Panel {
-        Row(align: .center, gap: 10) {
-          TextCaption(text: copy.via_lbl, width: .label)
-          Field(text: stop, placeholder: copy.add_stop, on_commit: set_stop, width: .fill)
-          Chip(text: copy.remove, on_tap: drop_stop)
-        }
-      }
-    }
+
 
     # How the trip is travelled. Three chips, one lit — `active:` is a predicate
     # over declared state, which is why a chip can say which one it is without an
     # expression.
-    # CENTRED. `align:` on a row is its CROSS axis — the one the flow does not
-    # already decide — so centring three chips along the row means centring the row
-    # inside a column, whose cross axis is the horizontal one.
-    Col(align: .center) {
-      # `width: .fit` is what makes the centring mean anything: a row that FILLS
-      # already spans the sheet, so centring it moves nothing and its chips stay
-      # against the left edge. Hugging its content gives the column something to
-      # centre.
-      Row(align: .center, gap: 8, width: .fit) {
-        Chip(text: copy.drive, on_tap: pick_mode, value: .drive, active: mode == .drive)
-        Chip(text: copy.walk,  on_tap: pick_mode, value: .walk,  active: mode == .walk)
-        Chip(text: copy.bike,  on_tap: pick_mode, value: .bike,  active: mode == .bike)
-      }
-    }
 
     # ---- the DIRECT trip ---------------------------------------------------
     when dest != "" {
@@ -361,32 +379,30 @@ view root Surface {
         when origin != "" {
           when trip.$state == .pending { TextBody(text: copy.seeking) }
           when trip.$state == .ready {
-            Col(align: .center) {
-              Row(align: .center, gap: 12, width: .fit) {
-                TextValue(value: trip.duration)
+            # The decision, and the one button that acts on it. iOS Maps puts the
+            # duration and distance on the left and GO on the right, and that is the
+            # reading order: what it costs, then whether to go.
+            Row(align: .center, gap: 12) {
+              Col(gap: 2) {
+                TextHero(value: trip.duration)
                 TextCaption(value: trip.distance, suffix: copy.away)
               }
-              # The two things you can DO, as icons: add a stop, or set off.
-              Row(align: .center, gap: 8, width: .fit) {
-                Chip(text: copy.plus, on_tap: add_stop, tone: .primary)
-                Chip(text: copy.onward, on_tap: go, tone: .primary)
-              }
+              Chip(text: copy.onward, on_tap: go, tone: .primary)
             }
           }
         }
         when origin == "" {
           when trip_here.$state == .pending { TextBody(text: copy.seeking) }
           when trip_here.$state == .ready {
-            Col(align: .center) {
-              Row(align: .center, gap: 12, width: .fit) {
-                TextValue(value: trip_here.duration)
+            # The decision, and the one button that acts on it. iOS Maps puts the
+            # duration and distance on the left and GO on the right, and that is the
+            # reading order: what it costs, then whether to go.
+            Row(align: .center, gap: 12) {
+              Col(gap: 2) {
+                TextHero(value: trip_here.duration)
                 TextCaption(value: trip_here.distance, suffix: copy.away)
               }
-              # The two things you can DO, as icons: add a stop, or set off.
-              Row(align: .center, gap: 8, width: .fit) {
-                Chip(text: copy.plus, on_tap: add_stop, tone: .primary)
-                Chip(text: copy.onward, on_tap: go, tone: .primary)
-              }
+              Chip(text: copy.onward, on_tap: go, tone: .primary)
             }
           }
         }
