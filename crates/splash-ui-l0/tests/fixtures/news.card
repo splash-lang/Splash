@@ -19,14 +19,24 @@ source feed        sys.news(count: 7, offset: 1, fields: [id, title, author, poi
 source article     sys.news_item(id: state.selected,
                                  fields: [title, author, points, comments, url])
 source env.locale  sys.locale()
+# The reading list (§5.12): saved story IDS, each row fetched by id — so a
+# bookmark outlives the front page it was found on.
+source saved       sys.reading(fields: [id, title, points])
 
 state selected { shape: text, initial: "" }        # "" ⇒ feed, else a story id
 
 event open_story  { selected: set($value) }
 event back        { selected: clear }
+# The bookmark toggle, from the story screen. Identity only: the id goes to the
+# store; title and points are fetched fresh every time the list renders.
+event keep_story  { saved: append($value) }
+event drop_story  { saved: remove($value) }
 
 copy masthead { class: vocabulary, en: "Top Stories",  zh: "头条" }
 copy source   { class: vocabulary, en: "HACKER NEWS", zh: "科技新闻" }
+copy saved_hd { class: vocabulary, en: "READING LIST", zh: "收藏" }
+copy keep_lbl { class: vocabulary, en: "☆ Save" }
+copy drop_lbl { class: vocabulary, en: "Remove" }
 copy latest   { class: vocabulary, en: "LATEST",      zh: "最新" }
 copy lead     { class: vocabulary, en: "LEAD",        zh: "焦点" }
 copy pts      { class: vocabulary, en: "pts",         zh: "分" }
@@ -101,10 +111,24 @@ view latest  Col {
                    StoryRow(story: s, position: i, on_open: open_story)
                  }
                }
+               for b, i in saved key b.id {
+                 # Chip beside the tappable part, never inside it — a row's hit
+                 # target covers its content and eats the chip's tap, measured.
+                 Row(align: .center, gap: 8) {
+                   Row(align: .center, gap: 8, width: .fill, on_tap: open_story, value: b.id) {
+                     TextCaption(text: copy.saved_hd, width: .label)
+                     TextRow(text: b.title, width: .fill)
+                   }
+                   Chip(text: copy.drop_lbl, on_tap: drop_story, value: b.id)
+                 }
+               }
              }
 
 view story  Col {
               Row(on_tap: back) { TextCaption(glyph: "‹") }
+              Row(gap: 8) {
+                Chip(text: copy.keep_lbl, on_tap: keep_story, value: selected)
+              }
               TextTitle(text: article.title, width: .fill)
               Row(gap: 6) {
                 TextCaption(value: article.points, suffix: copy.pts)

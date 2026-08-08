@@ -436,6 +436,15 @@ aggregates = ["min", "max"]
 # `sys.watchlist` takes no selector because it IS the user's list. The host reads
 # the stored tickers, fetches each quote, and returns the rows — so a card asks
 # for the fields it wants to show and never learns a store exists.
+# The reading list — §5.12 for NEWS. What is stored is the story's Algolia id,
+# an identity the item endpoint serves forever; title, points and the rest are
+# fetched by id at read time, so a bookmark saved last month shows today's
+# comment count and never a stale copy.
+[sources."sys.reading"]
+args = ["fields"]
+answers = ["id", "title", "author", "points", "comments", "url"]
+writes = ["append", "remove"]
+
 [sources."sys.watchlist"]
 args = ["fields"]
 answers = ["ticker", "name", "last", "change", "pct", "open", "high", "low", "prev", "volume", "mktcap", "pe", "currency", "exchange"]

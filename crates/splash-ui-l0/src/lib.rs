@@ -3058,6 +3058,7 @@ pub mod catalog {
         // learns that a store exists.
         ("sys.watchlist", &["fields"]),
         ("sys.prefs", &["fields"]),
+        ("sys.reading", &["fields"]),
         // Free-text ticker lookup, so a card can offer something the top-movers
         // list does not happen to contain. `sys.search` is the PLACE search and
         // answers a different question; naming them apart is what stops a card
@@ -3178,6 +3179,10 @@ pub mod catalog {
             ],
         ),
         ("sys.prefs", &["units", "range", "home", "work", "mode"]),
+        // The reading list: SAVED story ids, joined to the story each id names.
+        // The id is the identity Algolia serves forever, so a bookmarked story
+        // outlives the front page it was found on.
+        ("sys.reading", &["id", "title", "author", "points", "comments", "url"]),
         // Verified against the live endpoint, not its documentation: `longname`
         // comes back null for plenty of listings, so `name` falls back to
         // `shortname` in the helper. `kind` distinguishes an equity from a
@@ -3226,6 +3231,7 @@ pub mod catalog {
         // ambiguous about. The checker enforces the exactly-one rule on any
         // written prefs source; a read-only one may still ask for several.
         ("sys.prefs", &["set", "clear"]),
+        ("sys.reading", &["append", "remove"]),
     ];
 
     pub fn mutable(name: &str) -> Option<&'static [&'static str]> {
@@ -6857,6 +6863,18 @@ pub mod makepad {
                     _ => return None,
                 };
                 Some(format!("sys.watchlist({index}, {key:?})"))
+            }
+            // A saved STORY. The id is the stored reference; everything beside
+            // it is fetched by that id, so a bookmark shows today's points for
+            // a story saved last month.
+            "sys.reading" => {
+                let (index, field) = binding.field.split_once('.')?;
+                index.parse::<u32>().ok()?;
+                let key = match field {
+                    f @ ("id" | "title" | "author" | "points" | "comments" | "url") => f,
+                    _ => return None,
+                };
+                Some(format!("sys.reading({index}, {key:?})"))
             }
             // A saved place. `name`/`lat`/`lon` identify it and come from the
             // store; the readings beside them are fetched, which is why this

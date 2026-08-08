@@ -1117,8 +1117,12 @@ fn a_tappable_node_lowers_to_a_reachable_notify() {
         .unwrap_or_else(|| panic!("no reachable tap for open_quote:\n{dsl}"));
     assert!(notify.contains("event: \"open_quote\""), "event:\n{notify}");
     assert!(notify.contains("value: \"NVDA\""), "payload:\n{notify}");
+    // `Row#0/Row#0`: the mover's tap row is nested one deeper since the ☆
+    // chip moved out to be its SIBLING — a row's transparent hit target
+    // covers its whole content, so a chip inside a tappable row can never
+    // receive its own tap (measured on device; same fix as weather's ×).
     assert!(
-        notify.contains("key: \"root/when#0/w:list#0/list/Panel#0/for#0[NVDA]/Row#0\""),
+        notify.contains("key: \"root/when#0/w:list#0/list/Panel#0/for#0[NVDA]/Row#0/Row#0\""),
         "instance key:\n{notify}"
     );
 

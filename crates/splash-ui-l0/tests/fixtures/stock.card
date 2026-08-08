@@ -14,15 +14,28 @@ source quote       sys.quote(ticker: state.selected,
                              fields: [name, last, change, pct, open, high, low,
                                       volume, mktcap, pe])
 source env.locale  sys.locale()
+# The user's own layer (§5.12): saved tickers, and the chart range they prefer.
+# The store holds IDENTITIES — a ticker is a name the quote endpoint resolves
+# fresh every render; a price is never written down.
+source watch       sys.watchlist(fields: [ticker, last, pct])
+source range_pref  sys.prefs(fields: [range])
 
 state selected { shape: text, initial: "" }                    # "" ⇒ movers list
-state range    { shape: enum[d1, w1, m1, m6, y1], initial: .m1 }
+# CAPTURED from the stored preference (§5.13); the host guarantees "m1" until
+# the user ever picks a range, so the capture is always a member of the enum.
+state range    { shape: enum[d1, w1, m1, m6, y1], initial: range_pref.range }
 
 event open_quote { selected: set($value) }
 event back       { selected: clear, range: clear }              # two writes, one gesture
-event set_range  { range: set($value) }
+event set_range  { range: set($value), range_pref: set($value) }
+# The star on a mover saves its ticker; Remove on a saved row forgets it.
+event keep       { watch: append($value) }
+event forget     { watch: remove($value) }
 
 copy movers  { class: vocabulary, en: "Top Movers", zh: "涨跌榜" }
+copy watch_hd { class: vocabulary, en: "WATCHLIST", zh: "自选" }
+copy star     { class: vocabulary, en: "☆" }
+copy unstar   { class: vocabulary, en: "Remove" }
 copy loading { class: vocabulary, en: "Fetching the quote…", zh: "正在获取行情…" }
 copy offline { class: vocabulary, en: "Can't reach the market feed", zh: "无法获取行情" }
 copy open   { class: vocabulary, en: "Open",       zh: "开盘" }
@@ -38,16 +51,37 @@ view root  Surface(pad: .page) {
            }
 
 view list  Col {
+             for w, i in watch key w.ticker {
+               # Header on the first row only (the index binder is 1-based) —
+               # a per-row caption plus ticker, price, pct and the Remove chip
+               # overfilled the row on device: the fill-width ticker collapsed
+               # to nothing and the pct clipped.
+               when i == 1 { TextCaption(text: copy.watch_hd) }
+               # The chip is a SIBLING of the tappable part, not a child of it —
+               # a row's transparent hit target covers its whole content, so a
+               # chip inside one fires the row's event, measured on device.
+               Row(align: .center, gap: 8) {
+                 Row(align: .center, gap: 8, width: .fill, on_tap: open_quote, value: w.ticker) {
+                   TextRow(text: w.ticker, width: .fill)
+                   TextValue(value: w.last, format: .money)
+                   TextValue(value: w.pct, format: .signed_pct)
+                 }
+                 Chip(text: copy.unstar, on_tap: forget, value: w.ticker)
+               }
+             }
              TextTitle(text: copy.movers)
              Panel {
                for m in movers key m.ticker {
-                 Row(align: .center, on_tap: open_quote, value: m.ticker) {
-                   Col(gap: 2, width: .fill) {
-                     TextRow(text: m.ticker)
-                     TextCaption(text: m.name, width: .fill)
+                 Row(align: .center, gap: 8) {
+                   Chip(text: copy.star, on_tap: keep, value: m.ticker)
+                   Row(align: .center, width: .fill, on_tap: open_quote, value: m.ticker) {
+                     Col(gap: 2, width: .fill) {
+                       TextRow(text: m.ticker)
+                       TextCaption(text: m.name, width: .fill)
+                     }
+                     TextValue(value: m.last, format: .money)
+                     TextValue(value: m.pct, format: .signed_pct, tint: m.change)
                    }
-                   TextValue(value: m.last, format: .money)
-                   TextValue(value: m.pct, format: .signed_pct, tint: m.change)
                  }
                  Rule()
                }
