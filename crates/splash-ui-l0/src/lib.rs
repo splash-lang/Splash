@@ -3177,7 +3177,7 @@ pub mod catalog {
                 "mktcap", "pe", "currency", "exchange",
             ],
         ),
-        ("sys.prefs", &["units", "range"]),
+        ("sys.prefs", &["units", "range", "home", "work", "mode"]),
         // Verified against the live endpoint, not its documentation: `longname`
         // comes back null for plenty of listings, so `name` falls back to
         // `shortname` in the helper. `kind` distinguishes an equity from a
@@ -3217,15 +3217,15 @@ pub mod catalog {
     pub const MUTABLE: &[(&str, &[&str])] = &[
         ("sys.watchlist", &["append", "remove"]),
         ("sys.cities", &["append", "remove"]),
-        // `sys.prefs` is READ-ONLY here, deliberately and temporarily.
-        //
         // A preference write has to name WHICH preference, and a transition's
-        // target is a bare source name: `event set_units { prefs: set($value) }`
-        // says nothing about `units`. Naming it needs a dotted target
-        // (`prefs.units: set($value)`), which is grammar this slice does not
-        // have. Declaring the capability writable before that exists would ship
-        // a write nobody could aim, so a card can read a preference and not yet
-        // change one.
+        // target is a bare source name — the note that sat here said naming it
+        // needed a dotted target, grammar L0 does not have. It does not: THE
+        // DECLARATION ALREADY NAMES IT. A card that writes a preference declares
+        // `source home_pref sys.prefs(fields: [home])`, and a source with exactly
+        // one declared field leaves `home_pref: set($value)` nothing to be
+        // ambiguous about. The checker enforces the exactly-one rule on any
+        // written prefs source; a read-only one may still ask for several.
+        ("sys.prefs", &["set", "clear"]),
     ];
 
     pub fn mutable(name: &str) -> Option<&'static [&'static str]> {
@@ -3499,6 +3499,33 @@ fn check_event_batch(
                         ),
                     ),
                     Some(_) => {}
+                }
+                // A written PREFERENCE must say which one, and the declaration
+                // is what says it: the write's key is the source's single
+                // declared field. A multi-field source leaves `set($value)`
+                // aiming at nothing nameable.
+                if source.helper == "sys.prefs"
+                    && matches!(&transition.form, Form::Set(_) | Form::Clear)
+                {
+                    let fields = source
+                        .args
+                        .iter()
+                        .find(|(n, _)| n == "fields")
+                        .and_then(|(_, a)| match a {
+                            SourceArg::List(l) => Some(l.len()),
+                            _ => None,
+                        })
+                        .unwrap_or(0);
+                    if fields != 1 {
+                        sink.push(
+                            transition.line,
+                            transition.column,
+                            format!(
+                                "a written preference source must declare exactly one                                  field — the field IS the key the write lands under.                                  {:?} declares {fields}; split it: `source home_pref                                  sys.prefs(fields: [home])` writes `home` (profile §5.12)",
+                                transition.target
+                            ),
+                        );
+                    }
                 }
                 continue;
             }
@@ -6456,7 +6483,7 @@ pub mod makepad {
             // owns rather than a second kind of storage.
             "sys.prefs" => {
                 let key = match binding.field.as_str() {
-                    f @ ("units" | "range") => f,
+                    f @ ("units" | "range" | "home" | "work" | "mode") => f,
                     _ => return None,
                 };
                 Some(format!("sys.prefs({key:?})"))
@@ -8047,6 +8074,10 @@ pub struct CollectionWrite {
     pub op: String,
     /// The payload the tapped element carried. Empty for `clear`.
     pub value: String,
+    /// For a KEYED capability (`sys.prefs`), the key the write lands under —
+    /// the source's single declared field, which the checker guarantees exists.
+    /// Empty for list capabilities, whose store is named by the helper alone.
+    pub field: String,
 }
 
 /// What a dispatch did, and what it obliges the host to do next.
@@ -8206,11 +8237,21 @@ fn dispatch_writes(
                 (_, Some(v)) => v.to_string(),
                 (_, None) => return (Vec::new(), Vec::new()),
             };
+            let field = decl
+                .args
+                .iter()
+                .find(|(n, _)| n == "fields")
+                .and_then(|(_, a)| match a {
+                    SourceArg::List(l) if l.len() == 1 => Some(l[0].clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
             durable.push(CollectionWrite {
                 source: decl.name.clone(),
                 helper: decl.helper.clone(),
                 op: op.to_owned(),
                 value,
+                field,
             });
             continue;
         }

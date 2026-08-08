@@ -447,7 +447,16 @@ writes = ["append", "remove"]
 # read a preference and not yet change one.
 [sources."sys.prefs"]
 args = ["fields"]
-answers = ["units", "range"]
+# `home`/`work`/`mode` joined `units`/`range` when preferences became writable:
+# a place the user calls home, one they call work (both stored as the place's
+# NAME — identity, never coordinates the search can't refind), and a default
+# travel mode.
+answers = ["units", "range", "home", "work", "mode"]
+# A write names its key through the DECLARATION: `set`/`clear` are accepted only
+# on a prefs source declaring exactly one field, and that field is the key the
+# write lands under. `source home_pref sys.prefs(fields: [home])` +
+# `home_pref: set($value)` writes `home`; a multi-field source stays read-only.
+writes = ["set", "clear"]
 
 # Free-text TICKER lookup. `sys.search` is the PLACE search and answers a
 # different question; a card asking a geocoder for a company gets nonsense, so
