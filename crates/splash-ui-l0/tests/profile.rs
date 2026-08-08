@@ -5143,6 +5143,89 @@ view root Surface {
     );
 }
 
+/// §5.12 in the weather card: the add flow is driven as the user drives it, and
+/// picking a city is ONE event that both re-points the card and saves durably.
+///
+/// Differential on purpose (the L0 defect class is a card the checker accepts
+/// whose screen is confidently wrong): each dispatch asserts what MOVED, not
+/// that some call appears somewhere. The composed `pick_city` — one durable
+/// write beside three state writes — is the shape this card exists to prove;
+/// if dispatch ever refuses the compose, this is the test that says so.
+#[test]
+fn picking_a_city_selects_it_and_saves_it_durably() {
+    let mut store = splash_ui_l0::InstanceStore::default();
+    let dispatch = |store: &mut splash_ui_l0::InstanceStore, event: &str, payload: &str| {
+        splash_ui_l0::dispatch_reporting(
+            WEATHER,
+            store,
+            "root",
+            event,
+            Some(&serde_json::Value::String(payload.into())),
+            &serde_json::Value::Null,
+        )
+    };
+
+    // Tap "add a city": the row becomes a Field and the query opens empty.
+    let out = dispatch(&mut store, "add_city", "1");
+    assert!(out.applied, "add_city must apply");
+    assert_eq!(out.changed, vec!["editing"], "the editor opens: {out:?}");
+    assert!(out.writes.is_empty(), "opening the editor writes no store");
+
+    // Type: the query moves, and the search source parameterised by it goes
+    // stale — that is what makes results-as-you-type refetch.
+    let out = dispatch(&mut store, "typing", "berk");
+    assert_eq!(out.changed, vec!["query"], "typing writes the query: {out:?}");
+    assert!(
+        out.stale.contains(&"found".to_string()),
+        "the search must refetch: {:?}",
+        out.stale
+    );
+
+    // Pick a result. One event, four declared writes: the city on screen, the
+    // durable append, the query cleared, the editor closed.
+    let city = "Berkeley, California, United States";
+    let out = dispatch(&mut store, "pick_city", city);
+    assert!(out.applied, "the composed event must apply");
+    assert_eq!(
+        out.changed,
+        vec!["city", "query", "editing"],
+        "all three state writes commit beside the durable one: {out:?}"
+    );
+    assert_eq!(out.writes.len(), 1, "exactly one durable write: {out:?}");
+    let w = &out.writes[0];
+    assert_eq!(
+        (w.source.as_str(), w.helper.as_str(), w.op.as_str(), w.value.as_str()),
+        ("cities", "sys.cities", "append", city),
+        "the host is told the bound name, the capability, the op and the value"
+    );
+    // The written source refetches (the new row appears), and the selected
+    // city's own cascade re-fetches the card: place hangs off state.city.
+    assert!(out.stale.contains(&"cities".to_string()), "{:?}", out.stale);
+    assert!(out.stale.contains(&"place".to_string()), "{:?}", out.stale);
+    assert_eq!(
+        store.get(splash_ui_l0::CARD_STATE_KEY, "city"),
+        Some(serde_json::Value::String(city.into())).as_ref(),
+        "the card is now looking at the picked city"
+    );
+
+    // The remove chip: a durable remove carrying the row's own name, and no
+    // state write rides along.
+    let out = dispatch(&mut store, "drop_city", city);
+    assert!(out.applied, "drop_city must apply");
+    assert!(out.changed.is_empty(), "remove writes no cell: {out:?}");
+    assert_eq!(
+        out.writes,
+        vec![splash_ui_l0::CollectionWrite {
+            source: "cities".into(),
+            helper: "sys.cities".into(),
+            op: "remove".into(),
+            value: city.into(),
+            field: String::new(),
+        }],
+    );
+    assert!(out.stale.contains(&"cities".to_string()), "{:?}", out.stale);
+}
+
 /// `signed_money` reaches the screen live, beside its own percentage.
 ///
 /// The two describe ONE move. The percentage was live and the money was not, so
