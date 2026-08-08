@@ -96,10 +96,18 @@ view root  Photo(src: scene, pad: .page) {
 # render as bare rows in the panel: the panel is never empty (the add row is
 # always there), and a `for` with no rows must not leave an empty box behind.
 view saved  Panel {
+              # The remove chip is a SIBLING of the tappable area, not a child.
+              # A tappable row lowers to a transparent hit target drawn OVER its
+              # whole content, so a chip inside one is covered by it and cannot
+              # be hit — measured on the 6T: a tap dead-centre on the chip fired
+              # `open_city`. The row that opens and the chip that removes must
+              # not overlap, so the row wraps them and only its first half taps.
               for c, i in cities key c.name {
-                Row(align: .center, gap: 10, on_tap: open_city, value: c.name) {
-                  TextRow(text: c.name, width: .fill)
-                  TextValue(value: c.temp, unit: units)
+                Row(align: .center, gap: 10) {
+                  Row(align: .center, gap: 10, width: .fill, on_tap: open_city, value: c.name) {
+                    TextRow(text: c.name, width: .fill)
+                    TextValue(value: c.temp, unit: units)
+                  }
                   Chip(text: "×", on_tap: drop_city, value: c.name)
                 }
                 Rule()
