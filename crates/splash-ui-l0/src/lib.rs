@@ -9320,6 +9320,35 @@ pub mod kit {
                                 out.push_str(", ");
                             }
                             first = false;
+                            // A side-docked Chip stands ON THE MAP, in the same
+                            // column as the zoom pill and the recenter ring — so it
+                            // is drawn to the ring's spec (`l0_mapchip`, 38x38)
+                            // rather than as a sheet chip. The eye-test asked for
+                            // the 2D/3D switch and the location button to be the
+                            // same size, and a text pill in a rounded box cannot be.
+                            if pass == 1 && one.kind == "Chip" {
+                                // UNQUOTED, like the ordinary hit path above:
+                                // `tap_target` returns a DSL EXPRESSION carrying its
+                                // own quoting (and, for live payloads, a
+                                // concatenated call). Debug-quoting it turned the
+                                // expression into a string of escapes, the runtime
+                                // target into garbage, and the dispatch into an
+                                // empty event "applied to nothing".
+                                if let Some(target) = tap_target(one) {
+                                    let _ = write!(
+                                        out,
+                                        "l0_tap_fit({target}, l0_mapchip({}))",
+                                        makepad::expr_of(one, "text")
+                                    );
+                                } else {
+                                    let _ = write!(
+                                        out,
+                                        "l0_mapchip({})",
+                                        makepad::expr_of(one, "text")
+                                    );
+                                }
+                                continue;
+                            }
                             element(one, depth + 1, out);
                         }
                     }

@@ -140,7 +140,7 @@ state query  { shape: text, initial: "" }        # what the user is typing
 # checker to accept an undeclared literal, and a `not` operator would be the
 # expression form L0 does not have. Two named screens have two guards that each
 # say which screen they are, which is what a card should have said anyway.
-state screen { shape: enum[plan, preview, drive], initial: .plan }
+state screen { shape: enum[plan, drive], initial: .plan }
 
 # How the trip is travelled. R7.1/R7.2 of the shipping app's contract.
 #
@@ -244,12 +244,16 @@ event choose_dest { dest: set($value), query: clear, editing: set(.none) }
 # Picking a place for the ORIGIN. Same shape as `choose_dest`; a separate event
 # because the list has to know which endpoint the tap is filling in.
 event choose_origin { origin: set($value), query: clear, editing: set(.none) }
-# ONE event for the whole journey through the card, because `cycle` names an order
-# and the order IS the flow: plan → preview → drive → plan. Three chips on three
-# screens — "Go", "Start", "End" — are the same transition seen from three places,
-# and writing them as three events would have been three chances to disagree about
-# which screen follows which.
-event go          { screen: cycle(.plan, .preview, .drive) }
+# ONE event for the whole journey, because `cycle` names an order and the order
+# IS the flow: plan → drive → plan. GO and End are the same transition seen from
+# two screens, and writing them as two events would be two chances to disagree
+# about which screen follows which.
+#
+# There WAS a preview between them — R2.2's separate confirmation step, a framed
+# route with a Start pill. Cut on request: GO goes straight to live navigation,
+# because the plan screen already shows the framed route, the duration and the
+# distance, so the confirmation step was the same information asked twice.
+event go          { screen: cycle(.plan, .drive) }
 event set_stop    { stop: set($value), query: clear, editing: set(.none) }
 event edit_stop   { editing: set(.stop), query: clear }
 event choose_stop { stop: set($value), query: clear, editing: set(.none) }
@@ -566,52 +570,6 @@ view root Surface {
     }
   }
 
-  # ---- previewing ----------------------------------------------------------
-  #
-  # R2.2, and it is a SCREEN rather than a state of the planning one. The chosen
-  # trip, framed, with the two numbers that decide whether to take it and one
-  # button that commits — and none of the editing controls, because a preview that
-  # still offers a search box is the planning screen with a different name.
-  #
-  # Everything on it was already on the plan screen; what was missing was it being
-  # a separate step. That is the whole requirement, and it costs two guarded
-  # branches because a trip through a stop is a different trip — the same reason
-  # `trip` and `trip_via` are two sources.
-  when screen == .preview {
-    when stop == "" {
-      when origin != "" {
-        Panel(dock: .bottom) {
-          TextHero(value: trip.duration)
-          TextCaption(value: trip.distance, suffix: copy.away)
-          Chip(text: copy.begin, on_tap: go)
-        }
-      }
-      when origin == "" {
-        Panel(dock: .bottom) {
-          TextHero(value: trip_here.duration)
-          TextCaption(value: trip_here.distance, suffix: copy.away)
-          Chip(text: copy.begin, on_tap: go)
-        }
-      }
-      when origin != "" {
-        Map(mode: .plan, from: origin_place, to: dest_place, zoom: 16, controls: .all,
-            summary: trip)
-      }
-      when origin == "" {
-        Map(mode: .plan, from_lat: from_lat, from_lon: from_lon, to: dest_place,
-            zoom: 16, controls: .all)
-      }
-    }
-    when stop != "" {
-      Panel(dock: .bottom) {
-        TextHero(value: trip_via.duration)
-        TextCaption(value: trip_via.distance, suffix: copy.away)
-        Chip(text: copy.begin, on_tap: go)
-      }
-      Map(mode: .plan, from: origin_place, to: dest_place, via: stop_place, zoom: 16,
-          controls: .all)
-    }
-  }
 
   # ---- driving -------------------------------------------------------------
   when screen == .drive {
