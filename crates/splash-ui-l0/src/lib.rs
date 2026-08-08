@@ -1497,6 +1497,40 @@ impl<'a> Parser<'a> {
                                         path.push_str(&self.tokens[at + 1].text);
                                         at += 2;
                                     }
+                                    // AND NOTHING MORE. The scan above stops at the
+                                    // end of the path, so `initial: here.lat * 2`
+                                    // parsed as `here.lat` and the rest was
+                                    // discarded — accepted at L1, silently answering
+                                    // something the card did not ask for.
+                                    //
+                                    // §9.2 admits an expression in ONE position, an
+                                    // argument value. An `initial:` is a declaration
+                                    // (§5.13): it names which value to capture, and a
+                                    // captured value is READ rather than computed.
+                                    // Refusing is what keeps the two apart; dropping
+                                    // the operator quietly is the one outcome neither
+                                    // reading supports.
+                                    if self
+                                        .tokens
+                                        .get(at)
+                                        .is_some_and(|t| t.kind == Kind::Punct
+                                            && matches!(
+                                                t.text.as_str(),
+                                                "+" | "-" | "*" | "/" | "%"
+                                            ))
+                                    {
+                                        let t = self.tokens[at].clone();
+                                        self.sink.at(
+                                            &t,
+                                            format!(
+                                                "`initial:` takes a value or a source path, \
+                                                 not an expression — `{path} {}` was parsed as \
+                                                 `{path}` and the rest discarded (profile \
+                                                 §5.13, §9.2)",
+                                                t.text
+                                            ),
+                                        );
+                                    }
                                     initial_path = Some(path);
                                     None
                                 }
@@ -2641,7 +2675,11 @@ pub mod catalog {
     /// Flat or tilted, while driving — the shipping app's R8.1 chase view.
     pub const MAP_VIEW: &[&str] = &["flat", "tilted"];
     /// Where a panel sits when the card is a map.
-    pub const DOCK: &[&str] = &["top", "bottom"];
+    /// Where a panel sits on a map card. `top` is the banner, `bottom` the sheet,
+    /// and `right` the control column beside the map — where a driving screen's own
+    /// switches belong, because a control in the banner competes with the one thing
+    /// a driver reads.
+    pub const DOCK: &[&str] = &["top", "bottom", "right"];
     /// The controls a map offers. A card NAMES the affordance; the theme draws it
     /// and the backend wires it.
     ///
@@ -3040,7 +3078,9 @@ pub mod catalog {
                 "mktcap", "pe", "currency", "exchange",
             ],
         ),
-        ("sys.series", &["points", "min", "max"]),
+        // NOT `points`: a series is not a value, `StockPlot` fetches its own, and
+        // nothing could lower a read of it to a call. See the TOML.
+        ("sys.series", &["min", "max"]),
         // The host joins the stored tickers to live quotes, so a watchlist row
         // answers everything a quote does. The STORE holds only the ticker.
         (
@@ -5930,6 +5970,29 @@ pub mod makepad {
         node.args.iter().find(|(n, _)| n == name).map(|(_, v)| v)
     }
 
+    /// A `TokenOrPath` argument, whichever it turned out to be.
+    ///
+    /// `unit`, `width`, `view`, `controls` and `range` each admit a token OR a path
+    /// to card state, and REALIZE ERASES THE DIFFERENCE: `view: .tilted` survives as
+    /// `Token("tilted")`, while `view: view` reading `.tilted` out of the state
+    /// arrives as `Text("tilted")`. A reader that matches only `Token` therefore sees
+    /// nothing whenever the card chose the state form and silently takes its default.
+    ///
+    /// That is what broke the nav card's on-map 2D/3D switch. The chip relabelled on
+    /// every tap because its own guard reads the state directly, so the toggle looked
+    /// live — but `view` reached the lowering as `Text` and the camera stayed flat on
+    /// both settings. A control that responds and changes nothing is worse than one
+    /// that is missing; the screen asserts the camera tilted and it did not.
+    ///
+    /// Every `TokenOrPath` read goes through here so the class cannot come back one
+    /// argument at a time.
+    fn token_arg<'a>(node: &'a UiNode, name: &str) -> Option<&'a str> {
+        match arg(node, name) {
+            Some(NodeValue::Token(t) | NodeValue::Text(t)) => Some(t.as_str()),
+            _ => None,
+        }
+    }
+
     /// A value in text position. `Missing` becomes an em dash rather than an
     /// empty string, so an unresolved binding is visible on screen instead of
     /// silently rendering a blank field.
@@ -6028,8 +6091,8 @@ pub mod makepad {
                 // own `3d` mode drives a simulated vehicle, and pointing either of
                 // these at it would reintroduce exactly the fabrication this rule
                 // exists to refuse.
-                match arg(node, "view") {
-                    Some(NodeValue::Token(v)) if v == "tilted" => "follow3d",
+                match token_arg(node, "view") {
+                    Some("tilted") => "follow3d",
                     _ => "follow",
                 }
             }
@@ -6271,6 +6334,60 @@ pub mod makepad {
             (v.starts_with("sys.") || v.trim().parse::<f64>().is_ok()).then_some(v)
         };
         match binding.helper.as_str() {
+            // THE FOUR THAT ANSWERED NOTHING. Each is in the catalog, so a card may
+            // declare it and the checker accepts it — and each fell through to
+            // `None`, which means the realized literal, which on this host is an
+            // EMPTY blob. Every field rendered an em dash with no diagnostic, and
+            // `sys.locale` was reached for by six of the seven exemplars.
+            //
+            // A capability the catalog documents and the lowering cannot emit is
+            // worse than one that is absent: absence is a checker refusal the
+            // generator can read, and this was a screen that looked like working
+            // software showing no data. `every_catalog_capability_lowers_to_a_call`
+            // holds the whole set now.
+            "sys.locale" => {
+                let key = match binding.field.as_str() {
+                    f @ ("lang" | "temp_unit") => f,
+                    _ => return None,
+                };
+                Some(format!("sys.locale({key:?})"))
+            }
+            // Answered from the SAME front-page fetch `sys.news` reads, found by
+            // `id` rather than by row. Sharing the fetch is what makes a detail
+            // screen agree with the list it was opened from — a second endpoint
+            // could rank differently between the tap and the read.
+            "sys.news_item" => {
+                let id = arg("id")?;
+                let key = match binding.field.as_str() {
+                    f @ ("id" | "title" | "author" | "points" | "comments" | "url") => f,
+                    _ => return None,
+                };
+                Some(format!("sys.newsitem({id}, {key:?})"))
+            }
+            // §5.12's read-only half. The store is the same `user.json` the durable
+            // collections live in, so a preference is one more reference the user
+            // owns rather than a second kind of storage.
+            "sys.prefs" => {
+                let key = match binding.field.as_str() {
+                    f @ ("units" | "range") => f,
+                    _ => return None,
+                };
+                Some(format!("sys.prefs({key:?})"))
+            }
+            // The extremes of the SAME close series the plot draws, off the same
+            // one fetch. `points` is not here: the catalog listed it, nothing could
+            // deliver a series as a value, and `StockPlot` fetches its own — so the
+            // catalog dropped it rather than this pretending to answer it.
+            "sys.series" => {
+                let ticker = arg("ticker")?;
+                let range = arg("range").unwrap_or_else(|| "\"d1\"".to_owned());
+                let key = match binding.field.as_str() {
+                    "min" => "low",
+                    "max" => "high",
+                    _ => return None,
+                };
+                Some(format!("sys.stockrange({ticker}, {range}, {key:?})"))
+            }
             "sys.quote" => {
                 let symbol = arg("ticker")?;
                 // What this helper can actually answer, verified against a live
@@ -6761,16 +6878,15 @@ pub mod makepad {
 
     fn decoration_of(node: &UiNode) -> Decoration {
         Decoration {
-            unit: match arg(node, "unit") {
-                Some(NodeValue::Token(t)) if t == "c" || t == "f" => "°",
-                Some(NodeValue::Text(t)) if t == "c" || t == "f" => "°",
-                Some(NodeValue::Token(t)) if t == "pct" => "%",
+            unit: match token_arg(node, "unit") {
+                Some("c" | "f") => "°",
+                Some("pct") => "%",
                 // A duration is minutes, and "34" alone is not a duration —
                 // beside a distance it reads as another distance. The word is
                 // the theme's to supply, not the card's: a card that wrote
                 // `suffix: "min"` would be asserting the unit its own number
                 // came in, and would be wrong the day the helper answers hours.
-                Some(NodeValue::Token(t)) if t == "duration" => " min",
+                Some("duration") => " min",
                 _ => "",
             },
             glyph: match arg(node, "glyph") {
@@ -7488,10 +7604,9 @@ pub mod makepad {
                 // Only constrain the width when the card asked. Forcing
                 // `width: Fill` made a long hero title wrap one character per
                 // line — "Top Movers" became "Top / Mover / s" on device.
-                let width = match arg(node, "width") {
-                    Some(NodeValue::Token(t)) if t == "fill" => " width: Fill",
-                    Some(NodeValue::Token(t)) if t == "fit" => " width: Fit",
-                    Some(NodeValue::Token(_)) => " width: Fit",
+                let width = match token_arg(node, "width") {
+                    Some("fill") => " width: Fill",
+                    Some(_) => " width: Fit",
                     _ => "",
                 };
                 // Always through `valued`: it falls back to `text:` and
@@ -7551,8 +7666,8 @@ pub mod makepad {
                 // sits in is `Fit`, so a `Fit` field collapses to its content —
                 // an empty one to nothing at all, which is a search box that
                 // cannot be tapped.
-                let width = match arg(node, "width") {
-                    Some(NodeValue::Token(t)) if t == "fit" => " width: Fit",
+                let width = match token_arg(node, "width") {
+                    Some("fit") => " width: Fit",
                     _ => " width: Fill",
                 };
                 let target = match arg(node, "on_commit") {
@@ -8791,6 +8906,29 @@ pub mod kit {
         node.args.iter().find(|(n, _)| n == name).map(|(_, v)| v)
     }
 
+    /// A `TokenOrPath` argument, whichever it turned out to be.
+    ///
+    /// `unit`, `width`, `view`, `controls` and `range` each admit a token OR a path
+    /// to card state, and REALIZE ERASES THE DIFFERENCE: `view: .tilted` survives as
+    /// `Token("tilted")`, while `view: view` reading `.tilted` out of the state
+    /// arrives as `Text("tilted")`. A reader that matches only `Token` therefore sees
+    /// nothing whenever the card chose the state form and silently takes its default.
+    ///
+    /// That is what broke the nav card's on-map 2D/3D switch. The chip relabelled on
+    /// every tap because its own guard reads the state directly, so the toggle looked
+    /// live — but `view` reached the lowering as `Text` and the camera stayed flat on
+    /// both settings. A control that responds and changes nothing is worse than one
+    /// that is missing; the screen asserts the camera tilted and it did not.
+    ///
+    /// Every `TokenOrPath` read goes through here so the class cannot come back one
+    /// argument at a time.
+    fn token_arg<'a>(node: &'a UiNode, name: &str) -> Option<&'a str> {
+        match arg(node, name) {
+            Some(NodeValue::Token(t) | NodeValue::Text(t)) => Some(t.as_str()),
+            _ => None,
+        }
+    }
+
     /// A statistic's direction — the SIGN, not the colour.
     ///
     /// Red-versus-green is presentation and belongs to the kit; "this value
@@ -8958,10 +9096,10 @@ pub mod kit {
     /// is the theme's answer, and deciding here would put styling in the
     /// lowering.
     fn width_wrap(node: &UiNode) -> Option<(&'static str, String)> {
-        let Some(NodeValue::Token(t)) = arg(node, "width") else {
+        let Some(t) = token_arg(node, "width") else {
             return None;
         };
-        match t.as_str() {
+        match t {
             "fill" => Some(("l0_wide(", ")".into())),
             // NOT a no-op, though it is the default for a text role: `l0_row`
             // fills, so a row can only stop filling by saying so.
@@ -9043,7 +9181,7 @@ pub mod kit {
             // A text role that ASKED to fill is not intrinsic, so it keeps the
             // filling wrapper.
             let asked_to_fill =
-                matches!(arg(node, "width"), Some(NodeValue::Token(t)) if t == "fill");
+                token_arg(node, "width") == Some("fill");
             let intrinsic =
                 // A `.danger` chip is the exception: it SPANS the sheet, so a
                 // fit-width hit target is the one thing that can hide it. It emitted
@@ -9134,20 +9272,27 @@ pub mod kit {
                 // the bottom. A turn instruction belongs in the top band and the
                 // summary in the sheet, which is how the app this replaces arranges
                 // its driving screen and how every map app does.
-                let docked_top = |c: &&UiNode| {
+                let docked = |c: &UiNode, where_: &str| {
                     c.kind == "Panel"
-                        && matches!(arg(c, "dock"), Some(NodeValue::Token(t)) if t == "top")
+                        && matches!(arg(c, "dock"), Some(NodeValue::Token(t)) if t == where_)
                 };
+                let docked_top = |c: &&UiNode| docked(c, "top");
+                let docked_right = |c: &&UiNode| docked(c, "right");
                 out.push_str("l0_surface_map(");
                 element(map, depth, out);
-                for pass in 0..2 {
+                for pass in 0..3 {
                     out.push_str(", [");
                     let mut first = true;
-                    for child in node
-                        .children
-                        .iter()
-                        .filter(|c| c.kind != "Map" && (docked_top(c) == (pass == 0)))
-                    {
+                    for child in node.children.iter().filter(|c| {
+                        c.kind != "Map"
+                            && match pass {
+                                0 => docked_top(c),
+                                1 => docked_right(c),
+                                // The sheet takes everything else, which is what an
+                                // undocked panel on a map card has always meant.
+                                _ => !docked_top(c) && !docked_right(c),
+                            }
+                    }) {
                         // A docked panel contributes its CHILDREN, not itself.
                         //
                         // `l0_surface_map` already draws the dock: the band at the
@@ -9186,6 +9331,20 @@ pub mod kit {
                 // planning screen had.
                 let has_top = node.children.iter().any(|c| docked_top(&c));
                 let _ = write!(out, ", {}", u8::from(has_top));
+                // The controls the MAP asked for, laid out by the SURFACE: they
+                // belong in the same column as anything docked to the side, below
+                // the banner, and only the surface knows where that is. `none`
+                // unless the card said otherwise — a map that grows buttons nobody
+                // mentioned is the theme deciding what a screen offers.
+                let controls = token_arg(map, "controls").unwrap_or("none").to_owned();
+                let _ = write!(out, ", {controls:?}");
+                // And whether anything is docked to the SIDE, for the same reason
+                // `has_top` exists. The theme gives that column the dark backing the
+                // zoom pill has, so a chip the card put on the map reads over pale
+                // tiles instead of vanishing into them — and a card that docks
+                // nothing there must not get an empty box for it.
+                let has_side = node.children.iter().any(|c| docked(&c, "right"));
+                let _ = write!(out, ", {}", u8::from(has_side));
                 out.push(')');
             }
             "Surface" => {
@@ -9317,16 +9476,9 @@ pub mod kit {
                 // that changes every second is not a property, so routing it through
                 // one bought nothing and cost a frozen camera when the property was a
                 // constant expression. See `update_nav_camera`.
-                // The controls the card asked for. `none` unless it said otherwise,
-                // because a map that grows buttons a card never mentioned is the
-                // theme deciding what a screen OFFERS rather than how it looks.
-                let controls = match arg(node, "controls") {
-                    Some(NodeValue::Token(t)) => t.clone(),
-                    _ => "none".to_owned(),
-                };
                 let _ = write!(
                     out,
-                    "{f}({:?}, {}, {lat}, {lon}, {poly}, {}, {controls:?}, {})",
+                    "{f}({:?}, {}, {lat}, {lon}, {poly}, {}, {})",
                     makepad::map_mode(node),
                     scalar_of(node, "zoom"),
                     // The pins. `""` rather than omitted, because the widget reads

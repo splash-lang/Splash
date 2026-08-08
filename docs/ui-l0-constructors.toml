@@ -103,7 +103,7 @@ width       = { kind = "width" }
 # screen, and how every map app does. Ignored by a card with no map, where panels
 # simply stack.
 [Panel]
-dock = { kind = "token", tokens = ["top", "bottom"] }
+dock = { kind = "token", tokens = ["top", "bottom", "right"] }
 
 [Card]
 on_tap = { kind = "event" }
@@ -276,6 +276,12 @@ range  = { kind = "unit" }
 [kinds.unit]
 # Admits a token OR a path: `unit: .pct` is fixed, `unit: units` follows card
 # state. This is the argument that forced tokens to be lexically marked.
+#
+# `unit` APPENDS. It is for a value that arrives as a bare number, and a source
+# that already formats its answer must not be given one: `sys.route("duration")`
+# answers "30 min", so `unit: .duration` on it renders "30 min min". Check what
+# the source answers with before adding a unit — `sys.navstep("eta")` answers a
+# bare "30" and does need it.
 accepts = ["token", "path"]
 tokens  = ["c", "f", "pct", "speed", "pressure", "index", "distance", "money", "duration"]
 
@@ -411,7 +417,10 @@ answers = ["ticker", "name", "last", "change", "pct", "open", "high", "low", "pr
 
 [sources."sys.series"]
 args = ["ticker", "range", "points", "fields", "aggregate"]
-answers = ["points", "min", "max"]
+# `points` was here and nothing could answer it: a series is not a value, and
+# `StockPlot` fetches its own. A catalog entry nothing can deliver is a card the
+# checker accepts and the screen renders as em dashes.
+answers = ["min", "max"]
 aggregates = ["min", "max"]
 
 # ─── durable capabilities (profile §5.12) ─────────────────────────────────────

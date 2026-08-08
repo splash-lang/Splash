@@ -4789,8 +4789,23 @@ fn the_nav_trip_planner_is_expressible_at_l0() {
             !t.is_empty() && !t.starts_with('#')
         })
         .count();
+    // 300, RAISED FROM 250, and the raise is recorded rather than quietly applied.
+    //
+    // What bought the 44 lines: both endpoints became tappable rows that open a find
+    // state, because a permanently-live `Field` cannot be focused on this renderer
+    // and both endpoints were therefore inert. That is a capability the card did not
+    // have, not a refactor — and it is the shape the L2 card uses, so the comparison
+    // this number exists to make is still like for like: 664 lines there against 286
+    // here, both with reachable endpoints.
+    //
+    // The cost is duplication rather than machinery: each endpoint states its own
+    // edited and resting rows, and its own pick list. A `component` taking the label,
+    // the value and the two events would collapse all four into one definition used
+    // twice, which is what §5 is for and is the way back under 250. The threshold the
+    // comment above names is 400 — the point at which declarations stop being the
+    // cheaper answer — and this is well inside it.
     assert!(
-        lines < 250,
+        lines < 300,
         "the point is that it is small; this is {lines} lines"
     );
 }
@@ -6622,20 +6637,15 @@ fn every_offered_field_has_a_translation() {
         // call answers. Duration and distance used to sit here beside it and no
         // longer do: both are answered, and the probe now supplies the
         // coordinates that prove it.
+        //
+        // `sys.locale`, `sys.news_item`, `sys.prefs` and `sys.series` sat here too,
+        // and that is the shape of the mistake: FOUR WHOLE CAPABILITIES parked in an
+        // allowlist under a comment saying they render an em dash, while the catalog
+        // went on documenting them and the checker went on accepting them. Six of the
+        // seven exemplars reach for `sys.locale`. A list of known gaps is only worth
+        // keeping if it is drained; this one recorded the defect and then held it
+        // still. All four are answered now.
         ("sys.route", "steps"),
-        ("sys.locale", "lang"),
-        ("sys.locale", "temp_unit"),
-        ("sys.news_item", "id"),
-        ("sys.news_item", "title"),
-        ("sys.news_item", "author"),
-        ("sys.news_item", "points"),
-        ("sys.news_item", "comments"),
-        ("sys.news_item", "url"),
-        ("sys.series", "points"),
-        ("sys.series", "min"),
-        ("sys.series", "max"),
-        ("sys.prefs", "units"),
-        ("sys.prefs", "range"),
         // ── a field the arm forgot ────────────────────────────────────────────
         // Each of these sits beside fields the same arm answers, so the
         // capability works and one value on the card does not.
@@ -6766,21 +6776,50 @@ fn the_nav_card_routes_between_two_editable_places() {
         .expect("realizes");
     let kit = splash_ui_l0::kit::lower(&root);
 
-    // TWO fields on the resting sheet — origin and destination — and a THIRD when
-    // the stop row is asked for. An always-visible "Add a stop" cost a whole row of a
-    // sheet that sits over a map, to say something most trips never need.
+    // NO field on the resting sheet, and a TAP TARGET on each endpoint.
     //
-    // Both halves, because the risk in hiding a control is that it hides for good.
-    // The stop was once a `Chip(..., value: "")` that a review found could never
-    // work — an empty value becomes no payload, so the transition wrote nothing and
-    // the control was incapable of adding a stop while looking right. A field is how
-    // text enters an L0 card; this asserts the field is REACHABLE, not merely
-    // declared.
+    // This asserted two fields, always on screen — the design that made both
+    // endpoints permanently live inputs. It is the wrong design on this renderer and
+    // the assertion is what made that look correct: a `TextInput` inside a card never
+    // receives the draw that presents the keyboard, so both fields were inert, and a
+    // test counting `l0_field(` cannot tell a reachable field from a dead one.
+    // Measured on a OnePlus 6 — the tap arrives, `set_key_focus` runs, no draw
+    // follows, and the IME call inside `draw_walk` is never reached.
+    //
+    // So a name row is a ROW that opens the find state, exactly as the L2 card does,
+    // and only the row being edited is a field. What this asserts now is the property
+    // that failed on the phone: from the resting sheet, each endpoint can be REACHED.
     assert_eq!(
         kit.matches("l0_field(").count(),
-        2,
-        "an origin and a destination, editable and always on screen:\n{kit}"
+        0,
+        "a resting sheet has no live field, only tappable rows:\n{kit}"
     );
+    for event in ["edit_origin", "edit_dest"] {
+        assert!(
+            kit.contains(event),
+            "the resting sheet offers {event}:\n{kit}"
+        );
+    }
+    // And opening one turns THAT row into a field, so a keyboard-capable renderer
+    // still gets one — and picking a result works without one either way.
+    for (event, target) in [("edit_origin", "choose_origin"), ("edit_dest", "choose_dest")] {
+        let mut store = splash_ui_l0::InstanceStore::default();
+        splash_ui_l0::dispatch_reporting(NAV, &mut store, "root", event, None, &data);
+        let open = splash_ui_l0::kit::lower(
+            &splash_ui_l0::realize_with_state(NAV, &data, &store, RealizeLimits::default())
+                .root
+                .expect("realizes"),
+        );
+        assert_eq!(
+            open.matches("l0_field(").count(),
+            1,
+            "{event} makes exactly the row it opened a field:\n{open}"
+        );
+        assert!(
+            open.contains(target),
+            "{event} offers a pickable place through {target}:\n{open}"
+        );
+    }
     let opened = {
         let mut store = splash_ui_l0::InstanceStore::default();
         splash_ui_l0::dispatch_reporting(NAV, &mut store, "root", "add_stop", None, &data);
@@ -6792,7 +6831,7 @@ fn the_nav_card_routes_between_two_editable_places() {
     };
     assert_eq!(
         opened.matches("l0_field(").count(),
-        3,
+        1,
         "and a stop, one tap away:\n{opened}"
     );
     // The trip's facts, live, from the coordinates of the places that were found.
@@ -7831,6 +7870,152 @@ fn a_card_names_a_map_control_and_never_calls_the_widget() {
         assert!(
             !dsl.contains("ui."),
             "{name}: a card must not reach a widget at all:\n{dsl}"
+        );
+    }
+}
+
+/// §5.13: an `initial:` names a value to CAPTURE, and never computes one.
+///
+/// The parser scanned the dotted path and stopped, so everything after it was
+/// discarded without a word: `initial: here.lat * 2` became `here.lat`, and at L1 —
+/// where arithmetic is admitted in an argument value — the card was accepted. A card
+/// that asks for one number and is silently given another is the failure this
+/// profile's §4 exists for, arriving through the declaration rather than the value.
+///
+/// It is also the third position the implementation parsed an expression in. §9.2
+/// admits exactly one, and §9.8 records a guard as a known second; this one nobody
+/// had noticed, because it did not evaluate the expression — it dropped it.
+#[test]
+fn an_initial_captures_a_value_and_never_computes_one() {
+    let card = |initial: &str, header: &str| {
+        format!(
+            "{header}source here sys.gps()\n\
+             state a {{ shape: number, initial: {initial} }}\n\
+             view root Surface {{ TextHero(value: a) }}\n"
+        )
+    };
+    // A capture is admitted, which is the whole point of §5.13.
+    let ok = check_ui_l0_named("probe", &card("here.lat", ""));
+    assert!(ok.valid, "a captured initial is L0: {:#?}", ok.diagnostics);
+    // A literal still is too. Its own card, because a card that captures nothing
+    // has no reason to declare the source and is refused for leaving it unread.
+    let literal = check_ui_l0_named(
+        "probe",
+        "state a { shape: number, initial: 0 }\n\
+         view root Surface { TextHero(value: a) }\n",
+    );
+    assert!(literal.valid, "{:#?}", literal.diagnostics);
+
+    // And an expression is refused AT BOTH LEVELS. L0 refuses it as arithmetic; the
+    // one that mattered is L1, where arithmetic is otherwise legal and this was
+    // accepted and thrown away.
+    for header in ["", "# level: L1\n"] {
+        let report = check_ui_l0_named("probe", &card("here.lat * 2", header));
+        assert!(
+            !report.valid,
+            "an expression in `initial:` is refused (header {header:?})"
+        );
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("expression")),
+            "and says so: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+/// A `TokenOrPath` argument works BOTH ways, or it works in neither.
+///
+/// R8.3's on-map 2D/3D switch is a `view:` the card states and a guard on the same
+/// state — no widget call. Written `view: .tilted` it lowered to the tilted camera;
+/// written `view: view`, following card state, it lowered to the FLAT one on both
+/// settings. Realize erases the difference between the two forms — a fixed token
+/// stays `Token("tilted")`, a followed state arrives as `Text("tilted")` — and every
+/// reader in the lowering matched `Token` alone.
+///
+/// On the phone the chip relabelled 3D→2D on every tap, because its label comes from
+/// a guard that reads the state directly. The toggle looked live and the camera never
+/// moved: a control that responds and changes nothing, asserting a view the map is
+/// not in. Both spellings are asserted here, for `view` and for the `width` and
+/// `unit` that share the shape.
+#[test]
+fn a_token_argument_may_be_written_or_followed() {
+    let card = |view: &str, unit: &str, span: &str| {
+        format!(
+            concat!(
+                "source g sys.gps()\n",
+                "state view {{ shape: enum[tilted, flat], initial: .tilted }}\n",
+                "state pace {{ shape: enum[c, f], initial: .c }}\n",
+                "state span {{ shape: enum[fill, fit], initial: .fill }}\n",
+                "view root Surface {{\n",
+                "  Map(mode: .drive, at: g, view: {}, zoom: 15)\n",
+                "  TextHero(value: g.accuracy{})\n",
+                "  TextBody(text: \"x\"{})\n",
+                "}}\n"
+            ),
+            view, unit, span
+        )
+    };
+    let data = serde_json::json!({
+        "view": "tilted", "pace": "c", "span": "fill",
+        "g": { "lat": 1.0, "lon": 2.0, "accuracy": 5.0, "ok": 1 },
+        "env": { "locale": {} }
+    });
+    let lower = |src: &str| {
+        let checked = check_ui_l0_named("nav", src);
+        assert!(checked.valid, "{:#?}", checked.diagnostics);
+        let root = realize(src, &data, RealizeLimits::default())
+            .root
+            .expect("realizes");
+        (
+            splash_ui_l0::kit::lower(&root),
+            splash_ui_l0::makepad::lower(&root),
+        )
+    };
+
+    // The camera, both ways. `state.view` reads `.tilted` out of the same data.
+    for spelling in [".tilted", "view"] {
+        let (kit, desk) = lower(&card(spelling, "", ""));
+        assert!(
+            kit.contains("follow3d"),
+            "{spelling}: the tilted camera:\n{kit}"
+        );
+        assert!(
+            desk.contains("follow3d"),
+            "{spelling}: the tilted camera on the desk too:\n{desk}"
+        );
+    }
+    // And the flat one is still reachable, or the fix would be "always tilted".
+    let flat = serde_json::json!({
+        "view": "flat", "pace": "c", "span": "fill",
+        "g": { "lat": 1.0, "lon": 2.0, "accuracy": 5.0, "ok": 1 },
+        "env": { "locale": {} }
+    });
+    let src = card("view", "", "");
+    let root = realize(&src, &flat, RealizeLimits::default())
+        .root
+        .expect("realizes");
+    let dsl = splash_ui_l0::kit::lower(&root);
+    assert!(
+        !dsl.contains("follow3d") && dsl.contains("\"follow\""),
+        "a followed state can still choose flat:\n{dsl}"
+    );
+
+    // `unit` and `width` share the shape, so they share the test.
+    for spelling in [".c", "pace"] {
+        let (_, desk) = lower(&card(".tilted", &format!(", unit: {spelling}"), ""));
+        assert!(
+            desk.contains('\u{b0}'),
+            "unit as `{spelling}` still decorates:\n{desk}"
+        );
+    }
+    for spelling in [".fill", "span"] {
+        let (kit, _) = lower(&card(".tilted", "", &format!(", width: {spelling}")));
+        assert!(
+            kit.contains("l0_wide("),
+            "width as `{spelling}` still fills:\n{kit}"
         );
     }
 }

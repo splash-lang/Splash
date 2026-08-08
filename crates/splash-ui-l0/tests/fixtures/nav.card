@@ -186,12 +186,44 @@ state view { shape: enum[tilted, flat], initial: .tilted }
 # gap and not a claim of parity.
 state stop { shape: text, initial: "" }          # empty ⇒ a direct trip
 
+# WHICH endpoint is being edited, or none — R2.4's find overlay as declared state.
+#
+# The card USED TO make both endpoints permanently live `Field`s, on the reasoning
+# that editing in place is the same capability in fewer screens. It is not, on this
+# renderer: a `TextInput` inside a card never receives the draw that presents the
+# keyboard, so both fields were inert. Measured on a OnePlus 6 — the tap arrives,
+# `set_key_focus` runs, and no draw follows, so the IME call inside `draw_walk` is
+# never reached. The L2 card's own search box is dead for the same reason, which is
+# why nothing caught it: the behaviour was never there to lose.
+#
+# So the card follows the app it replaces, which never depended on focus: a name row
+# is a tappable ROW, and only the row being edited is a field. Picking is a tap on a
+# result, and R5.4 puts the trip's own places in that list so there is always
+# something to pick.
+state editing { shape: enum[none, origin, dest, stop], initial: .none }
+
+# One search hit, pickable. THREE lists show these — origin, destination, via —
+# differing only in which event a tap raises, which is exactly what §5.4 passes
+# as a prop. The name is what the search returned; the label is WHICH one.
+component Hit(f: record, pick: event) {
+  view Row(align: .center, gap: 10, on_tap: pick, value: f.query) {
+    Col(gap: 2) {
+      TextRow(text: f.name)
+      TextCaption(text: f.label)
+    }
+  }
+}
+
 # WHETHER the stop row is on screen. An always-visible "Add a stop" field cost a
 # whole row of the sheet to say something most trips never need; the `+` beside `Go`
 # says it in an icon's worth of space and this is what it opens.
 state stop_row { shape: enum[hidden, shown], initial: .hidden }
 
-event set_origin  { origin: set($value), query: clear }
+# Open and close the find state. `query` is cleared on open so the list starts from
+# the trip's own places rather than from whatever was last searched for.
+event edit_origin { editing: set(.origin), query: clear }
+event edit_dest   { editing: set(.dest), query: clear }
+event set_origin  { origin: set($value), query: clear, editing: set(.none) }
 # `query` is SET, not cleared — this is the line that made search reachable.
 #
 # Every event here cleared `query` and nothing ever set it, so `found` — which is
@@ -203,21 +235,26 @@ event set_origin  { origin: set($value), query: clear }
 # Committing "Stanford" now does both things it plainly means: it is the destination
 # (so the route draws to the best match immediately) and it is the query (so the
 # alternatives are listed underneath, and one tap refines the choice).
-event set_dest    { dest: set($value), query: set($value) }
+event set_dest    { dest: set($value), query: set($value), editing: set(.none) }
 # What is being typed, per keystroke. Separate from `set_dest` because the two mean
 # different things: a query is a question and a destination is an answer, and until
 # you commit, only the question exists.
 event typing      { query: set($value) }
-event choose_dest { dest: set($value), query: clear }
+event choose_dest { dest: set($value), query: clear, editing: set(.none) }
+# Picking a place for the ORIGIN. Same shape as `choose_dest`; a separate event
+# because the list has to know which endpoint the tap is filling in.
+event choose_origin { origin: set($value), query: clear, editing: set(.none) }
 # ONE event for the whole journey through the card, because `cycle` names an order
 # and the order IS the flow: plan → preview → drive → plan. Three chips on three
 # screens — "Go", "Start", "End" — are the same transition seen from three places,
 # and writing them as three events would have been three chances to disagree about
 # which screen follows which.
 event go          { screen: cycle(.plan, .preview, .drive) }
-event set_stop    { stop: set($value), query: clear }
-event drop_stop   { stop: clear, query: clear, stop_row: set(.hidden) }
-event add_stop    { stop_row: set(.shown) }
+event set_stop    { stop: set($value), query: clear, editing: set(.none) }
+event edit_stop   { editing: set(.stop), query: clear }
+event choose_stop { stop: set($value), query: clear, editing: set(.none) }
+event drop_stop   { stop: clear, query: clear, stop_row: set(.hidden), editing: set(.none) }
+event add_stop    { stop_row: set(.shown), editing: set(.stop), query: clear }
 event pick_mode   { mode: set($value) }
 event flip_view   { view: cycle(.tilted, .flat) }
 
@@ -270,24 +307,68 @@ view root Surface {
     }
 
     Panel {
-      Row(align: .center, gap: 10) {
-        TextCaption(text: copy.from, width: .label)
-        Field(text: origin, placeholder: copy.here_now, on_commit: set_origin, width: .fill)
+      # A FIELD ONLY WHILE IT IS THE ROW BEING EDITED — the shape the app being
+      # replaced uses, and for the reason recorded on `editing`: a permanently-live
+      # field cannot be focused here, so tapping either endpoint did nothing at all.
+      # As a row it is a tap target, and the tap opens the find list below.
+      # The editor binds QUERY, not the committed state, and opens EMPTY with the
+      # current name as its placeholder — the L2 app's `empty_text: oname` pattern,
+      # for two reasons that showed up on device the other way:
+      #
+      # Bound to `origin`, every keystroke re-realized the card and the field was
+      # rebuilt FROM THE STATE — so the pill snapped back to the old name while the
+      # query accumulated invisibly, and the cursor landed mid-name: typing inserted
+      # "Saratoga High XSchool". Bound to `query` (cleared by `edit_origin`), the
+      # field opens empty — the cursor has nowhere to be but position 0 — and each
+      # rebuild redraws exactly what has been typed.
+      when editing == .origin {
+        Row(align: .center, gap: 10) {
+          TextCaption(text: copy.from, width: .label)
+          Field(text: query, placeholder: origin, on_commit: set_origin,
+                on_change: typing, width: .fill)
+        }
+      }
+      when editing != .origin {
+        Row(align: .center, gap: 10, on_tap: edit_origin, value: "1") {
+          TextCaption(text: copy.from, width: .label)
+          TextRow(text: origin, width: .fill)
+        }
       }
       Rule()
-      Row(align: .center, gap: 10) {
-        TextCaption(text: copy.to, width: .label)
-        Field(text: dest, placeholder: copy.where, on_commit: set_dest,
-              on_change: typing, width: .fill)
+      when editing == .dest {
+        Row(align: .center, gap: 10) {
+          TextCaption(text: copy.to, width: .label)
+          Field(text: query, placeholder: dest, on_commit: set_dest,
+                on_change: typing, width: .fill)
+        }
+      }
+      when editing != .dest {
+        Row(align: .center, gap: 10, on_tap: edit_dest, value: "1") {
+          TextCaption(text: copy.to, width: .label)
+          TextRow(text: dest, width: .fill)
+        }
       }
       # The stop lives in the SAME group, under the destination, which is where iOS
       # Maps puts it — a third row of one card, not a second card.
+      # The via row is the SAME editor pattern as the endpoints — it used to be the
+      # one always-live `Field` left, so it echoed but never searched: no
+      # `on_change`, no results, no way to pick. "Add Stop" now opens it editing.
       when stop_row == .shown {
         Rule()
-        Row(align: .center, gap: 10) {
-          TextCaption(text: copy.via_lbl, width: .label)
-          Field(text: stop, placeholder: copy.add_stop, on_commit: set_stop, width: .fill)
-          Chip(text: copy.remove, on_tap: drop_stop)
+        when editing == .stop {
+          Row(align: .center, gap: 10) {
+            TextCaption(text: copy.via_lbl, width: .label)
+            Field(text: query, placeholder: stop, on_commit: set_stop,
+                  on_change: typing, width: .fill)
+            Chip(text: copy.remove, on_tap: drop_stop)
+          }
+        }
+        when editing != .stop {
+          Row(align: .center, gap: 10, on_tap: edit_stop, value: "1") {
+            TextCaption(text: copy.via_lbl, width: .label)
+            TextRow(text: stop, width: .fill)
+            Chip(text: copy.remove, on_tap: drop_stop)
+          }
         }
       }
       # And `Add Stop` is a row of the group too, reading as an action rather than
@@ -304,7 +385,22 @@ view root Surface {
     # R5.4's "your trip" defaults: before anything is typed, the trip's own places
     # are the pickable items — tap the origin while the destination is empty and the
     # trip reverses.
-    when dest == "" {
+    #
+    # Gated on `editing`, not on an empty destination. It used to require `dest == ""`
+    # — so the one moment the defaults appeared was before a trip existed, and a
+    # planned trip could never be edited from them. Tapping a name is what asks for
+    # this list, so that is what shows it.
+    when editing == .origin {
+      when query == "" {
+        Panel {
+          Row(align: .center, gap: 10, on_tap: choose_origin, value: dest) {
+            TextCaption(text: copy.to, width: .label)
+            TextRow(text: dest)
+          }
+        }
+      }
+    }
+    when editing == .dest {
       when query == "" {
         Panel {
           Row(align: .center, gap: 10, on_tap: choose_dest, value: origin) {
@@ -330,23 +426,25 @@ view root Surface {
     # it — an empty rounded box between TO and VIA, which is what this looked like
     # on device the first time. L0 has no predicate for "this list has rows", so the
     # container has to be the thing that cannot render empty: no rows, no nodes.
+    when editing == .origin {
+      for f, i in found key f.label { Hit(f: f, pick: choose_origin) }
+    }
+    when editing == .stop {
+      for f, i in found key f.label { Hit(f: f, pick: choose_stop) }
+    }
+    # And NOT while the origin or the stop is the row being edited — their own
+    # lists are rendering for the same query, and two lists answering one question
+    # means a tap can fill the endpoint you were not editing.
+    when editing != .origin {
+    when editing != .stop {
     when query != "" {
       # KEYED ON THE NAME, not on `id`. `sys.search` answers name/label/lat/lon and
       # the backend has no translation for `id` at all, so a row keyed on it had no
       # identity and a tap carried nothing. The name is what the search returns and
       # what `sys.search(query: state.dest)` can find again.
-      for f, i in found key f.label {
-        Row(align: .center, gap: 10, on_tap: choose_dest, value: f.query) {
-          Col(gap: 2) {
-            TextRow(text: f.name)
-            # WHICH Stanford. The name alone is not a choice — the helper answers
-            # five places called "Stanford" and this is the line that tells them
-            # apart, so it is also what keys the row.
-            TextCaption(text: f.label)
-          }
-        }
-        Rule()
-      }
+      for f, i in found key f.label { Hit(f: f, pick: choose_dest) }
+    }
+    }
     }
 
     # The stop's own row, a FIELD and always present — for the same reason FROM
@@ -527,8 +625,13 @@ view root Surface {
       # reads at a glance, truncated. `TextBody` is the role that wraps.
       when origin != "" { TextBody(text: step.instruction, width: .fill) }
       when origin == "" { TextBody(text: step_here.instruction, width: .fill) }
-      # The toggle names the view it would switch TO, which is what the button on
-      # the card being replaced is labelled.
+    }
+
+    # The view switch, ON THE MAP rather than in the banner — the banner holds the
+    # one line a driver reads, and a control there competes with it. The chip names
+    # the view it would switch TO, which is what the button on the card being
+    # replaced is labelled.
+    Panel(dock: .right) {
       when view == .tilted { Chip(text: copy.flat_lbl, on_tap: flip_view) }
       when view == .flat   { Chip(text: copy.tilt_lbl, on_tap: flip_view) }
     }
@@ -582,11 +685,11 @@ view root Surface {
     # rather than a whole `Map` per branch it would otherwise multiply with.
     when origin != "" {
       Map(mode: .drive, from: origin_place, to: dest_place, at: here,
-          view: view, zoom: 15)
+          view: view, zoom: 15, controls: .all)
     }
     when origin == "" {
       Map(mode: .drive, from_lat: from_lat, from_lon: from_lon, to: dest_place,
-          at: here, view: view, zoom: 15)
+          at: here, view: view, zoom: 15, controls: .all)
     }
   }
 }

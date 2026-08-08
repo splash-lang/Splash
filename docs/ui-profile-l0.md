@@ -239,11 +239,17 @@ implements these widgets — six of six exist and ship in octos-one today, again
 against a contract that has shipped once. Defining the contract first is defining it for three
 implementations, two of which do not exist, which is how the previous attempt went wrong.
 
-**The implementation does not yet do this.** `splash-core`'s `makepad::lower` emits makepad's
-widget dialect directly, with ten hardcoded colours and a font-size ramp — so it bypasses the
-DSL, the VM, `UiNode` and two backends, and it puts a theme inside the crate whose job is
-deciding whether a card is safe. That is a defect measured against this section, and §9 lists
-it as such.
+**It does now, and this paragraph used to say otherwise.** `makepad::lower` still emits
+makepad's widget dialect directly, with ten hardcoded colours and a font-size ramp — bypassing
+the DSL, the VM, `UiNode` and two backends, and putting a theme inside the crate whose job is
+deciding whether a card is safe. It is still a defect measured against this section. What
+changed is that **nothing in production calls it**: octos-one's device path is
+`kit::lower` → `_kit.splash` → the VM → `UiNode` → widgets, end to end, and `makepad::lower`
+survives only in this crate's own tests.
+
+All six data visualisations reach a backend through it. The warning below — that five of the
+six were absent from the consumer's tag table and would be dropped without a diagnostic — was
+true when it was written and is not now: each has a kit function and each has a tag.
 
 **A first attempt at this retarget was reverted**, and its failures are recorded here because
 they are the specification's failures rather than the code's. It mapped roles to consumer tags
@@ -1099,6 +1105,59 @@ a typed schema per capability, and normalisation by entity id. The third is not.
 
 ---
 
+### 5.13 An initial may be CAPTURED from a source
+
+**Status: implemented and shipped before it was specified, which is the wrong order
+and is why this section exists.** `RealizeReport::captured`, the host write that
+freezes it, and `state from_lat { shape: number, initial: here.lat }` in the nav card
+were all live while every `initial:` in this document was a literal or a token. A
+review of §7 found the same failure it was written to name: an implementation grew a
+construct the specification did not describe, so nothing could say whether the
+behaviour was right.
+
+A state's `initial:` may be a **path into a source**. It means *the value that source
+answered the first time this card was realized*, and it is written down at that
+moment:
+
+```
+source here  sys.gps()
+state from_lat { shape: number, initial: here.lat }
+```
+
+**Why a path and not a literal.** "Start from where I am" is not a fact the model may
+write — §4 forbids it, and rightly: a coordinate a card carries is a place the device
+is not. It is also not an ordinary read, because an ordinary read FOLLOWS. Left
+resolving on every realization, `from_lat` would chase the fix: an origin that moves
+as you drive, and a route re-requested before it can answer. The card being replaced
+has the same requirement and meets it with an imperative one-shot assignment.
+
+**Capture is what makes the difference expressible.** The state's value is the
+source's answer *at capture time*; the source goes on reporting the present, and the
+two are then separate values a card can show side by side — which is exactly what a
+trip from here needs, a fixed start and a moving position.
+
+**Who does what.** The realizer decides WHAT was captured, because it owns the
+precedence between a declared initial, a stored cell and the data. The host decides
+WHEN it becomes durable, because it owns the store. The rule is **write-once**: a cell
+that already exists is already captured and is never overwritten by a later
+realization, so a transition that writes it wins from then on. A host that skips the
+write gets the following behaviour, which is a bug and not a degradation: the state
+re-resolves every realization and silently becomes a live read.
+
+**This is a host write outside a transition, and it is the only one.** §2.1 excludes
+assignment outside a transition from the *card*; this is the runtime recording what it
+answered, not the card assigning. The distinction is worth keeping sharp, because it
+is the only seam through which a cell changes without an event, and anything else
+arriving through it is a defect.
+
+**What is NOT admitted.** The path is read once and is not re-captured when the source
+changes — there is no re-arming, and a card that needs a second capture declares a
+second state and an event that writes it. `initial:` still admits no expression, at L0
+or at L1: `initial: here.lat * 2` is refused, because the L1 grammar admits arithmetic
+in an argument value and this is a declaration.
+
+---
+
 ## 6. What makes L0 terminate
 
 Grammar membership alone does not bound execution. These conditions do, and an implementation
@@ -1227,12 +1286,18 @@ which assumed a kit answering L0's roles existed. None did: `components/flutter`
 `components/material` are ports of Flutter samples, and about four of L0's roles map loosely.
 The kit had to be written, and that was most of the work.
 
-What still keeps `makepad::lower` in place: **a card lowered through the kit has no
-interaction**, and five of the six data visualisations lower to a named marker rather than to a
-chart. Neither is a language question. Interaction is a matter of carrying an event through the
-`tapto` attribute the renderer already has — its non-`set:` strings fall through to the host, so
-an instance key survives without any change to the VM, and `docs/scoped-state.md` is not needed
-for it.
+**Both reasons that kept `makepad::lower` in place are now gone, and it has no production
+consumer.** They were: a card lowered through the kit has no interaction, and five of the six
+data visualisations lower to a named marker rather than to a chart. The first was resolved the
+way this paragraph predicted — an event travels through the `tapto` attribute the renderer
+already has, its non-`set:` strings falling through to the host, so an instance key survives
+with no change to the VM and `docs/scoped-state.md` was not needed for it. Taps, text commits
+and per-keystroke changes all reach a card through it now. The second is resolved too: all six
+visualisations have kit functions and all six are in the consumer's tag table.
+
+`makepad::lower` is still in the crate and is still exercised by the profile tests, but the
+device path calls only `kit::lower`. A verification done through `makepad::lower` therefore
+proves nothing about what a phone renders, which is a mistake this repository has made before.
 
 L1 and L2 **as capability levels** — the levels this document's §7 classifies, not the layers
 above — are a separate matter from the kit work; the two senses of "L1" are easy to conflate and
@@ -1476,6 +1541,14 @@ Recorded rather than patched over, in the order they would bite.
   expression's answer must move when its inputs move, so `last * 0 + 1547` is refused. This was
   recorded as needing an argument rather than a patch, and the argument is that a formula depends
   on what it reads.
+- ~~**A state's `initial:` was a third position, and it discarded the expression.**~~
+  **Fixed.** §9.2 admits an expression in one position; §9.8 already recorded a guard as
+  a second. `initial:` was a third, and the worst of the three: the parser scanned the
+  dotted path and stopped, so `initial: here.lat * 2` parsed as `here.lat` and the rest
+  was dropped without a diagnostic — accepted at L1, where arithmetic is otherwise
+  legal, and answering a number the card did not ask for. Refused now at both levels.
+  An `initial:` is a declaration of which value to capture (§5.13), and a captured
+  value is read rather than computed.
 - **Arithmetic is the only construct.** No comparison chain, no conditional, no string
   operation, no aggregate over a collection. §8 question 10 — how a card says a collection is
   empty — is *not* answered here, and a count is still one operator away from the arithmetic
