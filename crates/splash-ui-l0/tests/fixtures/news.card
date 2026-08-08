@@ -32,13 +32,19 @@ copy lead     { class: vocabulary, en: "LEAD",        zh: "焦点" }
 copy pts      { class: vocabulary, en: "pts",         zh: "分" }
 copy comments { class: vocabulary, en: "comments",    zh: "评论" }
 copy by       { class: vocabulary, en: "by",          zh: "作者" }
+copy loading  { class: vocabulary, en: "Fetching headlines…", zh: "正在获取头条…" }
+copy offline  { class: vocabulary, en: "Can't reach the news feed", zh: "无法获取新闻" }
 
 view root  Surface(pad: .page) {
              when selected == "" { stream }
              when selected != "" { story }
            }
 
+# §5.9: the feed's lifecycle is a state to branch on — "not yet" and "went
+# wrong" each say so, instead of an empty masthead with no explanation.
 view stream  Col {
+               when feed.$state == .pending { TextBody(text: copy.loading) }
+               when feed.$state == .failed  { TextBody(text: copy.offline) }
                masthead
                headline
                latest

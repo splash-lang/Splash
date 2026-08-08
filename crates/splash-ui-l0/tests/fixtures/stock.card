@@ -22,7 +22,9 @@ event open_quote { selected: set($value) }
 event back       { selected: clear, range: clear }              # two writes, one gesture
 event set_range  { range: set($value) }
 
-copy movers { class: vocabulary, en: "Top Movers", zh: "涨跌榜" }
+copy movers  { class: vocabulary, en: "Top Movers", zh: "涨跌榜" }
+copy loading { class: vocabulary, en: "Fetching the quote…", zh: "正在获取行情…" }
+copy offline { class: vocabulary, en: "Can't reach the market feed", zh: "无法获取行情" }
 copy open   { class: vocabulary, en: "Open",       zh: "开盘" }
 copy high   { class: vocabulary, en: "High",       zh: "最高" }
 copy low    { class: vocabulary, en: "Low",        zh: "最低" }
@@ -52,8 +54,12 @@ view list  Col {
              }
            }
 
+# §5.9: the quote's lifecycle is a state to branch on — a tapped ticker says
+# "fetching" or "can't reach", never a silent grid of em dashes.
 view detail  Col {
                Row(on_tap: back) { TextCaption(glyph: "‹") }
+               when quote.$state == .pending { TextBody(text: copy.loading) }
+               when quote.$state == .failed  { TextBody(text: copy.offline) }
                header
                chart
                ranges

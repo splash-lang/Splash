@@ -40,14 +40,20 @@ copy wind       { class: vocabulary, en: "Wind",         zh: "风速" }
 copy pressure   { class: vocabulary, en: "Pressure",     zh: "气压" }
 copy uv         { class: vocabulary, en: "UV Index",     zh: "紫外线" }
 copy precip     { class: vocabulary, en: "Rain",         zh: "降水概率" }
-copy visibility { class: vocabulary, en: "Visibility",   zh: "能见度" }
+copy loading    { class: vocabulary, en: "Getting the weather…", zh: "正在获取天气…" }
+copy offline    { class: vocabulary, en: "Can't reach the weather service", zh: "无法获取天气" }
 copy sky   { class: vocabulary, en: "Satellite", zh: "卫星云图" }
 copy air        { class: vocabulary, en: "Air Quality",  zh: "空气质量" }
 copy sunrise    { class: vocabulary, en: "Sunrise",      zh: "日出" }
 copy sunset     { class: vocabulary, en: "Sunset",       zh: "日落" }
 
 # ── view ─────────────────────────────────────────────────────────────────────
+# §5.9: the fetch lifecycle is a state the card branches on. "Not yet" and
+# "went wrong" are different facts and each SAYS SO — the alternative was a
+# full page of "n/a°" with no failure message.
 view root  Photo(src: scene, pad: .page) {
+             when now.$state == .pending { TextBody(text: copy.loading) }
+             when now.$state == .failed  { TextBody(text: copy.offline) }
              current
              forecast
              cloudfield
