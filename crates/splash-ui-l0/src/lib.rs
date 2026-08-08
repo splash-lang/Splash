@@ -2738,8 +2738,11 @@ pub mod catalog {
         Bool,
     }
 
+    // `index` is not here: an index is dimensionless, so there is no honest
+    // suffix — the tile's LABEL says which index it is. A token the catalog
+    // admits and no lowering decorates is this layer's recurring defect.
     pub const UNIT: &[&str] = &[
-        "c", "f", "pct", "speed", "pressure", "index", "distance", "money", "duration",
+        "c", "f", "pct", "speed", "pressure", "distance", "money", "duration",
     ];
     pub const FORMAT: &[&str] = &[
         "money",
@@ -6976,6 +6979,16 @@ pub mod makepad {
                 // `suffix: "min"` would be asserting the unit its own number
                 // came in, and would be wrong the day the helper answers hours.
                 Some("duration") => " min",
+                // What the backend actually answers: open-meteo serves
+                // `wind_speed_10m` in km/h and `surface_pressure` in hPa (no
+                // unit override in any fetch), and the L2 reference suffixed
+                // exactly these. Both tokens were catalog-legal and rendered
+                // NOTHING — a bare "12.5" beside a labelled tile, which reads
+                // as a number in whatever unit the reader assumes. (`index`
+                // is gone from the catalog instead: an index is dimensionless,
+                // so there is no honest suffix to give it.)
+                Some("speed") => " km/h",
+                Some("pressure") => " hPa",
                 _ => "",
             },
             glyph: match arg(node, "glyph") {

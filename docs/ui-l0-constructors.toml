@@ -282,8 +282,12 @@ range  = { kind = "unit" }
 # answers "30 min", so `unit: .duration` on it renders "30 min min". Check what
 # the source answers with before adding a unit — `sys.navstep("eta")` answers a
 # bare "30" and does need it.
+#
+# `index` was here and is gone: an index is dimensionless, so there is no honest
+# suffix to render — the tile's LABEL says which index it is. A token this list
+# admits and no lowering decorates renders nothing, silently.
 accepts = ["token", "path"]
-tokens  = ["c", "f", "pct", "speed", "pressure", "index", "distance", "money", "duration"]
+tokens  = ["c", "f", "pct", "speed", "pressure", "distance", "money", "duration"]
 
 [kinds.format]
 accepts = ["token"]

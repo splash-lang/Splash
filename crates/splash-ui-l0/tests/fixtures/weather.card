@@ -139,7 +139,9 @@ view details  Grid(cols: 2) {
                 Tile(label: copy.humidity,   value: now.humidity,   unit: .pct)
                 Tile(label: copy.wind,       value: now.wind,       unit: .speed)
                 Tile(label: copy.pressure,   value: now.pressure,   unit: .pressure)
-                Tile(label: copy.uv,         value: now.uv,         unit: .index)
+                # No unit on UV: an index is dimensionless (`unit: .index` left
+                # the catalog), and the label already says which index this is.
+                Tile(label: copy.uv,         value: now.uv)
                 # `visibility` was here and renders an em dash: open-meteo serves
                 # it hourly only, so no call answers it. `precip` is answered by
                 # the same fetch and is the more useful sixth tile anyway.

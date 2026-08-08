@@ -6223,6 +6223,57 @@ view root Surface {
     );
 }
 
+/// Every catalog-legal `unit:` token that claims a dimension must RENDER it.
+///
+/// `.speed` and `.pressure` were catalog-legal and `decoration_of` mapped only
+/// c/f/pct/duration — so the weather detail tiles drew "12.5" and "1013"
+/// beside their labels, bare numbers in whatever unit the reader assumed. The
+/// suffixes are what the backend actually answers (open-meteo serves km/h and
+/// hPa, no override in any fetch) and what the L2 reference showed. `.index`
+/// went the other way: an index is dimensionless, there is no honest suffix,
+/// so the token left the catalog rather than staying legal and inert.
+#[test]
+fn a_dimensioned_unit_token_renders_its_dimension() {
+    let card = |unit: &str| {
+        format!(
+            "source now sys.weather(lat: 1, lon: 2, fields: [wind, pressure])\n\
+             view root Surface {{ TextValue(value: now.wind, unit: {unit}) }}"
+        )
+    };
+    let data = serde_json::json!({
+        "now": { "wind": 12.5, "pressure": 1013.0 }, "env": { "locale": {} }, "copy": {}
+    });
+    // Differential: the token must CHANGE the lowering, to its own suffix.
+    for (token, suffix) in [(".speed", " km/h"), (".pressure", " hPa")] {
+        let report = check_ui_l0_named("unit", &card(token));
+        assert!(report.valid, "{token}: {:#?}", report.diagnostics);
+        let root = realize(&card(token), &data, RealizeLimits::default())
+            .root
+            .expect("realizes");
+        for (backend, dsl) in [
+            ("makepad", makepad::lower(&root)),
+            ("kit", splash_ui_l0::kit::lower(&root)),
+        ] {
+            assert!(
+                dsl.contains(suffix),
+                "{backend}: `unit: {token}` must render {suffix:?}:\n{dsl}"
+            );
+        }
+    }
+    // And `.index` is refused, not silently ignored: the checker names the
+    // legal set instead of accepting a token nothing decorates.
+    let report = check_ui_l0_named("unit", &card(".index"));
+    assert!(!report.valid, "unit: .index must be off the catalog");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("index") && d.message.contains("expected one of")),
+        "the refusal names the legal tokens: {:#?}",
+        report.diagnostics
+    );
+}
+
 /// Token pairs a card TOGGLES between must be distinguishable in the lowering.
 ///
 /// `changing_a_declared_attribute_must_change_the_lowering` asks whether SOME
