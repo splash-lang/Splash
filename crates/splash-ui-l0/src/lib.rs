@@ -2166,6 +2166,13 @@ impl<'a> Parser<'a> {
             if self.peek().is_none() || self.peek().is_some_and(|t| t.is_punct(")")) {
                 break;
             }
+            // `Row(gap: 8, when … { … })` — a statement where an argument
+            // belongs. Catch it BEFORE `ident()` eats `when` as an argument
+            // name and refuses with a bare `expected ":"`, which taught the
+            // model nothing (the diagnostic text IS the repair prompt).
+            if self.args_stopped_by_statement() {
+                return out;
+            }
             let Some(name_tok) = self.peek().cloned() else {
                 break;
             };
@@ -2173,7 +2180,40 @@ impl<'a> Parser<'a> {
                 self.at += 1;
                 continue;
             };
-            if !self.expect_punct(":") {
+            if !self.eat_punct(":") {
+                // `TextRow(text, value)` — a comma (or the closing paren)
+                // where the argument's `:` belongs. The bare
+                // `expected ":", found ","` cascaded into `expected ")"` and
+                // `expected an element` and buried the fix; say what an
+                // argument IS instead, once.
+                match self.peek().cloned() {
+                    Some(t) => self.sink.at(
+                        &t,
+                        format!(
+                            "expected \":\" after argument name `{name}`, found {:?} — every \
+                             constructor argument is written `name: value` and arguments are \
+                             separated by commas, e.g. `Row(gap: 8, on_tap: back)`; a bare \
+                             value with no name, or a comma where the `:` belongs, is refused",
+                            t.text
+                        ),
+                    ),
+                    None => self.sink.push(
+                        0,
+                        0,
+                        format!(
+                            "expected \":\" after argument name `{name}`, found end of source"
+                        ),
+                    ),
+                }
+                // Recover to the closing paren so one mistake yields one
+                // diagnostic instead of the cascade. The card is already
+                // refused; the skipped tokens have nothing more to teach.
+                while let Some(t) = self.peek() {
+                    if t.is_punct(")") || t.is_punct("{") || t.is_punct("}") {
+                        break;
+                    }
+                    self.at += 1;
+                }
                 break;
             }
             let value = self.parse_operand();
@@ -2187,8 +2227,52 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
+        // `Col(gap: 8\n  when … { … })` — the no-comma variant of the same
+        // nesting mistake, reached when the argument loop stops without a
+        // trailing comma. Leave the keyword in place: the enclosing block
+        // parses the guard as the element it should have been.
+        if self.args_stopped_by_statement() {
+            return out;
+        }
         self.expect_punct(")");
         out
+    }
+
+    /// A `when`/`for` STATEMENT keyword sitting where an argument belongs —
+    /// the most common malformation in live generation runs. Emits the
+    /// teaching diagnostic (guards wrap elements; they are not arguments) and
+    /// answers true so `parse_args` returns without the bare
+    /// `expected ")", found "when"` noise. The keyword is left unconsumed so
+    /// the enclosing block still parses the guard and checks its contents.
+    fn args_stopped_by_statement(&mut self) -> bool {
+        let Some(t) = self.peek().cloned() else {
+            return false;
+        };
+        let (kw, what, fix) = if t.is_kw("when") {
+            (
+                "when",
+                "guard",
+                "close the constructor's `(…)` first, then write `when path == value { … }` \
+                 around the elements it guards",
+            )
+        } else if t.is_kw("for") {
+            (
+                "for",
+                "loop",
+                "close the constructor's `(…)` first, then write \
+                 `for item in collection key item.id { … }` around the elements it repeats",
+            )
+        } else {
+            return false;
+        };
+        self.sink.at(
+            &t,
+            format!(
+                "a `{kw}` {what} cannot appear inside an argument list; {what}s wrap \
+                 elements — {fix}"
+            ),
+        );
+        true
     }
 
     /// An argument value, including an L1 arithmetic expression.

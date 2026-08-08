@@ -3467,6 +3467,76 @@ fn malformed_input_is_rejected_rather_than_parsed_loosely() {
     }
 }
 
+/// The two malformations live generation actually produced — a `when` guard
+/// nested inside a constructor's argument list, and a comma where an
+/// argument's `:` belongs — must refuse with diagnostics that TEACH, because
+/// the diagnostic text is fed back verbatim as the repair prompt. A bare
+/// `expected ")", found "when"` sent the model in circles; the teaching text
+/// names the construct and the fix.
+#[test]
+fn syntax_the_model_gets_wrong_is_refused_with_a_teaching_diagnostic() {
+    // (a) A `when` guard inside an argument list — both the no-comma form
+    // (the live `line 75: expected ")", found "when"` refusal) and the
+    // comma form, where `ident()` used to eat `when` as an argument name.
+    for (source, what) in [
+        (
+            "view root Col(gap: 8\n  when count > 0 { Rule() }\n)",
+            "when guard after the last argument, no comma",
+        ),
+        (
+            "view root Col(gap: 8, when count > 0 { Rule() })",
+            "when guard in argument position after a comma",
+        ),
+        (
+            "view root Col(gap: 8, for m in movers key m.id { Rule() })",
+            "for loop in argument position",
+        ),
+    ] {
+        let report = check_ui_l0_named("malformed", source);
+        assert!(!report.valid, "{what} must be rejected");
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("cannot appear inside an argument list")
+                    && d.message.contains("wrap elements")),
+            "{what} should produce the teaching diagnostic: {:#?}",
+            report.diagnostics
+        );
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("expected \")\", found \"when\"")
+                    || d.message.contains("expected \")\", found \"for\"")),
+            "{what}: the bare expected/found must be replaced, not joined: {:#?}",
+            report.diagnostics
+        );
+    }
+
+    // (b) A comma where the argument's `:` belongs (the live `line 124:
+    // expected ":", found ","` refusal). The diagnostic must name the
+    // argument, state the `name: value` form, and not cascade.
+    let report = check_ui_l0_named("malformed", "view root TextRow(text, value)");
+    assert!(!report.valid, "a bare-value argument must be rejected");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("expected \":\" after argument name `text`")
+                && d.message.contains("`name: value`")),
+        "comma-for-colon should produce the teaching diagnostic: {:#?}",
+        report.diagnostics
+    );
+    assert_eq!(
+        report.diagnostics.len(),
+        1,
+        "one mistake, one diagnostic — the old cascade buried the line that \
+         mattered: {:#?}",
+        report.diagnostics
+    );
+}
+
 /// §6, condition 5: node count and nesting depth are capped, and the
 /// declaration count with them. These are the bounds that make realization
 /// terminate on input the grammar alone does not bound.
