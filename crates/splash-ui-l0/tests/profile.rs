@@ -5190,6 +5190,65 @@ fn a_signed_money_change_is_live_not_seeded() {
     );
 }
 
+/// A `format:` survives the TICK, not just the first draw.
+///
+/// The kit's tick stamp (`l0_live`) composed only glyph/unit/suffix around the
+/// call, never the `format:` — so every `.money` price drew as `$184.20` and
+/// then lost its `$` on the first tick; a `.signed_money` change ticked the
+/// raw `change` field the changemoney redirect exists to avoid; and a
+/// `.compact` value, which cannot go live at all, was stamped with the raw
+/// call, so the tick overwrote "41.2M" with 41200000. Found in review.
+///
+/// Differential against the DRAWN form: the stamp must quote exactly what
+/// `live_valued` emitted, and must be absent exactly where the draw kept the
+/// seeded value. (Inside the stamp the call is debug-quoted, so its quotes
+/// appear escaped — that is what distinguishes stamp from draw below.)
+#[test]
+fn a_money_format_survives_the_tick() {
+    let data = serde_json::json!({
+        "movers": [], "selected": "NVDA", "range": "m1", "env": {"locale":{}},
+        "quote": {"name":"NVIDIA","last":184.2,"change":3.1,"pct":1.7,"open":181.0,
+                  "high":185.6,"low":180.2,"volume":41200000.0,
+                  "mktcap":4520000000000.0,"pe":58.3},
+        "copy": {"movers":"Top Movers","open":"Open","high":"High","low":"Low",
+                 "volume":"Volume","mktcap":"Mkt Cap","pe":"P/E",
+                 "loading":"Fetching the quote…","offline":"Can't reach the market feed"}
+    });
+    let report = realize(STOCK, &data, RealizeLimits::default());
+    let dsl = splash_ui_l0::kit::lower(&report.root.expect("root"));
+
+    // Baseline: the DRAW went live with the `$` prefix at all.
+    assert!(
+        dsl.contains(r#""$" + sys.stock("NVDA", "price")"#),
+        "the drawn price must be live with its currency prefix:\n{dsl}"
+    );
+    // The stamp carries the same composition — `$` included.
+    assert!(
+        dsl.contains(r#"\"$\" + sys.stock(\"NVDA\", \"price\")"#),
+        "the tick stamp must keep the `$` the draw had:\n{dsl}"
+    );
+    // `.signed_money` ticks the field that returns sign and symbol already
+    // ordered — never the raw `change` the redirect exists to avoid.
+    assert!(
+        dsl.contains(r#"sys.stock(\"NVDA\", \"changemoney\")"#),
+        "the tick stamp must keep the changemoney redirect:\n{dsl}"
+    );
+    assert!(
+        !dsl.contains(r#"sys.stock(\"NVDA\", \"change\")"#),
+        "a signed_money tick of the raw change field drops sign and symbol:\n{dsl}"
+    );
+    // `.compact` cannot go live: the draw kept the seeded "41.2M", so the tick
+    // must not stamp the raw call and overwrite it with 41200000.
+    assert!(
+        dsl.contains("41.2M"),
+        "the compact volume stays seeded and formatted:\n{dsl}"
+    );
+    assert!(
+        !dsl.contains(r#"\"vol\""#) && !dsl.contains(r#"sys.stock("NVDA", "vol")"#),
+        "no tick stamp may bypass a format the draw could not take live:\n{dsl}"
+    );
+}
+
 /// A list factored into a COMPONENT still lowers to live calls, at its own index.
 ///
 /// `for s in feed { StoryRow(story: s) }` is the idiomatic way to write a list,

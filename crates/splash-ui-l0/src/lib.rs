@@ -6937,7 +6937,12 @@ pub mod makepad {
     }
 
     /// The live form, or `None` when any part of it does not survive.
-    fn live_valued(node: &UiNode) -> Option<String> {
+    ///
+    /// `pub(super)` because the kit's tick stamp (`live_call_of`) must compose
+    /// EXACTLY this — decoration, `format:` prefix, the `signed_money`
+    /// changemoney redirect, and the refusals — or the first tick redraws the
+    /// value without whichever part it dropped.
+    pub(super) fn live_valued(node: &UiNode) -> Option<String> {
         let decoration = decoration_of(node);
         live_value(
             node,
@@ -9224,10 +9229,19 @@ pub mod kit {
     /// says `TextRow(text: step.instruction)`; `fn tick()` belongs to the backend in
     /// exactly the way `sys.navstep` does.
     fn live_call_of(node: &UiNode) -> Option<String> {
-        let (_, binding) = node
-            .bindings
-            .iter()
-            .find(|(n, _)| n == "value" || n == "text")?;
+        // A bound `value:` must TICK with the same composition it DREW with.
+        // This built `decorated(vm_call(…))` — glyph/unit/suffix but never
+        // `format:` — so every `.money` price lost its `$` on the first tick,
+        // `.signed_money` ticked the raw `change` field the changemoney
+        // redirect exists to avoid, and a `.compact`/`.ratio` value (which
+        // cannot go live at all) was overwritten with the raw number the
+        // format was protecting the screen from. `live_valued` IS the drawn
+        // composition; the tick stamps exactly that, and refuses to stamp
+        // exactly where the draw refused to go live.
+        if node.bindings.iter().any(|(n, _)| n == "value") {
+            return makepad::live_valued(node);
+        }
+        let (_, binding) = node.bindings.iter().find(|(n, _)| n == "text")?;
         let call = makepad::vm_call(binding)?;
         Some(makepad::decorated(node, call))
     }
