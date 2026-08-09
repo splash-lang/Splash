@@ -26,6 +26,154 @@ wrong in an interesting direction: **L0 has no expression form, so there is noth
 evaluate.** Realization is a pure walk over the parsed tree with data substituted. The
 reference implementation contains no reference to the VM whatsoever.
 
+**This paragraph is about L0 and does not extend to L1.** L1 has an expression form and
+therefore an evaluator; §9.7 states what the confinement argument becomes there, and it is a
+narrower claim than this one. Citing "nothing to evaluate" for a card requires first
+establishing that the card is L0.
+
+### 1.0 What Level 0 is NOT for
+
+Measured, on the app cards this system already ships. Three of them — weather,
+news, stock — are the profile's reference corpus, so "L0 expresses them" is close
+to circular; they shaped every role and capability it has. The interesting
+results are the others.
+
+**Not every app wants a card at all**, and an earlier version of this section
+counted as though they did. `youtube` and `web` are FIXED APPS: a person authored
+the UI once, and the model supplies only an intent — which video, which song,
+which query. Nothing about them is a limitation of L0, because authoring UI is
+the wrong tool for them. The AMA routes an intent to the app; the app resolves it.
+
+So the corpus divides two ways, and only the first row is L0's business:
+
+| | who authors the UI | what the model supplies | example |
+|---|---|---|---|
+| **LLM-authored card** | the model, per request | the whole card | weather, news, stock, activity, nav, weather-activity |
+| **Fixed app** | a person, once | an intent | youtube, web |
+
+**Five of the six LLM-authored cards are written and admitted at L0.** The sixth,
+`weather-activity`, is a composition of two that already are, and every capability
+it names is catalogued — its `sys.weathernum` / `sys.placesnum` / `sys.aqinum` are
+the index-and-count companions that a declared collection and `$state` replace.
+It is not counted as proven, because it has not been written.
+
+That is the number that means something. "Five of eight" would be counting two
+fixed apps as failures of a language they were never meant to use.
+
+**And the split is what §4 wants anyway.** `apps/youtube/app.md` currently tells
+the model *"YOU choose the videos — the card cannot search YouTube by itself"*, so
+it emits video IDs from memory. Those are FACTS, and a wrong one is a dead embed
+or the wrong upload — exactly what the no-facts rule exists to prevent, and the
+same failure `activity`'s "never invent a venue" and `StockPlot`'s symbol-not-a-
+series both avoid. An app that takes an intent and resolves it against the real
+service has no way to assert a fact that is not true.
+
+**`activity` generalises.** It came from a spec written for a different framework
+and needed one catalog entry (`sys.places`) and no profile change. Two of its
+requirements came out *better* than the source: the loading guard is
+`when parks.$state == .pending` rather than a `-9999` sentinel that also has to
+mean "no data", and its venue list is a declared collection rather than indexed
+capability calls. It also found a real defect on its first run — `suffix` applied
+to `value:` and silently not to `text:`, because every use of it in the original
+three pairs with `value:`.
+
+**`nav` does not — and the reason is not what it first looks like.** The
+classifier puts its shipping card at **L2**, and the card is indeed a program:
+30 `let` bindings, 83 assignments, 128 conditionals, 606 arithmetic and
+concatenation operators, and a `fn tick()` that recomputes route geometry every
+frame.
+
+**But most of that is compensation, not requirement.** Of tick's 157 lines, 61
+re-resolve values after a fetch lands and 32 build a URL parameter by string
+concatenation. Its own comments say why, seven times: *"top-level dlat/dlon
+freeze at build"*, *"the top-level origin resolution FREEZES at build time —
+before oq's search lands"*, *"GPS may land AFTER build, so (re)resolve it here
+each tick"*. The card recomputes everything every frame because it has no way to
+say **this value depends on that fetch**. Three more lines exist to disambiguate
+a `-9999` sentinel that means loading *or* failed.
+
+L0 supplies exactly those: declared sources with a dependency graph,
+`<source>.$state` as four distinct states rather than a sentinel, and source
+arguments the host assembles instead of the card concatenating a URL.
+
+**And the map is composable.** Its card-facing surface is already declarative —
+about ten parameters, `nav_mode`, `zoom`, `nav_route_width`, `nav_period`, no
+callbacks — and `nav_period` means the widget owns its own animation, so the
+moving vehicle is not the card's concern either. What the card does wrongly is
+call `sys.navroute` itself, hand-build a marker string, and push both in through
+imperative setters. **That is the card doing the widget's job**, and it is the
+identical mistake `AqiContour` and `StockPlot` were already corrected for: the
+catalog's own note on that correction says supplying the data *"put a GPU uniform
+layout into the authoring language — it is not a widget contract, it is an ABI"*.
+
+So `Map` is now a role, taking a trip rather than a route, and `Field` is now a
+role, because a card with no way to receive typed text cannot have a search box —
+which was the other half of why nav could not be written here.
+
+**An earlier version of this section said the gap was structural** and that a
+card like `nav` is L1 or L2 "not a reason to widen L0". That was too strong, and
+wrong in the direction that stops work: it read a card's accumulated workarounds
+as evidence about the language. The honest position is narrower —
+
+| | |
+|---|---|
+| **L0 suits** | a card that displays declared data, branches on it, and writes declared state on a tap or a commit |
+| **L0 cannot express** | a card that computes derived values, or drives its own animation loop |
+| **Settled by writing it** | `nav`'s DECLARATIVE screens — search, results, route preview — rewritten against declared sources with a `Map` role, in **54 lines** against the L2 exemplar's 664, admitted at L0 |
+| **Settled by writing it, second pass** | the **drive** screen — turn-by-turn navigation, at L0, in the same card. The prediction in the row this replaces held: it was a widget change, not a language change |
+
+**Turn-by-turn was the hard case, and it is worth reading how it fell.** The row
+above used to say the drive screen was "settled against the shipping card, NOT
+against L0": the shipping mechanism is unambiguously L2 — a `fn tick()` calling
+`ui.<id>.set_*` on widgets that must never rebuild — but only because the CARD
+drove the camera by hand. The prediction was that a declared position would move
+it to L0. Three things were needed, and all three were the same shape:
+
+1. **`Map(at:)`** — a declared position for the camera to follow. `.drive` now
+   means the chase camera exactly when `at:` is supplied, and the static preview
+   otherwise, so the mode that MOVES is available precisely when the card said
+   where the user is.
+2. **`sys.step`** — the next manoeuvre and the distance left, from the trip's four
+   coordinates plus the device's own two.
+3. **A widget mode that follows rather than simulates.** This was the trap. The
+   widget already had a `"2d"` follow camera, and pointing `.drive` at it would
+   have looked like a complete feature: it drives a vehicle along the route at an
+   assumed 34 mph off a looping clock. It looks exactly like navigating. Anything
+   bound to it reports a trip that is not happening, and §4 does not stop applying
+   because the invented value is a camera pose. `"follow"` takes its position from
+   the card's declared fix and moves when, and only when, the device does.
+
+The same fabrication was load-bearing in the L2 exemplar's banner, which fed
+`sys.navstep` a progress of `sys.navsecs(period) * 15.2` — a clock times an
+assumed speed — and so announced turns, and arrived on schedule, from a parked
+car. `sys.step` takes the device's coordinates instead and the host projects the
+fix onto the route. **What L0 forced was not a smaller nav card but a truthful
+one:** the profile's own no-facts rule is what made the simulated camera
+inexpressible, and the honest version cost one attribute, one capability, and one
+widget mode.
+
+**What writing it found.** Four gaps, none structural, all recorded rather than
+patched over:
+
+- **A card cannot accumulate a list.** `collection` is a *prop* shape (§5.2), not
+  a state shape, and there is no append. So waypoints, favourites and any
+  multi-select are inexpressible — the trip planner lost its "add a stop". This
+  is the sharpest of the four because it is a whole interaction class.
+- **The text roles' argument sets are an artefact of the corpus.** `suffix` and
+  `glyph` exist only on `TextCaption`; `format` on Hero, Stat and Value but not
+  Caption; `tint` on Stat and Value but not Hero. Each role has exactly what the
+  original three cards happened to use on it, and nothing states a reason.
+- **No duration format**, so a trip time cannot be written as one — `.money`,
+  `.compact`, `.time` and `.date` exist but nothing spells 48 minutes.
+- **`on_tap` is not on the text roles**, so a tappable label has to be wrapped in
+  a `Row`. That may be right; it is not written down as a decision.
+
+**One gap this did surface.** `activity`'s spec wants an empty state — "Nothing
+close by" when a collection has no members — and L0 cannot say it. There is no
+length, no count, and no emptiness predicate, so a guard cannot distinguish an
+empty list from a full one. Every list-shaped card wants this. It is §8's
+question 10.
+
 ### 1.1 A card names roles, not appearance
 
 **L0 decides what a thing IS. It does not decide what it looks like, and it never names a
@@ -91,11 +239,17 @@ implements these widgets — six of six exist and ship in octos-one today, again
 against a contract that has shipped once. Defining the contract first is defining it for three
 implementations, two of which do not exist, which is how the previous attempt went wrong.
 
-**The implementation does not yet do this.** `splash-core`'s `makepad::lower` emits makepad's
-widget dialect directly, with ten hardcoded colours and a font-size ramp — so it bypasses the
-DSL, the VM, `UiNode` and two backends, and it puts a theme inside the crate whose job is
-deciding whether a card is safe. That is a defect measured against this section, and §9 lists
-it as such.
+**It does now, and this paragraph used to say otherwise.** `makepad::lower` still emits
+makepad's widget dialect directly, with ten hardcoded colours and a font-size ramp — bypassing
+the DSL, the VM, `UiNode` and two backends, and putting a theme inside the crate whose job is
+deciding whether a card is safe. It is still a defect measured against this section. What
+changed is that **nothing in production calls it**: octos-one's device path is
+`kit::lower` → `_kit.splash` → the VM → `UiNode` → widgets, end to end, and `makepad::lower`
+survives only in this crate's own tests.
+
+All six data visualisations reach a backend through it. The warning below — that five of the
+six were absent from the consumer's tag table and would be dropped without a diagnostic — was
+true when it was written and is not now: each has a kit function and each has a tag.
 
 **A first attempt at this retarget was reverted**, and its failures are recorded here because
 they are the specification's failures rather than the code's. It mapped roles to consumer tags
@@ -627,6 +781,9 @@ An earlier version of this paragraph offered card state "with a declared migrati
 home for durable values. **There is no card-state migration** — no syntax, no implementation.
 Card state is reset like any other, and §8 question 8 records this as an open question rather
 than a mechanism, because durability needs a storage contract this profile does not have.
+§5.12 provides that contract — durable values are *references* read as a source, not cells — but
+card state itself is still not it: there is nowhere durable to put a CELL,
+and there is not meant to be.
 
 ### 5.9 Source lifecycle
 
@@ -704,6 +861,10 @@ an **effect** (render-only, layout, source query, navigation), and a **lifetime*
 card, session). `selected` is card-shared by visibility but *navigation* by effect; `units`
 looks like a durable preference. Classifying by owner alone answers where a value lives, not
 how long it should, which is why question 8 in §8 stays open.
+
+The lifetime axis here has three values and needed a fourth. §5.12 supplies it: a durable value is
+not a longer-lived cell but a **reference** the host stores and a source resolves, which is why
+it does not appear in this section's taxonomy at all.
 
 #### 5.10.1 Moving kind 2 down requires a protocol, not just a move
 
@@ -793,6 +954,207 @@ on a backend that answers its own sources, and the translation table between L0'
 capability names and a backend's helper names lives in that backend's lowering.
 Both are the price of reaching live data without a second fetch layer, and both
 are recorded here rather than discovered later.
+
+### 5.12 What is durable
+
+**Status: implemented, and proved on a phone.** `sys.watchlist` with `append`
+and `remove`, a versioned store at `~/.config/octos-app/user.json`, and the
+write path from a tap to disk. The test that matters is the one no unit test can
+run: tap a row, force-stop the app, relaunch, and the entry is still there — with
+its price fetched fresh, because the file held `["ATKR"]` and nothing else.
+
+Written before the implementation, deliberately, so the implementation had
+something to diverge from. Two things did diverge and both are recorded below:
+`sys.prefs` is read-only, and the tap payload had to become a live call.
+
+This answers the storage and migration halves of §8 question 8. The third half —
+what a user is *entitled* to get back — is a product decision and stays open.
+
+#### State is a cursor, not data
+
+`selected = "NVDA"` is not a value the card holds. It is **which entity the card
+is looking at** — a reference into data the card does not own. `range = "m1"` is
+which slice. Once state is read as a cursor rather than as a value, three things
+that look unrelated turn out to be one thing at three lifetimes:
+
+| | what it holds | lives for |
+|---|---|---|
+| `selected` | one entity reference | the card |
+| a watchlist | a set of entity references | indefinitely |
+| `quote(NVDA)` | the entity itself | never stored; always fetched |
+
+A watchlist is a **persisted set of the same thing `selected` holds one of**. That
+is the whole of it — not a new kind of storage, the same kind of reference at a
+different lifetime. §5.10 names a cell's lifetime as instance, card or session;
+this is the fourth value that axis is missing, and the reason question 8 could not
+be answered under a state mechanism.
+
+#### What is stored: references, never facts
+
+§4's no-facts rule extends to the store, and for the same reason. A stored price is
+wrong within a second of being written, and a stale number that still looks live is
+precisely the failure §4 exists to prevent — the shipping card drew a seeded `$181`
+open beside two live values and nothing on screen distinguished them.
+
+So a watchlist is `["NVDA", "AAPL"]`. It is not a list of rows carrying names and
+prices. **Identity is durable; facts are not**, and the store may hold only the
+first. Ordering is part of identity here: the array's order is the user's order.
+
+#### A durable collection is a source, not state
+
+It reads as a `source`, which keeps §5 intact — state remains disposable UI state
+and this never becomes a second kind of cell.
+
+```
+source watch sys.watchlist(fields: [ticker, name, last, pct])
+```
+
+**The host performs the join.** It reads the stored references, fetches the live
+quotes, and returns the rows. The card never sees the store, and L0 needs no join
+operator — which it does not have and must not acquire.
+
+#### Mutation: an event may target a source
+
+One grammar addition, and only one:
+
+```
+event add  { watch: append($value) }
+event drop { watch: remove($value) }
+```
+
+The target is a source rather than a state, and the capability declares which
+transitions it accepts. Dispatch routes the write to the host instead of to the
+`InstanceStore`; the source goes stale and §5.9's lifecycle re-fetches it.
+
+**This does not weaken the confinement argument.** L0 is safe because it has no
+expression form to evaluate, not because taps are inert — `cycle(a, b, c)` already
+advances an enum with wrapping, which is runtime logic the card names and does not
+write. `append($value)` is the same shape. `remove($value)` matches an exact
+payload; it does not evaluate a predicate, and it must not be allowed to.
+
+#### Why the card cannot hold this instead
+
+Cards are **regenerated per request**. Asking for the same app twice produces a new
+card and a new session. `state watch { initial: [] }` would therefore be empty
+again on the next request, and would look like it worked until someone came back.
+That is the decisive argument, and it is why durability is not a state feature no
+matter how convenient a list-shaped cell would be.
+
+#### Entities, and the disagreement they remove
+
+Today a `quote` is a node and `NVDA` is not, so two reads of the same company are
+unrelated values that happen to share a ticker. That is why a percentage could
+render red while the price beside it rose: the tint resolved from one snapshot and
+the value from another. Normalising by entity id — one `NVDA` that a watchlist
+references and a detail card reads — makes the disagreement unrepresentable rather
+than something to keep in sync. It is the piece that makes this a graph rather than
+a pile of records, and it is worth doing for that alone.
+
+#### Migration
+
+The store outlives the cards that read it, and a regenerated card will ask for a
+different shape. §5.8's discipline applies unchanged: **a version stamp**, so an
+old file is recognised rather than misread; **tolerate unknown fields**, so a card
+asking for something never stored gets "missing" rather than a failure; and **drop
+rather than guess** when a shape changes, because feeding version-A data to
+version-B code produces a card that renders confidently and wrongly.
+
+#### What the implementation changed
+
+**`sys.prefs` is read-only.** A preference write must name WHICH preference, and
+a transition targets a bare source name: `event set_units { prefs: set($value) }`
+says nothing about `units`. That needs a dotted target (`prefs.units:
+set($value)`), which is grammar this does not have. A card may read a preference
+and not yet change one. Declaring the capability writable before the target can
+be aimed would have shipped a write nobody could use.
+
+**A tap payload had to become a live call.** `Row(on_tap: keep, value: m.ticker)`
+resolved its payload at realize time while the row's own text lowered to a live
+call, so the two could disagree — and with no seed blob the payload was simply
+empty, so the first watchlist tap was refused. Where a payload has a source
+binding the backend can answer, the lowering now emits the call:
+
+```
+l0_tap("l0:{…,\"v\":\"" + sys.movers(0, "symbol") + "\"}", …)
+```
+
+That was a pre-existing defect in every tappable bound row, not one this section
+introduced. It surfaced here because a watchlist is the first feature where the
+payload is the whole point rather than a convenience.
+
+**Reorder is absent.** `move(ticker, position)` needs two payloads and `value:`
+carries one. `append` and `remove` cover adding and removing; ordering is the
+order things were added until the grammar grows a second slot.
+
+#### What is deliberately not adopted
+
+The obvious reference here is GraphQL, and two of its three ideas are worth taking:
+a typed schema per capability, and normalisation by entity id. The third is not.
+
+- **No query language.** Arguments, variables, aliases and directives are a second
+  language to parse, validate and confine, and L0's entire safety claim is that
+  there is nothing to evaluate. The schema and the colocation are expressible in
+  the grammar that already exists.
+- **No resolver graph.** GraphQL assumes one endpoint over a traversable schema.
+  These capabilities are heterogeneous — Yahoo, Photon, Open-Meteo, OSRM — with no
+  joins between them. The only planning value is dependency ordering, and
+  `source_plan` already does that.
+- **Not for over-fetching.** `sys.movers` fetches one fixed URL regardless of what
+  `fields:` names, so narrowing the list saves nothing on the wire. This is adopted
+  for correctness. If it is ever argued for on performance, the argument is wrong.
+
+---
+
+### 5.13 An initial may be CAPTURED from a source
+
+**Status: implemented and shipped before it was specified, which is the wrong order
+and is why this section exists.** `RealizeReport::captured`, the host write that
+freezes it, and `state from_lat { shape: number, initial: here.lat }` in the nav card
+were all live while every `initial:` in this document was a literal or a token. A
+review of §7 found the same failure it was written to name: an implementation grew a
+construct the specification did not describe, so nothing could say whether the
+behaviour was right.
+
+A state's `initial:` may be a **path into a source**. It means *the value that source
+answered the first time this card was realized*, and it is written down at that
+moment:
+
+```
+source here  sys.gps()
+state from_lat { shape: number, initial: here.lat }
+```
+
+**Why a path and not a literal.** "Start from where I am" is not a fact the model may
+write — §4 forbids it, and rightly: a coordinate a card carries is a place the device
+is not. It is also not an ordinary read, because an ordinary read FOLLOWS. Left
+resolving on every realization, `from_lat` would chase the fix: an origin that moves
+as you drive, and a route re-requested before it can answer. The card being replaced
+has the same requirement and meets it with an imperative one-shot assignment.
+
+**Capture is what makes the difference expressible.** The state's value is the
+source's answer *at capture time*; the source goes on reporting the present, and the
+two are then separate values a card can show side by side — which is exactly what a
+trip from here needs, a fixed start and a moving position.
+
+**Who does what.** The realizer decides WHAT was captured, because it owns the
+precedence between a declared initial, a stored cell and the data. The host decides
+WHEN it becomes durable, because it owns the store. The rule is **write-once**: a cell
+that already exists is already captured and is never overwritten by a later
+realization, so a transition that writes it wins from then on. A host that skips the
+write gets the following behaviour, which is a bug and not a degradation: the state
+re-resolves every realization and silently becomes a live read.
+
+**This is a host write outside a transition, and it is the only one.** §2.1 excludes
+assignment outside a transition from the *card*; this is the runtime recording what it
+answered, not the card assigning. The distinction is worth keeping sharp, because it
+is the only seam through which a cell changes without an event, and anything else
+arriving through it is a defect.
+
+**What is NOT admitted.** The path is read once and is not re-captured when the source
+changes — there is no re-arming, and a card that needs a second capture declares a
+second state and an event that writes it. `initial:` still admits no expression, at L0
+or at L1: `initial: here.lat * 2` is refused, because the L1 grammar admits arithmetic
+in an argument value and this is a declaration.
 
 ---
 
@@ -898,7 +1260,8 @@ construct and keep the widest.
 | ~~5~~ | ~~Named slots~~ — **settled in §5.5.** `slot name` in the component, `into name { … }` at the call site, anonymous slot unchanged as the default. An `into` naming a slot that does not exist is rejected rather than silently dropping its children |
 | ~~6~~ | ~~An explicit state migration~~ — **settled in §5.8.** `keep: true` opts a cell out of the schema-change reset, and only while that field's own shape is unchanged |
 | ~~7~~ | ~~The closed token sets per constructor argument~~ — **settled**: `docs/ui-l0-constructors.toml` is the normative catalog, and tests assert the two agree in both directions — constructor names and shared token sets, and for source capabilities the arguments too |
-| **8** | **What, if anything, is durable.** Card state resets with the card; §5.8 previously claimed a card-state migration that does not exist. `units` and `city` look like preferences a user expects to survive a restart. Answering needs a storage contract, a migration story, and a decision about what a user is entitled to get back — none of which belongs under a state mechanism |
+| **8** | **What, if anything, is durable.** **Two thirds settled in §5.12, and shipped.** The storage contract — durable *references*, never facts, read as a source and written through a declared transition on it — and the migration story (§5.8's discipline over a versioned store) are implemented and verified across an app restart on device. What stays open is the third part, and it is not a technical question: **what a user is entitled to get back.** A watchlist obviously; a scroll position obviously not; `units` and `city` are the genuinely arguable middle, and nothing in this document can settle them. The reframe that made the rest tractable: state is a **cursor** into data rather than data, so a watchlist is a persisted set of the same thing `selected` holds one of — the fourth value §5.10's lifetime axis was missing |
+| **10** | **How a card says a collection is empty.** `activity` wants "Nothing close by" when a list has no members, and L0 has no length, no count and no emptiness predicate — a guard cannot tell an empty collection from a full one, so the card silently renders nothing where it should say something. Every list-shaped card wants this. The narrow fix is a predicate against a collection's emptiness, NOT a `.count` — a count is a number, and a number in a card is one operator away from arithmetic |
 | **9** | **Whether component-local state (§5.10 kind 2) moves to the component kit.** The corpus says it would cost little — six kind-1 declarations against one kind-2. §5.10.1 says it cannot move alone: identity, mount/unmount and invalidation must move with it, and that protocol is unwritten. Open until the protocol exists, not until the split looks tidy |
 
 Questions 1–7 are settled; 8 and 9 were opened by working through where state lives. What
@@ -923,17 +1286,24 @@ which assumed a kit answering L0's roles existed. None did: `components/flutter`
 `components/material` are ports of Flutter samples, and about four of L0's roles map loosely.
 The kit had to be written, and that was most of the work.
 
-What still keeps `makepad::lower` in place: **a card lowered through the kit has no
-interaction**, and five of the six data visualisations lower to a named marker rather than to a
-chart. Neither is a language question. Interaction is a matter of carrying an event through the
-`tapto` attribute the renderer already has — its non-`set:` strings fall through to the host, so
-an instance key survives without any change to the VM, and `docs/scoped-state.md` is not needed
-for it.
+**Both reasons that kept `makepad::lower` in place are now gone, and it has no production
+consumer.** They were: a card lowered through the kit has no interaction, and five of the six
+data visualisations lower to a named marker rather than to a chart. The first was resolved the
+way this paragraph predicted — an event travels through the `tapto` attribute the renderer
+already has, its non-`set:` strings falling through to the host, so an instance key survives
+with no change to the VM and `docs/scoped-state.md` was not needed for it. Taps, text commits
+and per-keystroke changes all reach a card through it now. The second is resolved too: all six
+visualisations have kit functions and all six are in the consumer's tag table.
+
+`makepad::lower` is still in the crate and is still exercised by the profile tests, but the
+device path calls only `kit::lower`. A verification done through `makepad::lower` therefore
+proves nothing about what a phone renders, which is a mistake this repository has made before.
 
 L1 and L2 **as capability levels** — the levels this document's §7 classifies, not the layers
-above — remain specified only as "what L0 excludes". Neither is implemented, and the classifier
-can name them but not check them. That is unchanged and unrelated to the kit work; the two
-senses of "L1" are easy to conflate and this paragraph previously did.
+above — are a separate matter from the kit work; the two senses of "L1" are easy to conflate and
+this paragraph previously did. L2 remains specified only as "what L0 excludes", is unimplemented,
+and is refused before parsing. L1 is no longer in that state: **§9 specifies the one construct
+the checker admits**, and the rest of L1 is still only what L0 excludes.
 
 An earlier version of this paragraph said `StockPlot` and `AqiContour` "lower without their data
 arrays". They have no data arrays: both name what to plot and fetch it themselves, and the
@@ -978,3 +1348,210 @@ this document lacks is a defect here rather than in the cards. Two of the settle
 from that rule rather than from argument — question 1 was answered by noticing both branching
 cards had already written the complementary-guard form without anyone specifying it, and
 question 7 by the cards exhausting the token sets in the course of being written.
+
+---
+
+## 9. Level 1 — the expression form
+
+**Status: the construct below is implemented; this section specifies it and nothing else.**
+
+This is **not a complete L1 profile.** L1 was specified as "what L0 excludes", and the checker
+then grew the ability to admit one construct — an arithmetic expression — while that sentence
+was still the whole of the definition. So the checker blessed a level no document described.
+This section closes exactly that gap and no more: everything else about L1 remains "what L0
+excludes", and a second construct will need its own specification before it is admitted.
+
+Written after the implementation, which is the wrong order and is why §9.8 is as long as it is.
+
+### 9.1 Admission
+
+A card is admitted at L1 by **declaring it**:
+
+```
+# level: L1
+```
+
+Without the header the same card is refused, and refused with a level diagnostic rather than a
+syntax error. §7's rule is unchanged — a record needing a wider grammar is rejected until the
+level is explicitly raised, and escalation is never silent.
+
+**L2 is still refused before parsing.** Imperative widget commands are a *different* grammar
+rather than a wider one, and nothing below the classifier parses them, so admitting a declared
+L2 card would produce a parse failure dressed as an acceptance.
+
+**Over-declaration is accepted, and this deviates from §7.** §7 derives a card's level as the
+maximum any record requires. For L1 the *declared* level wins instead: a card that says
+`# level: L1` and uses no expression is reported L1, not L0. Over-declaring is the conservative
+direction — it asks a host for more than the card needs, never less — but the consequence is
+that a reported level is not always a derived one, and a host comparing the two will not learn
+that a card outgrew its own header downwards.
+
+### 9.2 The grammar
+
+One production is extended. `operand` was a literal, a path or a comparison; it gains a binary
+arithmetic form:
+
+```
+operand   = term , { add-op , term } ;
+term      = atom , { mul-op , atom } ;
+atom      = literal | path | predicate ;
+add-op    = "+" | "-" ;
+mul-op    = "*" | "/" | "%" ;
+```
+
+Multiplicative operators bind tighter than additive ones and both associate left, so
+`temp * 9 / 5 + 32` means what it reads as. Nesting is bounded at parse by the same limit every
+other nested construct uses (`DEFAULT_MAX_SYNTAX_NESTING`, 128).
+
+**Grouping and a leading minus are both in the grammar.** `atom` also admits `"(" , operand , ")"`
+and a negated atom, so `(a + b) * c` overrides the fixed precedence and `n * -1` is the ordinary
+way to subtract a scaled reading. A negated *literal* is a negative literal rather than an
+expression, so it stays a coefficient — which also means a bare `value: -1` is refused by §4's
+original rule, as a measurement the model wrote in a position that renders one.
+
+A comparison is the **loosest** thing in an operand, so `x == a + b` compares against the sum.
+
+**The specified position is an argument value**, which is where the motivating cards need one:
+
+```
+TextHero(value: shares * quote.last)
+```
+
+That is the only position this section admits. What the implementation additionally parses is a
+defect and is recorded in §9.8.
+
+### 9.3 §4's no-facts rule, one level up
+
+L0 keeps §4 structurally: a literal in a value position is refused outright, which is decidable
+because a `view` is a typed tree. **L1 cannot use that check**, because at L1 a literal in a value
+position is often legitimate — a coefficient. `temp * 9 / 5 + 32` is a formula, and `9`, `5` and
+`32` are not claims about the world.
+
+So the rule changes shape rather than relaxing:
+
+> **An expression must read at least one declared source or state.**
+
+`shares * quote.last` reads two and is a computation. `1547 * 3.2` reads nothing: it states a
+fact wearing arithmetic, and is refused. Every path an expression reads — at any depth — is
+checked against declared names exactly as a bare binding is, so an expression cannot launder an
+undeclared name past the check that a plain path would fail.
+
+That rule alone bounds what an expression is made OF and not what it may PRODUCE, and the gap is
+real: `quote.last * 0 + 1547` reads a source, computes, and yields a fabricated number. So there
+is a second rule.
+
+> **An expression's answer must MOVE when its inputs move.**
+
+A formula is a formula because it depends on what it reads. So the expression is evaluated under
+several assignments of its reads, and an answer that never changes is a constant the model wrote
+with extra steps — refused. `temp * 9 / 5 + 32` moves; `last * 0 + 1547`, `last - last + 99` and
+`(last - last) * k + 5` do not.
+
+The assignments differ **per path** as well as per round, because binding every read to one number
+would make `a - b` constant and condemn a correct formula. Three rounds of coprime-ish values: an
+expression constant across all three and not constant in general is not something five arithmetic
+operators can express. Unresolvable in every round — a division by a probed zero — is *not*
+degenerate; that is a partial expression, and §9.4 already renders it as missing.
+
+The two rules together are still not L0's *structural* guarantee, which is that no position admits
+a fabricated number at all. They are a pair of decidable checks that between them refuse the
+constructions a fabrication has available. The remaining distance is that L1 must ASK these
+questions where L0 has no question to ask.
+
+### 9.4 Evaluation
+
+Both operands must resolve to numbers. When either does not, the expression is **missing** —
+rendered as the em dash a missing binding already renders as, and never as a zero. A zero would
+be a fabricated number, which is the failure the level is closest to.
+
+| Case | Result |
+|---|---|
+| An operand does not resolve, or is not a number | Missing |
+| Division or remainder by zero | Missing |
+| A result that is not finite | Missing |
+| A comparison as an operand | Missing |
+
+Evaluation is one pass over a tree already bounded at parse. It performs no name resolution — the
+operands were resolved before it runs — makes no call, and cannot reach a capability, a component
+or the host.
+
+### 9.5 Lowering
+
+A backend receives the **shape** of an expression, not the number realization computed:
+each operand is either a live capability call or a constant, and each join carries its operator.
+Every join is parenthesised on the way out, so the target VM's own precedence rules cannot
+change what the card meant.
+
+This is not an optimisation. A value computed at realization is the answer for whatever data the
+host happened to seed, and a live card is seeded with nothing — so lowering the computed number
+would put arithmetic over absent data on the screen, which is §5.11's defect one level up.
+
+### 9.6 What L1 does not change
+
+**Termination.** §6's five conditions are untouched and still sufficient. An expression is a
+finite tree bounded at parse, evaluated in one pass with no calls, no recursion into the card
+and no iteration, so it contributes constant work per node and cannot raise an event.
+
+**Reconciliation.** Every path an expression reads is registered as a dependency. Under-approximating
+here would show stale data, which §5.9 is explicit about.
+
+**Everything in §§1–5, 7 and 8** applies unchanged. L1 is L0 plus this production.
+
+### 9.7 What this costs the confinement argument
+
+L0's confinement claim is structural in the strongest available sense: there is no expression
+form, so there is nothing to evaluate, so realization never enters an evaluator at all.
+
+**That claim does not survive L1, and no wording should suggest it does.** L1 has an evaluator.
+What replaces the L0 claim is narrower and should be stated as what it is:
+
+> A closed arithmetic evaluator over already-resolved values — five total operators over
+> floating-point numbers, no name resolution at evaluation time, no operand that can name a
+> capability, no host surface reachable from it, over a tree bounded at parse.
+
+That is still a strong property, and it is a *different* property. "No execution machinery in the
+path" is an L0 property. Any argument that cites it for a card must first establish the card is
+L0, which is precisely what the level in the report is for.
+
+### 9.8 Known defects and limits
+
+Recorded rather than patched over, in the order they would bite.
+
+- ~~**A guard's right-hand side escapes both checks.**~~ **Fixed.** `when n == nosuch * 2` was
+  *accepted*: an expression in a guard was matched only as a bare path, so it was checked against
+  no declared name, was not subject to §9.3's must-read rule, and its operands were not registered
+  as dependencies — while realization evaluated it anyway. A guard's right operand is now walked
+  like any other operand, by the same function, so all three apply there. Two neighbouring
+  under-approximations went with it: a comparison's right operand in an argument
+  (`active: a == b` never re-realized when `b` moved) and, in the coarse dependency query, a state
+  reaching a view only through a source argument. **A guard is still not a position this section
+  admits an expression in** — the implementation parses one and now checks it correctly, which is
+  a narrower gap between the two than it was, and still a gap.
+- ~~**Comparison and arithmetic have no defined relative precedence.**~~ **Fixed.** A
+  comparison's right side took a TERM, so it bound tighter than `+`: `active: x == a + b` parsed
+  as `(x == a) + b` — arithmetic over a boolean — evaluated to missing, and nothing rejected it,
+  so the card was accepted, drew blank, and gave no diagnostic. A comparison is now the loosest
+  thing in an operand, which is what makes `x == a + b` mean what it reads as. Its right side is
+  also checked like any other operand, since it can now hold arithmetic: an undeclared name in it
+  is refused, and §9.3 reaches it, so `x == 3 * 4` compares against a fabricated number and is
+  refused too.
+- ~~**No grouping and no unary minus.**~~ **Fixed**, per §9.2. `(a + b) * c` and `n * -1` are both
+  admitted, and a bare `value: -1` is still refused by §4's original rule.
+- ~~**The no-facts rule bounds operands, not results.**~~ **Fixed**, per §9.3's second rule: an
+  expression's answer must move when its inputs move, so `last * 0 + 1547` is refused. This was
+  recorded as needing an argument rather than a patch, and the argument is that a formula depends
+  on what it reads.
+- ~~**A state's `initial:` was a third position, and it discarded the expression.**~~
+  **Fixed.** §9.2 admits an expression in one position; §9.8 already recorded a guard as
+  a second. `initial:` was a third, and the worst of the three: the parser scanned the
+  dotted path and stopped, so `initial: here.lat * 2` parsed as `here.lat` and the rest
+  was dropped without a diagnostic — accepted at L1, where arithmetic is otherwise
+  legal, and answering a number the card did not ask for. Refused now at both levels.
+  An `initial:` is a declaration of which value to capture (§5.13), and a captured
+  value is read rather than computed.
+- **Arithmetic is the only construct.** No comparison chain, no conditional, no string
+  operation, no aggregate over a collection. §8 question 10 — how a card says a collection is
+  empty — is *not* answered here, and a count is still one operator away from the arithmetic
+  this section admits, which is the reason it was left alone.
+- **`Form` is unchanged**, so a transition still cannot compute. `set(shares * 2)` is not
+  admitted, and §6's condition 3 continues to hold for the reason it did at L0.

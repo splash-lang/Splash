@@ -11,7 +11,7 @@
 source place       sys.geocode(name: state.city)
 source now         sys.weather(lat: place.lat, lon: place.lon,
                                fields: [temp, feels, hi, lo, cond, humidity, wind,
-                                        pressure, uv, visibility])
+                                        pressure, uv, precip])
 source week        sys.weather(lat: place.lat, lon: place.lon, days: state.days,
                                fields: [dayname, hi, lo, cond],
                                aggregate: [min_lo, max_hi])
@@ -22,16 +22,43 @@ source week        sys.weather(lat: place.lat, lon: place.lon, days: state.days,
 source sun         sys.daylight(lat: place.lat, lon: place.lon)
 source moon        sys.moonphase()
 source scene       sys.photo(query: place.name)
+# The user's SAVED cities — §5.12's durable collection, read as a source. The
+# store holds a NAME per row and nothing else; `temp` is fetched every time the
+# row is read, so a saved city can never show yesterday's temperature.
+source cities      sys.cities(fields: [name, temp])
+# Free-text place search for the add flow — nav's editor pattern. The query is
+# a path into declared state, so the card can only search for what the user
+# typed. `query` (the field) is "name, label": the text that finds this hit
+# again, which is what gets stored — a bare name sends the top "Springfield"
+# whichever one was tapped.
+source found       sys.search(query: state.query, count: 5, fields: [name, label, query])
 source env.locale  sys.locale()
 
 # ── state: shape only; the runtime holds the values ──────────────────────────
-state city  { shape: text, initial: "" }              # empty ⇒ device location
-state units { shape: enum[c, f], initial: env.locale.temp_unit }
-state days  { shape: number, initial: 7 }
+state city    { shape: text, initial: "" }            # empty ⇒ device location
+state units   { shape: enum[c, f], initial: env.locale.temp_unit }
+state days    { shape: number, initial: 7 }
+state query   { shape: text, initial: "" }            # what the add field holds
+# Whether the add row is a Field. An ENUM, not a bool, for §3's reason: two
+# named states get two guards that each say which one they are.
+state editing { shape: enum[none, add], initial: .none }
 
 # ── events: total transitions, applied atomically ────────────────────────────
 event toggle_units { units: cycle(.c, .f) }
-event pick_city    { city: set($value) }
+# The pager: a horizontal swipe (host gesture, offered as these events) walks
+# the SAVED list, wrapping. On the device-location view ("" is in no row) a
+# first swipe left lands on the first saved city, right on the last.
+event swipe_left   { city: next(cities.name) }
+event swipe_right  { city: prev(cities.name) }
+event add_city     { editing: set(.add), query: clear }
+event typing       { query: set($value) }
+# Looking is not keeping. Tapping a result (or committing the field) only
+# RE-POINTS the card — the editor stays up, nothing is stored — and the two
+# ways out are explicit: Add appends the result to the record AND shows it;
+# the × closes the editor with nothing added.
+event preview      { city: set($value) }
+event confirm_add  { city: set($value), cities: append($value), query: clear, editing: set(.none) }
+event close_add    { editing: set(.none), query: clear }
 
 # ── copy: declared literals, all host-owned vocabulary ───────────────────────
 copy feels      { class: vocabulary, en: "Feels like",   zh: "体感" }
@@ -39,25 +66,79 @@ copy humidity   { class: vocabulary, en: "Humidity",     zh: "湿度" }
 copy wind       { class: vocabulary, en: "Wind",         zh: "风速" }
 copy pressure   { class: vocabulary, en: "Pressure",     zh: "气压" }
 copy uv         { class: vocabulary, en: "UV Index",     zh: "紫外线" }
-copy visibility { class: vocabulary, en: "Visibility",   zh: "能见度" }
+copy precip     { class: vocabulary, en: "Rain",         zh: "降水概率" }
+copy loading    { class: vocabulary, en: "Getting the weather…", zh: "正在获取天气…" }
+copy offline    { class: vocabulary, en: "Can't reach the weather service", zh: "无法获取天气" }
+copy sky   { class: vocabulary, en: "Satellite", zh: "卫星云图" }
 copy air        { class: vocabulary, en: "Air Quality",  zh: "空气质量" }
 copy sunrise    { class: vocabulary, en: "Sunrise",      zh: "日出" }
 copy sunset     { class: vocabulary, en: "Sunset",       zh: "日落" }
+copy addcity    { class: vocabulary, en: "Add a city",   zh: "添加城市" }
+copy plus       { class: vocabulary, en: "+",            zh: "+" }
+copy add_lbl    { class: vocabulary, en: "Add",          zh: "添加" }
 
 # ── view ─────────────────────────────────────────────────────────────────────
+# §5.9: the fetch lifecycle is a state the card branches on. "Not yet" and
+# "went wrong" are different facts and each SAYS SO — the alternative was a
+# full page of "n/a°" with no failure message.
 view root  Photo(src: scene, pad: .page) {
+             when now.$state == .pending { TextBody(text: copy.loading) }
+             when now.$state == .failed  { TextBody(text: copy.offline) }
              current
+             saved
              forecast
+             cloudfield
              airfield
              sunmoon
              details
            }
 
+# The add editor — and ONLY the editor. The saved list itself never renders:
+# the record lives in the store and the swipe pager walks it; a visible strip
+# was removed by hand on device. The whole panel exists only while editing,
+# so no empty box is left behind when it is not. Field-not-row is nav's
+# editor pattern (a permanently-live Field cannot be focused; measured).
+view saved  Col {
+              when editing == .add {
+                Panel {
+                  Row(align: .center, gap: 10) {
+                    TextCaption(text: copy.plus, width: .label)
+                    Field(text: query, placeholder: city, on_commit: preview,
+                          on_change: typing, width: .fill)
+                    Chip(text: "×", on_tap: close_add)
+                  }
+                  when query != "" {
+                    # Row taps PREVIEW; only the Add chip beside a result
+                    # stores it (chip as sibling — a row's hit target covers
+                    # its children, measured).
+                    for f, i in found key f.label {
+                      Row(align: .center, gap: 10) {
+                        Row(align: .center, gap: 10, width: .fill, on_tap: preview, value: f.query) {
+                          Col(gap: 2) {
+                            TextRow(text: f.name)
+                            TextCaption(text: f.label)
+                          }
+                        }
+                        Chip(text: copy.add_lbl, on_tap: confirm_add, value: f.query)
+                      }
+                    }
+                  }
+                }
+              }
+            }
+
 view current  Col(align: .center) {
-                TextTitle(text: place.name)
+                # The add affordance lives in the top-right corner, not in a
+                # full-width row below the strip — asked for by hand on device.
+                Row(align: .center, gap: 8) {
+                  TextTitle(text: place.name, width: .fill)
+                  Chip(text: copy.plus, on_tap: add_city, value: "1")
+                }
                 WeatherIcon(cond: now.cond, size: .hero)
                 TextHero(value: now.temp, unit: units, on_tap: toggle_units)
-                Row(gap: 8) {
+                # `width: .fit` so the centred column can centre it. A row fills
+                # by default, and a filling child ignores its parent's alignment.
+                Row(gap: 8, width: .fit) {
                   TextCaption(glyph: "↑", value: now.hi, unit: units)
                   TextCaption(glyph: "↓", value: now.lo, unit: units)
                   TextCaption(glyph: "≈", value: now.feels, unit: units)
@@ -98,6 +179,14 @@ view forecast  Panel {
                  }
                }
 
+# The two map panes the shipping card has, in its order: the sky first, then the
+# air. Both name a LOCATION and fetch their own image — a card that carried
+# either would be carrying an observation (§4).
+view cloudfield Panel {
+                 TextCaption(text: copy.sky)
+                 Satellite(lat: place.lat, lon: place.lon)
+               }
+
 view airfield  Panel {
                  TextCaption(text: copy.air)
                  AqiContour(lat: place.lat, lon: place.lon, span: 1.6)
@@ -120,6 +209,11 @@ view details  Grid(cols: 2) {
                 Tile(label: copy.humidity,   value: now.humidity,   unit: .pct)
                 Tile(label: copy.wind,       value: now.wind,       unit: .speed)
                 Tile(label: copy.pressure,   value: now.pressure,   unit: .pressure)
-                Tile(label: copy.uv,         value: now.uv,         unit: .index)
-                Tile(label: copy.visibility, value: now.visibility, unit: .distance)
+                # No unit on UV: an index is dimensionless (`unit: .index` left
+                # the catalog), and the label already says which index this is.
+                Tile(label: copy.uv,         value: now.uv)
+                # `visibility` was here and renders an em dash: open-meteo serves
+                # it hourly only, so no call answers it. `precip` is answered by
+                # the same fetch and is the more useful sixth tile anyway.
+                Tile(label: copy.precip,     value: now.precip,     unit: .pct)
               }

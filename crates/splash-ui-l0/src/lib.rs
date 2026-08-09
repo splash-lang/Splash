@@ -224,14 +224,28 @@ pub fn check_ui_l0_named(_name: &str, source: &str) -> UiL0Report {
 
     // A construct outside the grammar tells us the level before parsing can
     // finish, and a level diagnostic is far more useful than "unexpected token".
+    // A card that DECLARES L1 is parsed, not refused.
+    //
+    // §7 says a record needing a wider grammar is rejected "until the level is
+    // explicitly raised" — so raising it explicitly is the whole point. Without
+    // this the classifier could name L1 and never admit one, which is what
+    // `roadmap.md` meant by "can name them but cannot check them". L2 stays
+    // refused here: imperative widget commands are a different grammar, not a
+    // wider one, and nothing below parses them.
+    let declared_l1 = header
+        .as_ref()
+        .and_then(|h| h.level.as_deref())
+        .is_some_and(|l| l.trim() == "L1");
     if let Some((level, diag)) = classify_beyond_l0(&tokens) {
-        sink.push(diag.line, diag.column, diag.message);
-        let mut report = sink.into_report(level);
-        report.header = header.clone();
-        // Compare here too: this is the path a card that UNDER-declares its
-        // level takes, and it was the one path that skipped the comparison.
-        check_header(&header, level, &mut report);
-        return report;
+        if !(declared_l1 && level == Level::L1) {
+            sink.push(diag.line, diag.column, diag.message);
+            let mut report = sink.into_report(level);
+            report.header = header.clone();
+            // Compare here too: this is the path a card that UNDER-declares its
+            // level takes, and it was the one path that skipped the comparison.
+            check_header(&header, level, &mut report);
+            return report;
+        }
     }
 
     let mut parser = Parser::new(&tokens, &mut sink);
@@ -241,7 +255,8 @@ pub fn check_ui_l0_named(_name: &str, source: &str) -> UiL0Report {
     }
 
     validate(&card, &mut sink);
-    let mut report = sink.into_report(Level::L0);
+    let derived = if declared_l1 { Level::L1 } else { Level::L0 };
+    let mut report = sink.into_report(derived);
     report.closure = component_closure(&card);
     report.header = header.clone();
     check_header(&header, report.level, &mut report);
@@ -406,7 +421,14 @@ impl Diagnostics {
         UiL0Report {
             header: None,
             closure: Vec::new(),
-            valid: self.items.is_empty() && level == Level::L0,
+            // Valid AT ITS LEVEL, not "is L0".
+            //
+            // This read `level == Level::L0`, which was right while L0 was the
+            // only level this checker admitted: an L1 card reached here with no
+            // diagnostics and was still reported invalid, with nothing to say
+            // why. L2 is refused before parsing, so anything arriving here is L0
+            // or a card that declared L1.
+            valid: self.items.is_empty() && level != Level::L2,
             level,
             diagnostics: self.items,
             diagnostics_truncated: self.truncated,
@@ -895,8 +917,27 @@ enum Form {
     Toggle,
     Cycle,
     Clear,
+    /// §5.12's two collection forms. Unlike the four above, these do NOT write a
+    /// cell: the target is a source backed by a durable store, and dispatch
+    /// hands the write to the host. Total for the same reason `cycle` is — the
+    /// card names the operation and the runtime performs it.
+    Append,
+    Remove,
+    /// §3's collection cousins of `cycle`: move a TEXT cell to the next/prev
+    /// value of a collection field (`city: next(cities.name)`), wrapping.
+    /// Total like cycle — the card names the walk, the runtime performs it —
+    /// which is what a swipe gesture needs a declared transition for.
+    Next(String),
+    Prev(String),
     /// Anything else — an expression, which L0 has no form for.
     NotTotal(String),
+}
+
+impl Form {
+    /// Whether this form writes a durable collection rather than a state cell.
+    fn is_collection(&self) -> bool {
+        matches!(self, Form::Append | Form::Remove)
+    }
 }
 
 /// What `set(…)` assigns. Each is a value the runtime already holds; none is
@@ -974,6 +1015,16 @@ enum Operand {
     /// right operand, so `active: range == .d1` realized as the VALUE of
     /// `range` rather than as a boolean — live in stock.card, and invisible
     /// because the device golden recorded the wrong rendering as correct.
+    /// **L1 only.** Arithmetic over already-declared values: `shares * quote.last`.
+    ///
+    /// The model supplies the FORMULA; the runtime computes it. That split is
+    /// what keeps §4's no-facts rule true one level up — a card may combine
+    /// facts it declared, and still cannot state one it never observed.
+    Expr {
+        lhs: Box<Operand>,
+        op: String,
+        rhs: Box<Operand>,
+    },
     Predicate {
         path: String,
         cmp: String,
@@ -1002,6 +1053,12 @@ impl<'a> Parser<'a> {
 
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.at)
+    }
+
+    /// One token further on, for a decision that needs to see two: a `-` is a
+    /// negative literal or a negation depending on what follows it.
+    fn peek_at(&self, ahead: usize) -> Option<&Token> {
+        self.tokens.get(self.at + ahead)
     }
 
     fn next(&mut self) -> Option<Token> {
@@ -1263,15 +1320,36 @@ impl<'a> Parser<'a> {
             let value = match self.peek().cloned() {
                 Some(t) if t.is_punct("[") => {
                     self.at += 1;
-                    let mut items = Vec::new();
+                    // One item per COMMA, so a dotted path stays whole.
+                    //
+                    // This took every Ident/Str/Num token as its own item, and a
+                    // path is three of them: `via: [stop.0.lat, stop.0.lon]` became
+                    // six items — `stop`, `0`, `lat`, `stop`, `0`, `lon` — so
+                    // nothing resolved and the waypoint was dropped. The route then
+                    // went straight from origin to destination while the card
+                    // displayed a stop the trip did not visit.
+                    //
+                    // `fields: [id, name]` is unaffected: single-token items are
+                    // still one item each.
+                    let mut items: Vec<String> = Vec::new();
+                    let mut current = String::new();
                     while let Some(i) = self.peek().cloned() {
                         if i.is_punct("]") {
                             break;
                         }
-                        if matches!(i.kind, Kind::Ident | Kind::Str | Kind::Num) {
-                            items.push(i.text.clone());
+                        if i.is_punct(",") {
+                            if !current.is_empty() {
+                                items.push(std::mem::take(&mut current));
+                            }
+                        } else if matches!(i.kind, Kind::Ident | Kind::Str | Kind::Num) {
+                            current.push_str(&i.text);
+                        } else if i.is_punct(".") {
+                            current.push('.');
                         }
                         self.at += 1;
+                    }
+                    if !current.is_empty() {
+                        items.push(current);
                     }
                     self.expect_punct("]");
                     SourceArg::List(items)
@@ -1424,6 +1502,40 @@ impl<'a> Parser<'a> {
                                         path.push('.');
                                         path.push_str(&self.tokens[at + 1].text);
                                         at += 2;
+                                    }
+                                    // AND NOTHING MORE. The scan above stops at the
+                                    // end of the path, so `initial: here.lat * 2`
+                                    // parsed as `here.lat` and the rest was
+                                    // discarded — accepted at L1, silently answering
+                                    // something the card did not ask for.
+                                    //
+                                    // §9.2 admits an expression in ONE position, an
+                                    // argument value. An `initial:` is a declaration
+                                    // (§5.13): it names which value to capture, and a
+                                    // captured value is READ rather than computed.
+                                    // Refusing is what keeps the two apart; dropping
+                                    // the operator quietly is the one outcome neither
+                                    // reading supports.
+                                    if self
+                                        .tokens
+                                        .get(at)
+                                        .is_some_and(|t| t.kind == Kind::Punct
+                                            && matches!(
+                                                t.text.as_str(),
+                                                "+" | "-" | "*" | "/" | "%"
+                                            ))
+                                    {
+                                        let t = self.tokens[at].clone();
+                                        self.sink.at(
+                                            &t,
+                                            format!(
+                                                "`initial:` takes a value or a source path, \
+                                                 not an expression — `{path} {}` was parsed as \
+                                                 `{path}` and the rest discarded (profile \
+                                                 §5.13, §9.2)",
+                                                t.text
+                                            ),
+                                        );
                                     }
                                     initial_path = Some(path);
                                     None
@@ -1650,6 +1762,62 @@ impl<'a> Parser<'a> {
                     self.expect_punct(")");
                 }
                 (Form::Cycle, members)
+            }
+            "next" | "prev" => {
+                let verb = t.text.clone();
+                self.at += 1;
+                let mut path = None;
+                if self.peek().is_some_and(|t| t.is_punct("(")) {
+                    self.at += 1;
+                    path = self.dotted_name();
+                    self.expect_punct(")");
+                }
+                match path {
+                    Some(p) if verb == "next" => (Form::Next(p), Vec::new()),
+                    Some(p) => (Form::Prev(p), Vec::new()),
+                    None => (
+                        Form::NotTotal(format!(
+                            "`{verb}` names a collection field, like {verb}(cities.name)"
+                        )),
+                        Vec::new(),
+                    ),
+                }
+            }
+            // §5.12: the two collection forms. Both take `$value` and nothing
+            // else — `remove($value)` matches an exact payload rather than
+            // evaluating a predicate, which is what keeps them the same shape as
+            // `cycle`: runtime logic the card NAMES and does not write.
+            "append" | "remove" => {
+                let verb = t.text.clone();
+                self.at += 1;
+                let mut ok = false;
+                if self.peek().is_some_and(|t| t.is_punct("(")) {
+                    self.at += 1;
+                    if self.peek().is_some_and(|t| t.is_punct("$")) {
+                        self.at += 1;
+                        match self.ident() {
+                            Some(name) if name == "value" => ok = true,
+                            Some(other) => self.sink.at(
+                                &t,
+                                format!("`${other}` is not a payload; the only one is `$value`"),
+                            ),
+                            None => {}
+                        }
+                    }
+                    self.expect_punct(")");
+                }
+                if ok {
+                    if verb == "append" {
+                        (Form::Append, Vec::new())
+                    } else {
+                        (Form::Remove, Vec::new())
+                    }
+                } else {
+                    (
+                        Form::NotTotal(format!("{verb} takes $value and nothing else")),
+                        Vec::new(),
+                    )
+                }
             }
             other => {
                 self.at += 1;
@@ -2024,6 +2192,13 @@ impl<'a> Parser<'a> {
             if self.peek().is_none() || self.peek().is_some_and(|t| t.is_punct(")")) {
                 break;
             }
+            // `Row(gap: 8, when … { … })` — a statement where an argument
+            // belongs. Catch it BEFORE `ident()` eats `when` as an argument
+            // name and refuses with a bare `expected ":"`, which taught the
+            // model nothing (the diagnostic text IS the repair prompt).
+            if self.args_stopped_by_statement() {
+                return out;
+            }
             let Some(name_tok) = self.peek().cloned() else {
                 break;
             };
@@ -2031,7 +2206,40 @@ impl<'a> Parser<'a> {
                 self.at += 1;
                 continue;
             };
-            if !self.expect_punct(":") {
+            if !self.eat_punct(":") {
+                // `TextRow(text, value)` — a comma (or the closing paren)
+                // where the argument's `:` belongs. The bare
+                // `expected ":", found ","` cascaded into `expected ")"` and
+                // `expected an element` and buried the fix; say what an
+                // argument IS instead, once.
+                match self.peek().cloned() {
+                    Some(t) => self.sink.at(
+                        &t,
+                        format!(
+                            "expected \":\" after argument name `{name}`, found {:?} — every \
+                             constructor argument is written `name: value` and arguments are \
+                             separated by commas, e.g. `Row(gap: 8, on_tap: back)`; a bare \
+                             value with no name, or a comma where the `:` belongs, is refused",
+                            t.text
+                        ),
+                    ),
+                    None => self.sink.push(
+                        0,
+                        0,
+                        format!(
+                            "expected \":\" after argument name `{name}`, found end of source"
+                        ),
+                    ),
+                }
+                // Recover to the closing paren so one mistake yields one
+                // diagnostic instead of the cascade. The card is already
+                // refused; the skipped tokens have nothing more to teach.
+                while let Some(t) = self.peek() {
+                    if t.is_punct(")") || t.is_punct("{") || t.is_punct("}") {
+                        break;
+                    }
+                    self.at += 1;
+                }
                 break;
             }
             let value = self.parse_operand();
@@ -2045,14 +2253,159 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
+        // `Col(gap: 8\n  when … { … })` — the no-comma variant of the same
+        // nesting mistake, reached when the argument loop stops without a
+        // trailing comma. Leave the keyword in place: the enclosing block
+        // parses the guard as the element it should have been.
+        if self.args_stopped_by_statement() {
+            return out;
+        }
         self.expect_punct(")");
         out
     }
 
+    /// A `when`/`for` STATEMENT keyword sitting where an argument belongs —
+    /// the most common malformation in live generation runs. Emits the
+    /// teaching diagnostic (guards wrap elements; they are not arguments) and
+    /// answers true so `parse_args` returns without the bare
+    /// `expected ")", found "when"` noise. The keyword is left unconsumed so
+    /// the enclosing block still parses the guard and checks its contents.
+    fn args_stopped_by_statement(&mut self) -> bool {
+        let Some(t) = self.peek().cloned() else {
+            return false;
+        };
+        let (kw, what, fix) = if t.is_kw("when") {
+            (
+                "when",
+                "guard",
+                "close the constructor's `(…)` first, then write `when path == value { … }` \
+                 around the elements it guards",
+            )
+        } else if t.is_kw("for") {
+            (
+                "for",
+                "loop",
+                "close the constructor's `(…)` first, then write \
+                 `for item in collection key item.id { … }` around the elements it repeats",
+            )
+        } else {
+            return false;
+        };
+        self.sink.at(
+            &t,
+            format!(
+                "a `{kw}` {what} cannot appear inside an argument list; {what}s wrap \
+                 elements — {fix}"
+            ),
+        );
+        true
+    }
+
+    /// An argument value, including an L1 arithmetic expression.
+    ///
+    /// Precedence is the usual one — `*` `/` `%` bind tighter than `+` `-` — so
+    /// `cost + shares * price` means what it reads as. Left-associative.
     fn parse_operand(&mut self) -> Operand {
+        let lhs = self.parse_term();
+        self.parse_additive(lhs)
+    }
+
+    fn parse_additive(&mut self, mut lhs: Operand) -> Operand {
+        while let Some(op) = self.peek().cloned() {
+            if !(op.is_punct("+") || op.is_punct("-")) {
+                break;
+            }
+            if self.depth > DEFAULT_MAX_SYNTAX_NESTING {
+                self.sink.at(&op, "nesting is too deep".into());
+                break;
+            }
+            self.at += 1;
+            self.depth += 1;
+            let rhs = self.parse_term();
+            self.depth -= 1;
+            lhs = Operand::Expr {
+                lhs: Box::new(lhs),
+                op: op.text,
+                rhs: Box::new(rhs),
+            };
+        }
+        lhs
+    }
+
+    fn parse_term(&mut self) -> Operand {
+        let mut lhs = self.parse_atom();
+        while let Some(op) = self.peek().cloned() {
+            if !(op.is_punct("*") || op.is_punct("/") || op.is_punct("%")) {
+                break;
+            }
+            if self.depth > DEFAULT_MAX_SYNTAX_NESTING {
+                self.sink.at(&op, "nesting is too deep".into());
+                break;
+            }
+            self.at += 1;
+            self.depth += 1;
+            let rhs = self.parse_atom();
+            self.depth -= 1;
+            lhs = Operand::Expr {
+                lhs: Box::new(lhs),
+                op: op.text,
+                rhs: Box::new(rhs),
+            };
+        }
+        lhs
+    }
+
+    fn parse_atom(&mut self) -> Operand {
         let Some(t) = self.peek().cloned() else {
             return Operand::Str(String::new());
         };
+        // GROUPING. Precedence was fixed and unoverridable, so `(a + b) * c` —
+        // the first thing an author reaches for after a formula that does not fit
+        // it — could not be written at all. A `(` here is unambiguous: an
+        // argument value never otherwise starts with one, because every
+        // call-shaped form in the grammar (`set`, `cycle`, `append`) is reached
+        // by its verb.
+        if t.is_punct("(") {
+            if self.depth > DEFAULT_MAX_SYNTAX_NESTING {
+                self.sink.at(&t, "nesting is too deep".into());
+                return Operand::Str(String::new());
+            }
+            self.at += 1;
+            self.depth += 1;
+            let inner = self.parse_operand();
+            self.depth -= 1;
+            self.expect_punct(")");
+            return inner;
+        }
+        // UNARY MINUS. `x * -1` was refused, so a negative coefficient — the
+        // ordinary way to subtract a scaled reading — had no spelling.
+        //
+        // A negated LITERAL becomes a negative literal rather than an expression,
+        // so it stays a coefficient: wrapping it as `0 - 1` would make
+        // `value: -1` an expression that reads nothing, which §9.3 refuses, and
+        // that is the right answer for a bare `-1` but reached by the wrong
+        // route. A negated PATH is arithmetic and lowers as such.
+        if t.is_punct("-") {
+            if self.depth > DEFAULT_MAX_SYNTAX_NESTING {
+                self.sink.at(&t, "nesting is too deep".into());
+                return Operand::Str(String::new());
+            }
+            if let Some(next) = self.peek_at(1).cloned() {
+                if next.kind == Kind::Num {
+                    self.at += 2;
+                    return Operand::Num(-next.text.parse::<f64>().unwrap_or(0.0));
+                }
+            }
+            self.at += 1;
+            self.depth += 1;
+            let inner = self.parse_atom();
+            self.depth -= 1;
+            return Operand::Expr {
+                lhs: Box::new(Operand::Num(0.0)),
+                op: "-".to_string(),
+                rhs: Box::new(inner),
+            };
+        }
         match t.kind {
             Kind::Token => {
                 self.at += 1;
@@ -2077,6 +2430,17 @@ impl<'a> Parser<'a> {
                         }
                         self.at += 1;
                         self.depth += 1;
+                        // The WHOLE right side, arithmetic included. This took a
+                        // term, so a comparison bound TIGHTER than `+`: at L1
+                        // `active: x == a + b` parsed as `(x == a) + b`, which is
+                        // arithmetic on a boolean — it evaluated to missing, and
+                        // nothing rejected it, so the card rendered blank with no
+                        // diagnostic. A comparison is the loosest thing in an
+                        // operand, which is what makes `x == a + b` mean what it
+                        // reads as.
+                        //
+                        // The recursion is bounded by the depth guard above, the
+                        // same one every other nested construct uses.
                         let rhs = self.parse_operand();
                         self.depth -= 1;
                         return Operand::Predicate {
@@ -2114,6 +2478,24 @@ fn literal_of(operand: &Operand) -> serde_json::Value {
         Operand::Path(p) | Operand::Predicate { path: p, .. } => {
             serde_json::Value::String(p.clone())
         }
+        // An expression has no literal form; it is computed at realization.
+        Operand::Expr { .. } => serde_json::Value::Null,
+    }
+}
+
+/// Every path an operand reads, however deeply nested in an expression.
+fn expr_paths(operand: &Operand, out: &mut Vec<String>) {
+    match operand {
+        Operand::Path(p) => out.push(p.clone()),
+        Operand::Predicate { path, rhs, .. } => {
+            out.push(path.clone());
+            expr_paths(rhs, out);
+        }
+        Operand::Expr { lhs, rhs, .. } => {
+            expr_paths(lhs, out);
+            expr_paths(rhs, out);
+        }
+        _ => {}
     }
 }
 
@@ -2138,7 +2520,108 @@ fn scope_value(scope: &ValueScope, operand: &Operand) -> Option<serde_json::Valu
         Operand::Num(n) => Some(serde_json::Value::from(*n)),
         // A nested comparison is not in the grammar.
         Operand::Predicate { .. } => None,
+        Operand::Expr { lhs, op, rhs } => eval_expr(scope, lhs, op, rhs),
     }
+}
+
+/// Evaluate an L1 arithmetic expression over resolved values.
+///
+/// Returns `None` when either side is unresolved — a missing operand must render
+/// as the em dash a missing binding already does, never as a zero, which would be
+/// a fabricated number wearing arithmetic.
+fn eval_expr(
+    scope: &ValueScope,
+    lhs: &Operand,
+    op: &str,
+    rhs: &Operand,
+) -> Option<serde_json::Value> {
+    let a = scope_value(scope, lhs)?.as_f64()?;
+    let b = scope_value(scope, rhs)?.as_f64()?;
+    apply_op(a, op, b).map(serde_json::Value::from)
+}
+
+/// The five operators, in one place.
+///
+/// Shared by realization and by §9.3's degeneracy probe, so the arithmetic a
+/// card is CHECKED against cannot drift from the arithmetic it is EVALUATED
+/// with — which is the mistake this profile keeps finding in other shapes.
+fn apply_op(a: f64, op: &str, b: f64) -> Option<f64> {
+    let v = match op {
+        "+" => a + b,
+        "-" => a - b,
+        "*" => a * b,
+        // A zero divisor yields missing, not zero: a fabricated number is the
+        // failure §4 exists to prevent, and it does not become acceptable
+        // because arithmetic produced it.
+        "/" | "%" if b == 0.0 => return None,
+        "/" => a / b,
+        "%" => a % b,
+        _ => return None,
+    };
+    v.is_finite().then_some(v)
+}
+
+/// Evaluate an expression with every path resolved by `resolve`.
+///
+/// The shape §9.3's probe needs: the same tree, the same operators, arbitrary
+/// values for the reads.
+fn fold_expr(operand: &Operand, resolve: &dyn Fn(&str) -> Option<f64>) -> Option<f64> {
+    match operand {
+        Operand::Num(n) => Some(*n),
+        Operand::Path(p) => resolve(p),
+        Operand::Expr { lhs, op, rhs } => {
+            apply_op(fold_expr(lhs, resolve)?, op, fold_expr(rhs, resolve)?)
+        }
+        // A comparison is a boolean, not a number, and arithmetic over one is
+        // not in the grammar.
+        _ => None,
+    }
+}
+
+/// Whether an expression's value is INDEPENDENT of everything it reads.
+///
+/// §9.3 requires an expression to read something, which stops `1547 * 3.2` and
+/// does not stop `quote.last * 0 + 1547` — one real reading laundering a
+/// fabricated number past the rule. That gap was recorded as needing an argument
+/// nobody had; this is the argument.
+///
+/// A formula is a formula because its answer MOVES when its inputs move. So the
+/// expression is evaluated with its reads bound to several distinct assignments,
+/// and an answer that never changes is a constant the model wrote with extra
+/// steps. `temp * 9 / 5 + 32` moves; `last * 0 + 1547` does not.
+///
+/// Distinct values PER PATH, varied across rounds, because binding every read to
+/// the same number would make `a - b` constant and condemn a correct formula.
+/// Three rounds of coprime-ish values: an expression that is constant across all
+/// three and not constant in general is not something the five arithmetic
+/// operators can express.
+///
+/// Unresolvable in every round (a division by a probed zero, say) is NOT
+/// degenerate — that is a partial expression, and §9.4 already renders it as
+/// missing.
+fn expr_is_constant(expr: &Operand) -> bool {
+    let mut paths = Vec::new();
+    expr_paths(expr, &mut paths);
+    paths.sort();
+    paths.dedup();
+    if paths.is_empty() {
+        // The must-read rule owns this case and reports it better.
+        return false;
+    }
+    let mut seen: Vec<f64> = Vec::new();
+    for (base, step) in [(2.0, 1.0), (5.0, 3.0), (11.0, 7.0)] {
+        let resolve = |p: &str| -> Option<f64> {
+            paths
+                .iter()
+                .position(|q| q == p)
+                .map(|i| base + step * i as f64)
+        };
+        match fold_expr(expr, &resolve) {
+            Some(v) => seen.push(v),
+            None => return false,
+        }
+    }
+    seen.windows(2).all(|w| w[0] == w[1])
 }
 
 /// Compare two resolved values. Shared by guards (`when a == b`) and by
@@ -2150,6 +2633,28 @@ fn compare(left: Option<serde_json::Value>, cmp: &str, right: Option<serde_json:
         // branch; an unresolvable comparison is now simply false.
         return false;
     };
+    // Two NUMBERS compare numerically, whatever JSON shape they arrived in.
+    //
+    // `==` was `serde_json::Value` equality, which distinguishes `1` from `1.0`.
+    // So `when here.ok == 1` took its branch when the host injected a float and
+    // silently did not when it injected an integer — the same guard, the same
+    // card, the same value, deciding differently on a representation the card
+    // cannot see. It cost the nav map: the card was correct, the checker accepted
+    // it, and the map simply was not in the realized tree.
+    //
+    // The ordering operators already coerced through `as_f64`; only equality did
+    // not, which is the half nobody tested.
+    if let (Some(a), Some(b)) = (left.as_f64(), right.as_f64()) {
+        return match cmp {
+            "==" => a == b,
+            "!=" => a != b,
+            "<" => a < b,
+            "<=" => a <= b,
+            ">" => a > b,
+            ">=" => a >= b,
+            _ => false,
+        };
+    }
     match cmp {
         "==" => left == right,
         "!=" => left != right,
@@ -2259,8 +2764,11 @@ pub mod catalog {
         Bool,
     }
 
+    // `index` is not here: an index is dimensionless, so there is no honest
+    // suffix — the tile's LABEL says which index it is. A token the catalog
+    // admits and no lowering decorates is this layer's recurring defect.
     pub const UNIT: &[&str] = &[
-        "c", "f", "pct", "speed", "pressure", "index", "distance", "money",
+        "c", "f", "pct", "speed", "pressure", "distance", "money", "duration",
     ];
     pub const FORMAT: &[&str] = &[
         "money",
@@ -2271,7 +2779,35 @@ pub mod catalog {
         "time",
         "date",
     ];
-    pub const WIDTH: &[&str] = &["fill", "fit", "day", "rank", "temp"];
+    pub const WIDTH: &[&str] = &["fill", "fit", "day", "rank", "temp", "label"];
+
+    /// How a map presents a trip. These are the shipping widget's own modes:
+    /// `plan` shows the whole route, `drive` follows the vehicle, and `flat` is
+    /// the same route without the 2.5D camera.
+    pub const MAP_MODE: &[&str] = &["plan", "drive", "flat"];
+    /// Flat or tilted, while driving — the shipping app's R8.1 chase view.
+    pub const MAP_VIEW: &[&str] = &["flat", "tilted"];
+    /// Where a panel sits when the card is a map.
+    /// Where a panel sits on a map card. `top` is the banner, `bottom` the sheet,
+    /// and `right` the control column beside the map — where a driving screen's own
+    /// switches belong, because a control in the banner competes with the one thing
+    /// a driver reads.
+    pub const DOCK: &[&str] = &["top", "bottom", "right"];
+    /// The controls a map offers. A card NAMES the affordance; the theme draws it
+    /// and the backend wires it.
+    ///
+    /// This is the argument that let R3.6 and R3.9 exist at L0 at all. The card
+    /// being replaced draws its own pill and writes
+    /// `on_click: || ui.themap.nav_zoom_by("0.7")` — a method call on a named
+    /// widget, which is the imperative wiring this profile exists to exclude. The
+    /// split §1.1 asks for is that the CARD may not say it and the BACKEND must:
+    /// "this map can be zoomed" is a capability, and the button, the glyph and the
+    /// method call are all presentation.
+    pub const CONTROLS: &[&str] = &["none", "zoom", "all"];
+    /// What an action means. The theme decides what that looks like.
+    /// `primary` is the action a screen is FOR — the one thing you came to do. The
+    /// theme draws it larger; the card only says which action it is.
+    pub const TONE: &[&str] = &["normal", "primary", "danger"];
     pub const ALIGN: &[&str] = &["start", "center", "end", "baseline"];
     pub const PAD: &[&str] = &["page", "tight", "none"];
     pub const ICON_SIZE: &[&str] = &["hero", "row", "tile"];
@@ -2284,12 +2820,111 @@ pub mod catalog {
     pub const CONSTRUCTORS: &[(&str, Args)] = &[
         ("Surface", &[("pad", Token(PAD))]),
         ("Photo", &[("src", Path), ("pad", Token(PAD))]),
-        ("Panel", &[]),
+        // A map. The card names the TRIP; the widget fetches its own route.
+        //
+        // The same correction `AqiContour` and `StockPlot` already took. The
+        // shipping nav card calls `sys.navroute` itself, hand-builds a marker
+        // string and pushes both in through imperative setters — which is the
+        // card doing the widget's job, and is most of why that card classifies
+        // at L2. A route is not a card's to compute.
+        (
+            "Map",
+            &[
+                ("mode", Token(MAP_MODE)),
+                ("from", Path),
+                ("to", Path),
+                ("via", Path),
+                // A SECOND fixed slot, not a list. The role parser routes arguments
+                // through the expression grammar, so admitting `[a, b]` there means a
+                // list literal in every operand position — a change to the whole
+                // grammar for one argument. The app being replaced has exactly two
+                // waypoint slots, `wp1` and `wp2`, and hides "add stop" when both are
+                // full; two named arguments say the same thing and stay total.
+                ("via2", Path),
+                // The live position the camera follows. See `map_mode`: this is
+                // what lets `.drive` mean the chase camera rather than the static
+                // preview, because a followed position is a measured one.
+                ("at", Path),
+                // Flat or tilted while driving — the shipping app's R8.1 chase
+                // view. Only meaningful with `at:`: a preview has no camera to
+                // tilt, and a tilted camera with no position to follow is the
+                // fabrication `map_mode` refuses.
+                // A TOKEN OR A PATH, like `unit` and `width`. `view: .tilted` is
+                // fixed; `view: view` follows card state, which is what makes an
+                // on-map 2D/3D toggle a state and a guard instead of two whole
+                // `Map` declarations per branch it multiplies with. Realization
+                // resolves the path to a token before the lowering reads it, so
+                // nothing downstream changes.
+                ("view", TokenOrPath(MAP_VIEW)),
+                ("zoom", Number),
+                ("controls", Token(CONTROLS)),
+                // The start as TWO NUMBERS, when there is no place to name.
+                //
+                // `from:` names a source that answers a coordinate, which is right
+                // whenever a place was searched for. A trip that begins where the
+                // DEVICE is has no such place: the position is two captured numbers
+                // in card state. Without these the map fell back to geocoding the
+                // empty origin — `sys.navroute(sys.searchnum("", …))` — so the
+                // summary said "from here" and the line drew a route from nowhere,
+                // which is the drawn-versus-reported mismatch this profile exists to
+                // catch. Same shape and same reason as `sys.route`'s four numbers.
+                // The trip whose COST labels the drawn route. A source, not two
+                // strings: the map already draws this trip, and naming the same
+                // source that answers its duration is what keeps the bubble and the
+                // line describing one journey.
+                ("summary", Path),
+                ("from_lat", ArgKind::Data),
+                ("from_lon", ArgKind::Data),
+            ],
+        ),
+        // A text field. The ONE role that lets a card receive something the user
+        // typed.
+        //
+        // `text` is where the value lives — declared card state, never a free
+        // binding — and `on_commit` carries it as `$value` to a declared
+        // transition. So typed text enters through the same total, declared path
+        // as a tap, and §4's `user-copy` class already names what it is.
+        (
+            "Field",
+            &[
+                ("text", Path),
+                ("placeholder", ArgKind::Data),
+                ("on_commit", Event),
+                // Per KEYSTROKE, where `on_commit` is per return. A search box wants
+                // both: results while you type, a destination when you commit. The
+                // cost is a card re-resolve per character — measured at 18-19 ms on
+                // the planning screen of a OnePlus 6, which is what makes this
+                // expressible rather than merely declarable.
+                ("on_change", Event),
+                ("width", TokenOrPath(WIDTH)),
+            ],
+        ),
+        ("Panel", &[("dock", Token(DOCK))]),
+        // Content a swipe reveals. See the catalog.
+        ("Reveal", &[]),
         ("Card", &[("on_tap", Event), ("value", Any)]),
-        ("Col", &[("align", Token(ALIGN)), ("gap", Number)]),
+        // A column may say how WIDE, because a row of columns has to divide the
+        // line somehow and only the card knows which column is the one that
+        // should absorb what is left. A mover row is ticker-and-name beside a
+        // price: without this every column fits its own text, and a long company
+        // name wrapped to three lines beside acres of empty space
+        // ("Dolby Laboratori / es"). This is layout, not styling — it says which
+        // element yields, not how anything looks.
+        (
+            "Col",
+            &[
+                ("align", Token(ALIGN)),
+                ("gap", Number),
+                ("width", TokenOrPath(WIDTH)),
+            ],
+        ),
+        // `width` says whether this row FILLS. It fills by default because a list
+        // row must, and that defeats a centred parent — the one thing a card
+        // could not say.
         (
             "Row",
             &[
+                ("width", TokenOrPath(WIDTH)),
                 ("align", Token(ALIGN)),
                 ("gap", Number),
                 ("on_tap", Event),
@@ -2354,6 +2989,11 @@ pub mod catalog {
                 ("on_tap", Event),
                 ("value", Any),
                 ("active", Bool),
+                // What the action MEANS. The theme decides `.danger` is red.
+                ("tone", Token(TONE)),
+                // `.fit` on a danger chip names the row-scoped compact variant;
+                // the spanning one is the screen action (nav's Stop).
+                ("width", Token(WIDTH)),
             ],
         ),
         ("WeatherIcon", &[("cond", Path), ("size", Token(ICON_SIZE))]),
@@ -2367,6 +3007,11 @@ pub mod catalog {
             "AqiContour",
             &[("lat", Path), ("lon", Path), ("span", Number)],
         ),
+        // Live satellite cloud imagery (卫星云图) over a place — the one pane the
+        // shipping weather card has and L0 could not express at all. Names WHERE,
+        // like every other visualisation here, and the helper answers the image,
+        // so a card shows the sky without ever stating what is in it.
+        ("Satellite", &[("lat", Path), ("lon", Path)]),
         (
             "StockPlot",
             &[("symbol", Path), ("range", TokenOrPath(UNIT))],
@@ -2400,18 +3045,254 @@ pub mod catalog {
         ("sys.moonphase", &["lat", "lon"]),
         ("sys.photo", &["query"]),
         ("sys.locale", &[]),
+        ("sys.gps", &[]),
+        ("sys.search", &["query", "count", "fields"]),
+        // COORDINATES, not places. A route needs four numbers and an argument
+        // carries one value, so `from`/`to` as place names could never be
+        // resolved into a call — which is why this capability had no translation
+        // and the nav card's duration and distance row was `— —` beneath a route
+        // that drew correctly. Each coordinate is a read off the source that
+        // found the place, which the existing argument resolution already turns
+        // into a live call.
+        (
+            "sys.route",
+            &[
+                "from_lat", "from_lon", "to_lat", "to_lon", "via", "mode", "fields",
+            ],
+        ),
+        // Where you are ON a route. Takes the trip's four coordinates and the
+        // device's own two, and answers relative to them — the half of navigation
+        // a route cannot give, because a route never changes as you drive it.
+        (
+            "sys.step",
+            &[
+                "from_lat", "from_lon", "to_lat", "to_lon", "at_lat", "at_lon", "fields",
+            ],
+        ),
+        ("sys.places", &["lat", "lon", "category", "count", "fields"]),
         ("sys.news", &["count", "offset", "fields"]),
         ("sys.news_item", &["id", "fields"]),
-        ("sys.movers", &["count", "fields"]),
+        // `symbols` names the UNIVERSE to rank. Without it the only universe is
+        // the market-wide day-gainers screener, so "top 10 AI movers" could only
+        // ever render generic gainers under an AI title -- which is what it did.
+        ("sys.movers", &["count", "fields", "symbols"]),
         ("sys.quote", &["ticker", "fields"]),
         (
             "sys.series",
             &["ticker", "range", "points", "fields", "aggregate"],
         ),
+        // §5.12's durable capabilities. `sys.watchlist` takes no selector — it
+        // IS the user's list — and the host joins the stored tickers to live
+        // quotes, so a card asks for the fields it wants to show and never
+        // learns that a store exists.
+        ("sys.watchlist", &["ticker", "fields"]),
+        ("sys.prefs", &["fields"]),
+        ("sys.reading", &["fields"]),
+        ("sys.topics", &["fields"]),
+        ("sys.link", &["fields"]),
+        // Free-text ticker lookup, so a card can offer something the top-movers
+        // list does not happen to contain. `sys.search` is the PLACE search and
+        // answers a different question; naming them apart is what stops a card
+        // asking a geocoder for a company.
+        ("sys.symbol_search", &["query", "count", "fields"]),
+        // The user's saved places. Same shape as `sys.watchlist`: no selector,
+        // because it IS the list, and the host joins each stored place to a
+        // live reading.
+        ("sys.cities", &["fields"]),
     ];
 
     pub fn source(name: &str) -> Option<&'static [&'static str]> {
         SOURCES.iter().find(|(n, _)| *n == name).map(|(_, a)| *a)
+    }
+
+    /// What each capability can ANSWER: the field names a card may request from
+    /// it, and — for the ones that take no `fields:` — read off it.
+    ///
+    /// Until this existed the word "field" meant something different in four
+    /// places and none was checked against another: the card's `fields:` list,
+    /// the shapes `Record`/`Collection` which carried no fields at all, the
+    /// adapter's hand-written key translation, and whatever the upstream JSON
+    /// happens to contain. A card could request a field that does not exist and
+    /// get an em dash, which reads on screen as data that has not arrived yet.
+    ///
+    /// These are L0's OWN names, not any backend's. `sys.weather` reaches
+    /// open-meteo by raw JSON path and `sys.quote` reaches Yahoo through keys
+    /// like `regularMarketPrice`; translating is the adapter's job, and putting
+    /// backend spellings here would make the profile depend on one host.
+    ///
+    /// WHAT THIS DOES NOT CATCH. A field can be declared here, accepted by the
+    /// checker, and still unanswerable by a given backend — `sys.quote` has an
+    /// arm for `open` that resolves a key absent from the response it fetches,
+    /// which rendered `$—` over a real price. Closing that needs a conformance
+    /// test per backend asserting it answers everything declared here. This
+    /// table is what such a test would check against; it is not the test.
+    pub const ANSWERS: &[(&str, &[&str])] = &[
+        (
+            "sys.geocode",
+            &[
+                "lat",
+                "lon",
+                "name",
+                "country",
+                "admin1",
+                "timezone",
+                "population",
+            ],
+        ),
+        (
+            "sys.weather",
+            &[
+                "temp",
+                "feels",
+                "hi",
+                "lo",
+                "cond",
+                "humidity",
+                "wind",
+                "pressure",
+                "uv",
+                "visibility",
+                "precip",
+                "dayname",
+                "days",
+            ],
+        ),
+        ("sys.daylight", &["rise", "set", "now"]),
+        ("sys.airquality", &["aqi", "pm25", "pm10", "ozone"]),
+        ("sys.moonphase", &["phase", "illumination", "name"]),
+        // A photo is a URL, not a record. No field is readable off it.
+        ("sys.photo", &[]),
+        ("sys.locale", &["lang", "temp_unit"]),
+        ("sys.gps", &["lat", "lon", "accuracy", "ok"]),
+        // `label` is the secondary line — city, region, country. Without it a search
+        // for "Stanford" renders five rows all reading "Stanford", which is what
+        // Photon actually returns and is useless to choose between. The backend has
+        // answered this field all along; the catalog simply never admitted it.
+        ("sys.search", &["id", "name", "label", "query", "lat", "lon", "distance"]),
+        ("sys.route", &["duration", "distance", "steps"]),
+        ("sys.step", &["instruction", "remaining", "progress", "eta"]),
+        (
+            "sys.places",
+            &["id", "name", "distance", "lat", "lon", "category"],
+        ),
+        (
+            "sys.news",
+            &["id", "title", "author", "points", "comments", "url"],
+        ),
+        (
+            "sys.news_item",
+            &["id", "title", "author", "points", "comments", "url"],
+        ),
+        (
+            "sys.movers",
+            &[
+                "ticker", "name", "last", "change", "pct", "open", "high", "low", "prev", "volume",
+                "mktcap", "pe", "currency", "exchange",
+            ],
+        ),
+        (
+            "sys.quote",
+            &[
+                "ticker", "name", "last", "change", "pct", "open", "high", "low", "prev", "volume",
+                "mktcap", "pe", "currency", "exchange",
+            ],
+        ),
+        // NOT `points`: a series is not a value, `StockPlot` fetches its own, and
+        // nothing could lower a read of it to a call. See the TOML.
+        ("sys.series", &["min", "max"]),
+        // The host joins the stored tickers to live quotes, so a watchlist row
+        // answers everything a quote does. The STORE holds only the ticker.
+        (
+            "sys.watchlist",
+            &[
+                "ticker", "name", "last", "change", "pct", "open", "high", "low", "prev", "volume",
+                "mktcap", "pe", "currency", "exchange",
+                // The membership probe, for a source that names a ticker:
+                // "1" when that ticker is in the user's list, else "0".
+                "has",
+            ],
+        ),
+        ("sys.prefs", &["units", "range", "home", "work", "mode"]),
+        // The reading list: SAVED story ids, joined to the story each id names.
+        // The id is the identity Algolia serves forever, so a bookmarked story
+        // outlives the front page it was found on.
+        ("sys.reading", &["id", "title", "author", "points", "comments", "url"]),
+        // Followed TOPICS: the store holds a topic word ("ai", "nba"); the
+        // top story beside it is searched fresh on every read, so a followed
+        // topic never pins the story that was hot when it was followed.
+        ("sys.topics", &["name", "top_title", "top_points", "top_id"]),
+        // The in-app reader. `url` is the page currently open in the host's
+        // native web overlay — "" when it is closed. A card WRITES a story's
+        // url to open the reader over itself; the host owns the overlay and
+        // closes it on system back, so the card never has to know how pages
+        // are shown, only which page it asked for.
+        ("sys.link", &["url"]),
+        // Verified against the live endpoint, not its documentation: `longname`
+        // comes back null for plenty of listings, so `name` falls back to
+        // `shortname` in the helper. `kind` distinguishes an equity from a
+        // crypto or an ETF, because a search for "nvid" returns all three and a
+        // card that cannot say which is offering the user a coin.
+        ("sys.symbol_search", &["ticker", "name", "exchange", "kind"]),
+        // `name`, `lat` and `lon` come from the store — they IDENTIFY the place.
+        // Everything else is a reading fetched at those coordinates each time it
+        // is read, so a saved city can never show yesterday's temperature.
+        (
+            "sys.cities",
+            &[
+                "name", "lat", "lon", "temp", "feels", "hi", "lo", "cond", "humidity", "wind",
+            ],
+        ),
+    ];
+
+    /// Extra scalars `aggregate:` may ask a capability to compute over the rows
+    /// it returns. Separate from `ANSWERS` because they sit at a different level
+    /// — `week.min_lo` is a property of the WEEK, not of a day.
+    pub const AGGREGATES: &[(&str, &[&str])] = &[
+        ("sys.weather", &["min_lo", "max_hi"]),
+        ("sys.series", &["min", "max"]),
+    ];
+
+    /// Capabilities backed by a durable store, and the transitions each accepts
+    /// (§5.12).
+    ///
+    /// A capability absent from this table is READ-ONLY: a card may bind it and
+    /// may not write it. That is the safe default — a fetch is not a thing a tap
+    /// should be able to mutate, and listing the writable ones explicitly means
+    /// granting the power is a deliberate edit rather than an omission.
+    ///
+    /// What is stored is REFERENCES, never facts. `sys.watchlist` holds tickers;
+    /// the values beside them on screen are fetched every time. §4's no-facts
+    /// rule does not stop applying because the data went to disk.
+    pub const MUTABLE: &[(&str, &[&str])] = &[
+        ("sys.watchlist", &["append", "remove"]),
+        ("sys.cities", &["append", "remove"]),
+        // A preference write has to name WHICH preference, and a transition's
+        // target is a bare source name — the note that sat here said naming it
+        // needed a dotted target, grammar L0 does not have. It does not: THE
+        // DECLARATION ALREADY NAMES IT. A card that writes a preference declares
+        // `source home_pref sys.prefs(fields: [home])`, and a source with exactly
+        // one declared field leaves `home_pref: set($value)` nothing to be
+        // ambiguous about. The checker enforces the exactly-one rule on any
+        // written prefs source; a read-only one may still ask for several.
+        ("sys.prefs", &["set", "clear"]),
+        ("sys.reading", &["append", "remove"]),
+        ("sys.topics", &["append", "remove"]),
+        ("sys.link", &["set", "clear"]),
+    ];
+
+    pub fn mutable(name: &str) -> Option<&'static [&'static str]> {
+        MUTABLE.iter().find(|(n, _)| *n == name).map(|(_, a)| *a)
+    }
+
+    pub fn answers(name: &str) -> Option<&'static [&'static str]> {
+        ANSWERS.iter().find(|(n, _)| *n == name).map(|(_, a)| *a)
+    }
+
+    pub fn aggregates(name: &str) -> &'static [&'static str] {
+        AGGREGATES
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map_or(&[], |(_, a)| *a)
     }
 }
 
@@ -2528,6 +3409,7 @@ fn validate_transitions(card: &Card, sink: &mut Diagnostics) {
         &card_readable,
         &card_events,
         &card.copies,
+        &card.sources,
         sink,
     );
     for component in &card.components {
@@ -2559,6 +3441,10 @@ fn validate_transitions(card: &Card, sink: &mut Diagnostics) {
             &readable,
             &events,
             &card.copies,
+            // A component may write a durable collection too: the card's
+            // sources are in scope for it (§5.3 forbids card STATE, not
+            // sources), so the same rules must reach here.
+            &card.sources,
             sink,
         );
     }
@@ -2622,10 +3508,100 @@ fn check_event_batch(
     readable: &[String],
     event_names: &[String],
     copies: &[CopyDecl],
+    sources: &[SourceDecl],
     sink: &mut Diagnostics,
 ) {
     for event in events {
         for transition in &event.transitions {
+            // §5.12: a transition may target a SOURCE when that source is backed
+            // by a durable store. The write leaves the card entirely — dispatch
+            // hands it to the host — so none of the shape checks below apply,
+            // and this is settled before them rather than inside them.
+            if let Some(source) = sources.iter().find(|s| s.name == transition.target) {
+                let accepted = catalog::mutable(&source.helper);
+                let verb = match &transition.form {
+                    Form::Append => "append",
+                    Form::Remove => "remove",
+                    Form::Set(_) => "set",
+                    Form::Clear => "clear",
+                    Form::Toggle => "toggle",
+                    Form::Cycle => "cycle",
+                    Form::Next(_) | Form::Prev(_) => "",
+                    Form::NotTotal(_) => "",
+                };
+                match accepted {
+                    // Read-only by default: binding a fetch is not permission to
+                    // write it, and a capability earns that by being listed.
+                    None => sink.push(
+                        transition.line,
+                        transition.column,
+                        format!(
+                            "{:?} is a source and cannot be written — {} is read-only. \
+                             Only a capability backed by a durable store accepts a \
+                             transition (profile §5.12)",
+                            transition.target, source.helper
+                        ),
+                    ),
+                    Some(verbs) if !verbs.contains(&verb) => sink.push(
+                        transition.line,
+                        transition.column,
+                        format!(
+                            "{} does not accept `{verb}`; it accepts: {}",
+                            source.helper,
+                            verbs.join(", ")
+                        ),
+                    ),
+                    Some(_) => {}
+                }
+                // A written PREFERENCE must say which one, and the declaration
+                // is what says it: the write's key is the source's single
+                // declared field. A multi-field source leaves `set($value)`
+                // aiming at nothing nameable.
+                if source.helper == "sys.prefs"
+                    && matches!(&transition.form, Form::Set(_) | Form::Clear)
+                {
+                    let fields = source
+                        .args
+                        .iter()
+                        .find(|(n, _)| n == "fields")
+                        .and_then(|(_, a)| match a {
+                            SourceArg::List(l) => Some(l.len()),
+                            _ => None,
+                        })
+                        .unwrap_or(0);
+                    if fields != 1 {
+                        sink.push(
+                            transition.line,
+                            transition.column,
+                            format!(
+                                "a written preference source must declare exactly one                                  field — the field IS the key the write lands under.                                  {:?} declares {fields}; split it: `source home_pref                                  sys.prefs(fields: [home])` writes `home` (profile §5.12)",
+                                transition.target
+                            ),
+                        );
+                    }
+                }
+                continue;
+            }
+            // A collection form on anything else is refused HERE rather than
+            // falling through to the shape checks, which would report it as a
+            // bad `set` on a state and send the reader looking in the wrong
+            // place. There is no list-shaped cell: §5.12 is deliberate that a
+            // durable collection is a source, because a card is regenerated per
+            // request and a cell would be empty again the next time.
+            if transition.form.is_collection() {
+                sink.push(
+                    transition.line,
+                    transition.column,
+                    format!(
+                        "`append`/`remove` write a durable collection, and {:?} is not one. \
+                         Declare it as a source over a store-backed capability — card state \
+                         cannot hold a list, and would be reset on the next request anyway \
+                         (profile §5.12)",
+                        transition.target
+                    ),
+                );
+                continue;
+            }
             let Some(state) = states.iter().find(|s| s.path == transition.target) else {
                 sink.push(
                     transition.line,
@@ -2812,6 +3788,48 @@ fn check_event_batch(
                         format!("`cycle` needs an enum state, but {:?} is not", transition.target),
                     ),
                 },
+                // The collection walk: the path must name a declared source's
+                // field, and the cell it moves must be text — the walked field
+                // IS the value written.
+                Form::Next(path) | Form::Prev(path) => {
+                    if !matches!(&state.shape, Shape::Text) {
+                        sink.push(
+                            transition.line,
+                            transition.column,
+                            format!(
+                                "`next`/`prev` write a text state, but {:?} is not",
+                                transition.target
+                            ),
+                        );
+                    }
+                    let (root, field) = path.split_once('.').unwrap_or((path.as_str(), ""));
+                    match sources.iter().find(|s| s.name == root) {
+                        None => sink.push(
+                            transition.line,
+                            transition.column,
+                            format!("`next({path})` walks a source, and {root:?} is not one"),
+                        ),
+                        Some(decl) => {
+                            let declared = decl.args.iter().find(|(n, _)| n == "fields").and_then(
+                                |(_, a)| match a {
+                                    SourceArg::List(l) => Some(l),
+                                    _ => None,
+                                },
+                            );
+                            if field.is_empty()
+                                || declared.is_some_and(|l| !l.iter().any(|f| f == field))
+                            {
+                                sink.push(
+                                    transition.line,
+                                    transition.column,
+                                    format!(
+                                        "`next({path})` walks a field {root:?} does not declare                                          — add it to the source's fields",
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -2874,9 +3892,29 @@ fn validate_sources(card: &Card, sink: &mut Diagnostics) {
     // A source read by another source counts: `sys.weather(lat: place.lat)`
     // makes `place` needed even though no view names it.
     for source in &card.sources {
-        for (_, arg) in &source.args {
-            if let SourceArg::Path(path) = arg {
-                read.insert(root_of(path));
+        for (name, arg) in &source.args {
+            match arg {
+                SourceArg::Path(path) => {
+                    read.insert(root_of(path));
+                }
+                // And so does one read from inside a LIST argument.
+                //
+                // `sys.route(via: [stop.0.lat, stop.0.lon])` is how a trip names a
+                // waypoint, and the items are paths like any other read. Counting
+                // only `Path` here refused a card that used one: the stop's own
+                // `sys.search` was reported as declared and never read, while the
+                // route it fed was the only reason it existed.
+                //
+                // `fields:` is exempt — its items are the FIELD NAMES being asked
+                // for (`[duration, distance]`), not paths, and treating `duration`
+                // as a read of a source called `duration` would mark any source of
+                // that name as used by every card in the corpus.
+                SourceArg::List(items) if name != "fields" => {
+                    for item in items {
+                        read.insert(root_of(item));
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -2894,6 +3932,14 @@ fn validate_sources(card: &Card, sink: &mut Diagnostics) {
     if !card.copies.is_empty() {
         read.insert("env".to_owned());
         read.insert("env.locale".to_owned());
+    }
+    // An event WRITE is a use too: `page: set($value)` resolves against the
+    // declared source to learn which capability it drives — a write-only
+    // reader/link source is not dead, it is an actuator.
+    for event in &card.events {
+        for transition in &event.transitions {
+            read.insert(root_of(&transition.target));
+        }
     }
     for source in &card.sources {
         // A dotted source name (`env.locale`) is read as its own root.
@@ -2930,6 +3976,41 @@ fn validate_sources(card: &Card, sink: &mut Diagnostics) {
             );
             continue;
         };
+        // A requested field must be one the capability ANSWERS.
+        //
+        // `fields:` was accepted as any list of words, so a card could ask for
+        // something that does not exist and the host would return nothing for
+        // it — an em dash, which is what a value still in flight looks like too.
+        // A capability with no vocabulary declared is left alone rather than
+        // treated as answering nothing.
+        for (name, arg) in &source.args {
+            let SourceArg::List(requested) = arg else {
+                continue;
+            };
+            let (known, what) = match name.as_str() {
+                "fields" => (catalog::answers(&source.helper), "answer"),
+                "aggregate" => (Some(catalog::aggregates(&source.helper)), "aggregate"),
+                _ => continue,
+            };
+            let Some(known) = known else { continue };
+            for field in requested {
+                if !known.iter().any(|k| k == field) {
+                    sink.push(
+                        source.line,
+                        1,
+                        format!(
+                            "{} cannot {what} {field:?}. It {}",
+                            source.helper,
+                            if known.is_empty() {
+                                "returns a value with no fields at all".to_owned()
+                            } else {
+                                format!("offers: {}", known.join(", "))
+                            }
+                        ),
+                    );
+                }
+            }
+        }
         for (name, arg) in &source.args {
             // The VALUE is a binding too. Checking only the argument's name let
             // a source carry any path to the host — the helper was constrained
@@ -3070,6 +4151,45 @@ struct Scope {
     /// Card state, tracked separately so reading it from a component is a
     /// specific diagnostic rather than "unknown name".
     forbidden_state: Vec<String>,
+    /// For a root backed by a source that declared `fields:`, the names a
+    /// reader may name off it.
+    ///
+    /// A card ALREADY says what it needs — `fields: [ticker, name, last]` — and
+    /// nothing compared the views against it. `m.tickr` type-checked, so did
+    /// `m.marketcap`, a field the host was never asked to fetch. Both render an
+    /// em dash, which is indistinguishable from data that has not arrived.
+    ///
+    /// A root with no entry is unchecked: `sys.gps` and `sys.locale` take no
+    /// field list, and a component prop is a record whose shape the card cannot
+    /// see from here.
+    fields: Vec<(String, Vec<String>)>,
+}
+
+/// What each source was asked for, as the names a reader may then name.
+///
+/// `fields:` and `aggregate:` both land in one set. They describe different
+/// levels — `fields:` on a multi-day forecast describes the DAYS while
+/// `aggregate:` describes the record around them — and separating them needs a
+/// per-capability schema this does not have. Pooling them accepts a read at the
+/// wrong level and still rejects a name the card never asked for, which is the
+/// defect that ships.
+fn declared_fields(card: &Card) -> Vec<(String, Vec<String>)> {
+    let list = |source: &SourceDecl, want: &str| -> Option<Vec<String>> {
+        source.args.iter().find_map(|(n, a)| match a {
+            SourceArg::List(v) if n == want => Some(v.clone()),
+            _ => None,
+        })
+    };
+    card.sources
+        .iter()
+        .filter_map(|s| {
+            // No `fields:` at all means the capability does not take one —
+            // `sys.gps`, `sys.locale`. Unchecked rather than checked as empty.
+            let mut names = list(s, "fields")?;
+            names.extend(list(s, "aggregate").unwrap_or_default());
+            Some((s.name.clone(), names))
+        })
+        .collect()
 }
 
 impl Scope {
@@ -3092,6 +4212,7 @@ impl Scope {
             copies: card.copies.clone(),
             events,
             forbidden_state: Vec::new(),
+            fields: declared_fields(card),
         }
     }
 
@@ -3119,6 +4240,35 @@ impl Scope {
             copies: card.copies.clone(),
             events,
             forbidden_state: card.states.iter().map(|s| root_of(&s.path)).collect(),
+            // A component sees the card's sources, so a read off one is checked
+            // here too. Its own props are not: a `record` prop's shape is
+            // whatever the caller passes, and §5.2 does not make the caller
+            // declare it.
+            fields: declared_fields(card),
+        }
+    }
+
+    /// Whether `root` names something whose fields are known, and if so whether
+    /// `field` is one of them.
+    fn field_is_declared(&self, root: &str, field: &str) -> Option<bool> {
+        let (_, names) = self.fields.iter().find(|(r, _)| r == root)?;
+        Some(names.iter().any(|n| n == field))
+    }
+
+    /// Record that a source exposes a nested collection under `field`.
+    ///
+    /// Derived from the card rather than declared: `for d, i in week.days` is
+    /// what says a forecast has `days`. Without this the loop over it would be
+    /// rejected by the very rule that makes the read of `d.dayname` safe.
+    fn note_structural(&mut self, path: &str) {
+        let (root, field) = match path.split_once('.') {
+            Some(parts) => parts,
+            None => return,
+        };
+        if let Some((_, names)) = self.fields.iter_mut().find(|(r, _)| r == root) {
+            if !names.iter().any(|n| n == field) {
+                names.push(field.to_owned());
+            }
         }
     }
 
@@ -3185,7 +4335,21 @@ fn walk(
                 ..
             }) = element.args.first()
             {
+                // `for d, i in week.days` says a forecast HAS days. Register it
+                // before checking, or the rule that makes `d.dayname` safe
+                // rejects the loop that introduces `d`.
+                scope.note_structural(p);
                 check_path(p, scope, *line, *column, sink);
+                // The item binder answers for whatever the collection's source
+                // was asked for. `i` is the index and has no fields, so only the
+                // first binder is bound.
+                if let Some(binder) = element.binders.first() {
+                    if let Some((_, names)) =
+                        scope.fields.iter().find(|(r, _)| *r == root_of(p)).cloned()
+                    {
+                        scope.fields.push((binder.clone(), names));
+                    }
+                }
             }
         }
         "when" => {
@@ -3200,8 +4364,42 @@ fn walk(
                 // The right operand is a binding too. Unchecked, an undeclared
                 // name on the right resolved to nothing and the comparison
                 // decided the branch on that absence.
-                if let Some(Operand::Path(r)) = element.rhs.as_ref() {
-                    check_path(r, scope, *line, *column, sink);
+                //
+                // EVERY path in it, not just a bare one. This matched
+                // `Operand::Path` alone, so `when a == nosuch * 2` was accepted
+                // at L1 — an undeclared name reaching evaluation through the one
+                // position that did not look inside its operand. §4's rule that
+                // an expression must READ something was skipped here for the
+                // same reason, so a guard could compare against a fabricated
+                // literal. Both are the argument-position rules; a guard is not
+                // a place they stop applying.
+                if let Some(rhs) = element.rhs.as_ref() {
+                    let mut paths = Vec::new();
+                    expr_paths(rhs, &mut paths);
+                    if matches!(rhs, Operand::Expr { .. }) {
+                        if paths.is_empty() {
+                            sink.push(
+                                *line,
+                                *column,
+                                "an expression must read a declared source or state: every \
+                                 operand here is a literal, which states a fact rather than \
+                                 computing one (profile §4)"
+                                    .to_string(),
+                            );
+                        } else if expr_is_constant(rhs) {
+                            sink.push(
+                                *line,
+                                *column,
+                                "this expression reads declared values and IGNORES them: its \
+                                 answer is the same whatever they are, so it states a fact \
+                                 rather than computing one (profile §4)"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                    for r in paths {
+                        check_path(&r, scope, *line, *column, sink);
+                    }
                 }
             }
         }
@@ -3488,10 +4686,69 @@ fn check_arg(
         (Operand::Path(path), _) => check_path(path, scope, arg.line, arg.column, sink),
         (Operand::Predicate { path, rhs, .. }, _) => {
             check_path(path, scope, arg.line, arg.column, sink);
-            // The right operand is a binding too. Leaving it unchecked is how
-            // `when selected != absent` took its branch with `absent` undeclared.
-            if let Operand::Path(r) = rhs.as_ref() {
-                check_path(r, scope, arg.line, arg.column, sink);
+            // EVERY path in the right operand, not just a bare one. Leaving it
+            // unchecked is how `when selected != absent` took its branch with
+            // `absent` undeclared — and now that a comparison's right side can
+            // hold arithmetic, matching only `Path` would let `x == a + b` past
+            // with `a` and `b` undeclared.
+            let mut paths = Vec::new();
+            expr_paths(rhs, &mut paths);
+            // §9.3 applies to a comparison's right side too: `x == 3 * 4` computes
+            // a number from nothing and compares against it.
+            if matches!(rhs.as_ref(), Operand::Expr { .. }) {
+                if paths.is_empty() {
+                    sink.push(
+                        arg.line,
+                        arg.column,
+                        "an expression must read a declared source or state: every operand here \
+                         is a literal, which states a fact rather than computing one (profile §4)"
+                            .to_string(),
+                    );
+                } else if expr_is_constant(rhs) {
+                    sink.push(
+                        arg.line,
+                        arg.column,
+                        "this expression reads declared values and IGNORES them: its answer is \
+                         the same whatever they are, so it states a fact rather than computing \
+                         one (profile §4). `x * 0 + 1547` is 1547"
+                            .to_string(),
+                    );
+                }
+            }
+            for p in paths {
+                check_path(&p, scope, arg.line, arg.column, sink);
+            }
+        }
+        // §4's no-facts rule, one level up.
+        //
+        // L0 refuses a literal in a value position outright — a decidable,
+        // structural check. L1 cannot, because a coefficient is a legitimate
+        // literal: `temp * 9 / 5 + 32` is a FORMULA. So the rule becomes: an
+        // expression must READ something. `1547 * 3.2` reads nothing, and is a
+        // fabricated fact wearing arithmetic.
+        (expr @ Operand::Expr { .. }, _) => {
+            let mut paths = Vec::new();
+            expr_paths(expr, &mut paths);
+            if paths.is_empty() {
+                sink.push(
+                    arg.line,
+                    arg.column,
+                    "an expression must read a declared source or state: every operand here \
+                     is a literal, which states a fact rather than computing one (profile §4)"
+                        .to_string(),
+                );
+            } else if expr_is_constant(expr) {
+                sink.push(
+                    arg.line,
+                    arg.column,
+                    "this expression reads declared values and IGNORES them: its answer is the \
+                     same whatever they are, so it states a fact rather than computing one \
+                     (profile §4). `x * 0 + 1547` is 1547"
+                        .to_string(),
+                );
+            }
+            for p in paths {
+                check_path(&p, scope, arg.line, arg.column, sink);
             }
         }
         _ => {}
@@ -3701,6 +4958,39 @@ fn check_path(path: &str, scope: &Scope, line: usize, column: usize, sink: &mut 
 
     // The whole path, so a declared name can be matched by its own segments.
     if scope.knows(path) {
+        // Known root, but is the FIELD one the card asked for?
+        //
+        // A card declares `fields: [ticker, name, last]` and nothing compared
+        // the views against it, so `m.tickr` and `m.marketcap` both passed —
+        // one a typo, one a field the host was never asked to fetch. Each
+        // renders an em dash, which on screen is indistinguishable from data
+        // still in flight.
+        if let Some((root, rest)) = path.split_once('.') {
+            // A numeric segment is an INDEX into a collection, not a field:
+            // `lead.0.title` takes the first story and reads its title. Treating
+            // it as a field rejected every indexed read in the news card.
+            let mut segments = rest
+                .split('.')
+                .skip_while(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()));
+            let field = segments.next().unwrap_or("");
+            // Only the first field segment: deeper paths reach into a record
+            // whose own shape needs the per-capability schema.
+            if !field.is_empty() && !field.starts_with('$') && !field.starts_with('[') {
+                if let Some(false) = scope.field_is_declared(root, field) {
+                    let (_, names) = scope.fields.iter().find(|(r, _)| r == root).unwrap();
+                    sink.push(
+                        line,
+                        column,
+                        format!(
+                            "{root:?} was not asked for {field:?}. A source answers only the \
+                             fields its declaration requests, so this renders as missing — \
+                             add it to `fields:` or read one of: {}",
+                            names.join(", ")
+                        ),
+                    );
+                }
+            }
+        }
         return;
     }
     if scope.forbidden_state.contains(&root) {
@@ -3717,6 +5007,23 @@ fn check_path(path: &str, scope: &Scope, line: usize, column: usize, sink: &mut 
 }
 
 // ─────────────────────────────────────────────────────────────────── realization ──
+
+/// An L1 expression, resolved for lowering.
+///
+/// A realized number is not enough: `shares * quote.last` computed at
+/// realization is the answer for the data the host happened to seed, and a live
+/// card has none. The backend needs the SHAPE — which operands are live calls
+/// and which are constants — so it can emit arithmetic the VM evaluates against
+/// data that arrives later.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExprPart {
+    /// An operand answered by a live capability call.
+    Call(SourceBinding),
+    /// An operand already resolved to a constant — a coefficient, or a value no
+    /// backend can answer.
+    Const(String),
+    Bin(Box<ExprPart>, String, Box<ExprPart>),
+}
 
 /// A realized node. Renderer-neutral: a backend maps `kind` to its own widget.
 #[derive(Clone, Debug, PartialEq)]
@@ -3739,6 +5046,8 @@ pub struct UiNode {
     /// Additive on purpose: a consumer that ignores this sees exactly what it
     /// saw before.
     pub bindings: Vec<(String, SourceBinding)>,
+    /// For each argument that is an L1 expression, its resolved shape.
+    pub exprs: Vec<(String, ExprPart)>,
 }
 
 /// Where an argument's value came from, with the source's own arguments already
@@ -3837,6 +5146,20 @@ pub struct RealizeReport {
     /// Nodes carried over from a previous tree by [`realize_patch`] rather than
     /// rebuilt. Zero for a full realization.
     pub reused: usize,
+    /// Card state whose value came from a declared `initial: <source path>` this
+    /// realization — the first answer a source gave for it.
+    ///
+    /// A HOST should write these into the store, and that write is what makes the
+    /// capture a capture. Left unwritten, an `initial:` re-resolves on every
+    /// realization and the state follows its source: an origin declared as "where I
+    /// am" then chases the device, and a route declared from it is re-fetched before
+    /// it can answer. Written once, the state holds the value the source had when it
+    /// first had one — which is what "where I was when I started" means, and what
+    /// R9.5's `let` does by freezing at build without being able to wait for data.
+    ///
+    /// Only what an `initial_path` produced. A literal initial needs no capturing and
+    /// a value already in the store is already captured.
+    pub captured: Vec<(String, serde_json::Value)>,
 }
 
 /// Realize a card against resolved data.
@@ -3866,6 +5189,7 @@ fn realize_inner(
             truncated: false,
             live_keys: Vec::new(),
             reused: 0,
+            captured: Vec::new(),
         };
     }
 
@@ -3879,6 +5203,7 @@ fn realize_inner(
                 truncated: false,
                 live_keys: Vec::new(),
                 reused: 0,
+                captured: Vec::new(),
             }
         }
     };
@@ -3893,6 +5218,7 @@ fn realize_inner(
             truncated: false,
             live_keys: Vec::new(),
             reused: 0,
+            captured: Vec::new(),
         };
     };
 
@@ -3911,16 +5237,30 @@ fn realize_inner(
     // then its declared initial. Without this, an event that wrote card state
     // would apply and be invisible at the next realization — and a guard on a
     // state with no value at all would take the wrong branch on first render.
-    let mut frames: Vec<(String, serde_json::Value)> = Vec::new();
+    let mut frames: Vec<Frame> = Vec::new();
+    let mut captured: Vec<(String, serde_json::Value)> = Vec::new();
     for state in &card.states {
-        let value = store
+        let stored = store
             .and_then(|s| s.get(CARD_STATE_KEY, &state.path))
             .cloned()
             .or_else(|| data.get(&state.path).cloned())
-            .or_else(|| state.initial.clone())
-            .or_else(|| state.initial_path.as_ref().and_then(|p| data_path(data, p)))
-            .unwrap_or_else(|| initial_for(&state.shape));
-        frames.push((state.path.clone(), value));
+            .or_else(|| state.initial.clone());
+        let value = match stored {
+            Some(v) => v,
+            None => {
+                // From a SOURCE, so it is a capture: report it, and the host writes
+                // it once. Until that write this re-resolves every realization, and
+                // a state that follows its source is not an initial value.
+                match state.initial_path.as_ref().and_then(|p| data_path(data, p)) {
+                    Some(v) => {
+                        captured.push((state.path.clone(), v.clone()));
+                        v
+                    }
+                    None => initial_for(&state.shape),
+                }
+            }
+        };
+        frames.push((state.path.clone(), value, None));
     }
     let mut scope = ValueScope {
         frames,
@@ -3940,12 +5280,38 @@ fn realize_inner(
         nodes,
         truncated,
         live_keys,
+        captured,
     }
 }
 
 /// Bindings introduced by loops and component props, innermost last.
+/// A name bound in scope: what it is called, what it holds, and — for a loop
+/// binder — where the item came from.
+///
+/// Named rather than left as a bare tuple because it grew a third element and
+/// clippy was right that four nested types in a signature stop being readable.
+type Frame = (String, serde_json::Value, Option<ItemOrigin>);
+
+/// Which collection a loop binder iterates, and at what index.
+///
+/// `ItemOrigin`, not `Provenance` — that name is taken by §4's copy class, and
+/// two unrelated meanings for one word in the same file is how a reader ends up
+/// tracing the wrong thing.
+///
+/// This is what lets a backend answer a source from inside a loop: a path there
+/// is rooted at the BINDER, so `m.ticker` has to be rewritten to
+/// `movers.0.ticker` before it can be recognised as a source at all.
+type ItemOrigin = (String, usize);
+
 struct ValueScope<'a> {
-    frames: Vec<(String, serde_json::Value)>,
+    /// A bound name, its value, and — for a loop binder — WHERE the item came
+    /// from: the source it iterates and the item's index.
+    ///
+    /// The provenance is what lets a backend answer a source itself from inside
+    /// a loop. `m.ticker` is rooted at the binder, not at `movers`, so without
+    /// this every row in a list falls back to the seeded blob while the detail
+    /// view beside it goes live — which is exactly what happened.
+    frames: Vec<Frame>,
     data: &'a serde_json::Value,
     copies: &'a [CopyDecl],
 }
@@ -4002,8 +5368,8 @@ impl ValueScope<'_> {
             return Some(serde_json::Value::String(text.1.clone()));
         }
 
-        let mut current = match self.frames.iter().rev().find(|(n, _)| n == root) {
-            Some((_, v)) => v.clone(),
+        let mut current = match self.frames.iter().rev().find(|(n, _, _)| n == root) {
+            Some((_, v, _)) => v.clone(),
             None => self.data.get(root)?.clone(),
         };
         for segment in segments {
@@ -4136,12 +5502,18 @@ impl Realizer<'_> {
             args: Vec::new(),
             children: Vec::new(),
             bindings: Vec::new(),
+            exprs: Vec::new(),
         };
         for arg in &element.args {
             let value = self.value(&element.name, &arg.name, &arg.value, scope);
             if let Operand::Path(path) = &arg.value {
                 if let Some(binding) = self.source_binding(path, scope) {
                     node.bindings.push((arg.name.clone(), binding));
+                }
+            }
+            if matches!(arg.value, Operand::Expr { .. }) {
+                if let Some(shape) = self.expr_shape(&arg.value, scope) {
+                    node.exprs.push((arg.name.clone(), shape));
                 }
             }
             node.args.push((arg.name.clone(), value));
@@ -4198,7 +5570,29 @@ impl Realizer<'_> {
                 // data and letting the host capture an unfilled prop.
                 (None, _) => param.default.clone().unwrap_or(serde_json::Value::Null),
             };
-            scope.frames.push((param.name.clone(), value));
+            // Carry the argument's PROVENANCE into the parameter.
+            //
+            // A loop binder records which collection it iterates and at what
+            // index, which is what lets a row lower to a live call. Passing that
+            // binder into a component — `for s in feed { StoryRow(story: s) }`,
+            // the idiomatic way to factor a list — pushed the parameter frame
+            // with `None`, so `story.title` inside the component had no
+            // provenance and fell back to the seeded blob. A live card has no
+            // blob, so every row rendered an em dash while the lead story beside
+            // it, read directly as `lead.0.title`, went live.
+            let provenance = match supplied.map(|a| &a.value) {
+                Some(Operand::Path(p)) | Some(Operand::Predicate { path: p, .. }) => {
+                    let root = p.split('.').next().unwrap_or(p);
+                    scope
+                        .frames
+                        .iter()
+                        .rev()
+                        .find(|(n, _, prov)| n == root && prov.is_some())
+                        .and_then(|(_, _, prov)| prov.clone())
+                }
+                _ => None,
+            };
+            scope.frames.push((param.name.clone(), value, provenance));
             bound += 1;
         }
         let instance_key = format!("{key}/{}", component.name);
@@ -4230,6 +5624,7 @@ impl Realizer<'_> {
                 live.or_else(|| state.initial.clone())
                     .or(from_path)
                     .unwrap_or_else(|| initial_for(&state.shape)),
+                None,
             ));
             bound += 1;
         }
@@ -4255,10 +5650,25 @@ impl Realizer<'_> {
         else {
             return;
         };
-        let Some(collection) = scope.lookup(path) else {
-            // A source that has not resolved yet renders nothing rather than an
-            // empty row; pending is the runtime's to surface, not ours to invent.
-            return;
+        let collection = match scope.lookup(path) {
+            Some(c) => c,
+            // No data for this collection. If it is a SOURCE that declared how
+            // many it wants, realize that many placeholder items: the card said
+            // `sys.movers(count: 10)`, so ten rows is what it asked for, and a
+            // backend that answers the source itself fills them in.
+            //
+            // Without this a card rendered with no data blob has no rows at all,
+            // so nothing inside the loop is ever lowered — and a backend that
+            // could have answered every field never gets asked. The count is the
+            // one thing it cannot infer.
+            None => match self.declared_count(path) {
+                Some(n) => {
+                    serde_json::Value::Array(vec![serde_json::Value::Object(Default::default()); n])
+                }
+                // Not a counted source: pending is the runtime's to surface, not
+                // ours to invent.
+                None => return,
+            },
         };
         let Some(items) = collection.as_array() else {
             self.sink.push(
@@ -4316,13 +5726,22 @@ impl Realizer<'_> {
 
             let mut bound = 0usize;
             if let Some(binder) = element.binders.first() {
-                scope.frames.push((binder.clone(), item.clone()));
+                // The provenance a live call needs: `m.ticker` is rooted at
+                // the binder, so without this every row falls back to the
+                // seeded blob while the detail beside it goes live.
+                scope.frames.push((
+                    binder.clone(),
+                    item.clone(),
+                    Some((path.to_string(), index)),
+                ));
                 bound += 1;
             }
             if let Some(index_binder) = element.binders.get(1) {
-                scope
-                    .frames
-                    .push((index_binder.clone(), serde_json::Value::from(index + 1)));
+                scope.frames.push((
+                    index_binder.clone(),
+                    serde_json::Value::from(index + 1),
+                    None,
+                ));
                 bound += 1;
             }
 
@@ -4362,7 +5781,168 @@ impl Realizer<'_> {
     /// to look it up. An argument that cannot be resolved drops the binding
     /// entirely — a fetch with a hole in it is worse than no fetch, since it
     /// would silently request the wrong thing.
+    /// How many items a source said it wants, if it is a source and it said.
+    ///
+    /// `sys.movers(count: 10)` is the card declaring its own row count. That is
+    /// the one fact a backend answering the source cannot supply for itself —
+    /// it can answer field 0, field 1 and so on, but not how many to ask for.
+    ///
+    /// Bounded by the realization limit, because the count comes from a
+    /// generated card and a card asking for ten thousand rows should get the
+    /// cap rather than the request.
+    /// The live call for `<source>.<field>`, when the backend answers that
+    /// source itself. Used for a source argument that depends on another
+    /// source, which a live card cannot resolve from data.
+    fn nested_source_call(&self, path: &str, scope: &ValueScope) -> Option<String> {
+        let (owner, field) = path.split_once('.')?;
+        let declaration = self.card.sources.iter().find(|s| s.name == owner)?;
+        let mut args = Vec::new();
+        for (name, arg) in &declaration.args {
+            let resolved = match arg {
+                SourceArg::Text(t) => t.clone(),
+                SourceArg::Number(n) => makepad::trim_num(*n),
+                SourceArg::List(_) if name == "fields" => continue,
+                // A list of PATHS resolves item by item, each to its own live
+                // call, joined by a separator no call can contain.
+                //
+                // `sys.route(via: [stop.0.lat, stop.0.lon])` is how a trip names a
+                // waypoint. Joining the raw items gave the helper the literal text
+                // "stop.0.lat,stop.0.lon", which is not a coordinate, so the
+                // argument was discarded and the route was computed WITHOUT the
+                // stop — a card that let the user add one, drew a line that did
+                // not go through it, and reported the direct trip's time.
+                //
+                // U+0001 rather than a comma, because a resolved call contains
+                // commas of its own: `sys.searchnum("A", 0, "lat")`.
+                SourceArg::List(items) => items
+                    .iter()
+                    .map(|item| {
+                        let key = item.strip_prefix("state.").unwrap_or(item);
+                        match self.nested_source_call(key, scope) {
+                            Some(call) => call,
+                            None => scope
+                                .lookup(key)
+                                .map(|v| json_to_key(&v))
+                                .unwrap_or_else(|| item.clone()),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\u{1}"),
+                // A parent's own argument is usually card STATE — the weather
+                // fixture reads `sys.geocode(name: state.city)` — so it resolves
+                // from the scope like any other path. Returning None here
+                // instead meant the whole chain died at the first hop and every
+                // reading below it stayed seeded.
+                //
+                // One level only: a path that names yet another SOURCE is not
+                // resolved here, which is what keeps this from recursing.
+                SourceArg::Path(p) => {
+                    let key = p.strip_prefix("state.").unwrap_or(p);
+                    json_to_key(&scope.lookup(key)?)
+                }
+            };
+            args.push((name.clone(), resolved));
+        }
+        makepad::vm_call(&SourceBinding {
+            helper: declaration.helper.clone(),
+            args,
+            field: field.to_string(),
+        })
+    }
+
+    /// How many rows a loop over this source should realize before its data
+    /// arrives.
+    ///
+    /// This matched an argument named `count` holding a bare literal, and missed
+    /// the case that ships: a weather card asks `sys.weather(days: state.days)`
+    /// with `state days { initial: 7 }`. The argument is called `days`, and it is
+    /// a PATH rather than a literal — so a seven-day forecast realized zero rows
+    /// and the card drew current conditions and nothing else. "Beijing week
+    /// weather" gave one day.
+    ///
+    /// Both names, because `count` and `days` are the same question asked of
+    /// different capabilities, and a path resolved from its declared initial,
+    /// because that value is known at realization — it is the card's own state,
+    /// not something the host has to send.
+    fn declared_count(&self, path: &str) -> Option<usize> {
+        // The loop's path may name the source or a COLLECTION FIELD of it:
+        // `for m in movers` and `for d in week.days` are both loops over a
+        // counted source, and matching only the bare name meant the second found
+        // nothing. That is the weather card's forecast, which is the one that
+        // ships.
+        let root = root_of(path);
+        let declaration = self
+            .card
+            .sources
+            .iter()
+            .find(|s| s.name == path || s.name == root)?;
+        let (_, arg) = declaration
+            .args
+            .iter()
+            .find(|(n, _)| n == "count" || n == "days")?;
+        let n = match arg {
+            SourceArg::Number(n) => *n,
+            // `days: state.days` — a cursor into the card's own state, whose
+            // declared initial is the number the fetch will be asked for.
+            SourceArg::Path(p) => {
+                let key = p.strip_prefix("state.").unwrap_or(p);
+                let state = self.card.states.iter().find(|s| s.path == key)?;
+                state.initial.as_ref().and_then(|v| v.as_f64())?
+            }
+            _ => return None,
+        };
+        (n >= 1.0).then(|| (n as usize).min(self.limits.max_collection))
+    }
+
+    /// Resolve an expression into live calls and constants.
+    ///
+    /// A `Path` the backend can answer becomes a call; anything else becomes the
+    /// value realization already resolved. Returning `None` for an operand that
+    /// resolves to nothing keeps a half-resolved expression from lowering — it
+    /// renders as the missing binding it is.
+    fn expr_shape(&self, operand: &Operand, scope: &ValueScope) -> Option<ExprPart> {
+        match operand {
+            Operand::Expr { lhs, op, rhs } => Some(ExprPart::Bin(
+                Box::new(self.expr_shape(lhs, scope)?),
+                op.clone(),
+                Box::new(self.expr_shape(rhs, scope)?),
+            )),
+            Operand::Num(n) => Some(ExprPart::Const(makepad::trim_num(*n))),
+            Operand::Path(p) => match self.source_binding(p, scope) {
+                Some(binding) => Some(ExprPart::Call(binding)),
+                None => {
+                    let v = scope.lookup(p)?;
+                    Some(ExprPart::Const(makepad::trim_num(v.as_f64()?)))
+                }
+            },
+            _ => None,
+        }
+    }
+
     fn source_binding(&self, path: &str, scope: &ValueScope) -> Option<SourceBinding> {
+        // Inside a `for`, a path is rooted at the BINDER: `m.ticker`, not
+        // `movers.0.ticker`. The binder's frame records which collection it
+        // iterates and at what index, so rewrite through it first.
+        //
+        // Without this every row of a list falls back to the seeded value while
+        // the detail view beside it goes live — which is precisely what the
+        // stock card did, and it looks like the list is simply stale.
+        let (root, rest) = path.split_once('.').unwrap_or((path, ""));
+        let rewritten = scope
+            .frames
+            .iter()
+            .rev()
+            .find(|(n, _, prov)| n == root && prov.is_some())
+            .and_then(|(_, _, prov)| prov.as_ref())
+            .map(|(collection, index)| {
+                if rest.is_empty() {
+                    format!("{collection}.{index}")
+                } else {
+                    format!("{collection}.{index}.{rest}")
+                }
+            });
+        let path = rewritten.as_deref().unwrap_or(path);
+
         // `env.locale.lang` roots at the source `env.locale`, not at `env`, so
         // match the LONGEST declared name that prefixes the path.
         let declaration = self
@@ -4378,24 +5958,107 @@ impl Realizer<'_> {
                 SourceArg::Path(p) => {
                     // `state.x` in a source argument addresses card state; the
                     // view scope names it without the prefix.
-                    let looked_up = scope.lookup(p.strip_prefix("state.").unwrap_or(p))?;
-                    json_to_key(&looked_up)
+                    let key = p.strip_prefix("state.").unwrap_or(p);
+                    // A source argument that names ANOTHER SOURCE resolves to
+                    // that source's own live call — `sys.places(lat: place.lat)`
+                    // depends on `place`, and the dependency is exactly what L0
+                    // declares, so it is emitted the way the backend will read it.
+                    //
+                    // THE SOURCE IS TRIED FIRST, and the order is the whole point.
+                    // It used to be the other way round: the scope was consulted
+                    // and the live call was the fallback for when the lookup found
+                    // nothing. A live card carries no data blob, so on a device
+                    // that path was taken and everything worked — and a card
+                    // previewed against seed data lowered the SEED into the
+                    // argument instead. Two different lowerings of one card,
+                    // selected by whether a blob happened to carry the key.
+                    //
+                    // It surfaced on `sys.step(at_lat: here.lat)`: the progress a
+                    // turn instruction is computed from lowered to `37.3`, a fixed
+                    // point on the map, so every instruction was the first one
+                    // forever. The seeded fix is the one value a navigation card
+                    // must never be allowed to keep.
+                    match self.nested_source_call(key, scope) {
+                        Some(call) => call,
+                        None => json_to_key(&scope.lookup(key)?),
+                    }
                 }
                 SourceArg::Text(t) => t.clone(),
                 SourceArg::Number(n) => makepad::trim_num(*n),
-                // A field list is structural, not a value the backend passes on.
-                SourceArg::List(_) => continue,
+                // `fields:` is structural — which keys the card wants back — and
+                // is not passed on. Any OTHER list is a value: `symbols: [NVDA,
+                // AMD]` is the universe to rank, and the model writes it as a
+                // list because every other list-shaped argument is one. Dropping
+                // it silently left the card ranking the whole market under
+                // whatever title it had been given.
+                SourceArg::List(_) if name == "fields" => continue,
+                // A list of PATHS resolves item by item, each to its own live
+                // call, joined by a separator no call can contain.
+                //
+                // `sys.route(via: [stop.0.lat, stop.0.lon])` is how a trip names a
+                // waypoint. Joining the raw items handed the helper the literal
+                // text "stop.0.lat,stop.0.lon", which is not a coordinate, so the
+                // argument was discarded and the route computed WITHOUT the stop:
+                // a card that let the user add one, drew a line that did not pass
+                // through it, and reported the direct trip's time.
+                //
+                // U+0001 rather than a comma, because a resolved call contains
+                // commas of its own — `sys.searchnum("A", 0, "lat")`. See
+                // `makepad::via_string`, which reads it back.
+                //
+                // A list of plain VALUES still joins with a comma: `symbols: [NVDA,
+                // AMD]` is a universe to rank, and neither item resolves to a call.
+                SourceArg::List(items) => {
+                    let resolved: Vec<String> = items
+                        .iter()
+                        .map(|item| {
+                            let key = item.strip_prefix("state.").unwrap_or(item);
+                            self.nested_source_call(key, scope)
+                                .or_else(|| scope.lookup(key).map(|v| json_to_key(&v)))
+                        })
+                        .collect::<Option<Vec<_>>>()
+                        .unwrap_or_default();
+                    if resolved.len() == items.len() {
+                        resolved.join("\u{1}")
+                    } else {
+                        items.join(",")
+                    }
+                }
             };
             args.push((name.clone(), resolved));
+        }
+        // The field a helper is asked for is `<index>.<name>` for a row of a
+        // collection, and the COLLECTION'S OWN NAME is not part of it.
+        //
+        // `for d in week.days` gives a binder whose provenance is the collection
+        // `week.days`, so the rewrite above produces `week.days.3.cond` — which
+        // is the right path for looking the value up in seeded data and the wrong
+        // one to hand a helper, which wants `3.cond`. Left in, every forecast row
+        // failed to translate and fell back to the realized default: seven rows
+        // of the same icon and an em dash where each day's high should be.
+        //
+        // Only a segment that is not an index is dropped, and only when an index
+        // follows it — `week.min_lo` is an aggregate on the source itself and has
+        // no row.
+        let mut field = path
+            .strip_prefix(&declaration.name)
+            .unwrap_or_default()
+            .trim_start_matches('.')
+            .to_string();
+        if let Some((head, rest)) = field.clone().split_once('.') {
+            let head_is_index = head.chars().all(|c| c.is_ascii_digit()) && !head.is_empty();
+            let rest_starts_with_index = rest
+                .split('.')
+                .next()
+                .is_some_and(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()));
+            if !head_is_index && rest_starts_with_index {
+                field = rest.to_string();
+            }
         }
         Some(SourceBinding {
             helper: declaration.helper.clone(),
             args,
-            field: path
-                .strip_prefix(&declaration.name)
-                .unwrap_or_default()
-                .trim_start_matches('.')
-                .to_string(),
+            field,
         })
     }
 
@@ -4429,6 +6092,13 @@ impl Realizer<'_> {
             Operand::Predicate { path, cmp, rhs } => {
                 NodeValue::Bool(compare(scope.lookup(path), cmp, scope_value(scope, rhs)))
             }
+            Operand::Expr { lhs, op, rhs } => match eval_expr(scope, lhs, op, rhs) {
+                Some(v) => match v.as_f64() {
+                    Some(n) => NodeValue::Number(n),
+                    None => NodeValue::Missing,
+                },
+                None => NodeValue::Missing,
+            },
             Operand::Path(p) => match scope.lookup(p) {
                 Some(serde_json::Value::String(s)) => NodeValue::Text(s),
                 Some(serde_json::Value::Bool(b)) => NodeValue::Bool(b),
@@ -4463,7 +6133,7 @@ fn json_to_key(value: &serde_json::Value) -> String {
 /// discipline holding — the card declares questions, and only the *realized
 /// output* contains answers.
 pub mod makepad {
-    use super::{NodeValue, SourceBinding, UiNode};
+    use super::{ExprPart, NodeValue, SourceBinding, UiNode};
     use std::fmt::Write as _;
 
     // Matching octos-one's `plan/common.rs`, so a lowered card sits beside the
@@ -4517,6 +6187,29 @@ pub mod makepad {
         node.args.iter().find(|(n, _)| n == name).map(|(_, v)| v)
     }
 
+    /// A `TokenOrPath` argument, whichever it turned out to be.
+    ///
+    /// `unit`, `width`, `view`, `controls` and `range` each admit a token OR a path
+    /// to card state, and REALIZE ERASES THE DIFFERENCE: `view: .tilted` survives as
+    /// `Token("tilted")`, while `view: view` reading `.tilted` out of the state
+    /// arrives as `Text("tilted")`. A reader that matches only `Token` therefore sees
+    /// nothing whenever the card chose the state form and silently takes its default.
+    ///
+    /// That is what broke the nav card's on-map 2D/3D switch. The chip relabelled on
+    /// every tap because its own guard reads the state directly, so the toggle looked
+    /// live — but `view` reached the lowering as `Text` and the camera stayed flat on
+    /// both settings. A control that responds and changes nothing is worse than one
+    /// that is missing; the screen asserts the camera tilted and it did not.
+    ///
+    /// Every `TokenOrPath` read goes through here so the class cannot come back one
+    /// argument at a time.
+    fn token_arg<'a>(node: &'a UiNode, name: &str) -> Option<&'a str> {
+        match arg(node, name) {
+            Some(NodeValue::Token(t) | NodeValue::Text(t)) => Some(t.as_str()),
+            _ => None,
+        }
+    }
+
     /// A value in text position. `Missing` becomes an em dash rather than an
     /// empty string, so an unresolved binding is visible on screen instead of
     /// silently rendering a blank field.
@@ -4533,6 +6226,11 @@ pub mod makepad {
     /// will. Emitting a call the VM cannot answer would render an em dash where
     /// a real number was available.
     pub(super) fn expr_of(node: &UiNode, arg_name: &str) -> String {
+        if let Some((_, shape)) = node.exprs.iter().find(|(n, _)| n == arg_name) {
+            if let Some(rendered) = render_expr(shape) {
+                return rendered;
+            }
+        }
         if let Some((_, binding)) = node.bindings.iter().find(|(n, _)| n == arg_name) {
             if let Some(call) = vm_call(binding) {
                 return call;
@@ -4541,13 +6239,290 @@ pub mod makepad {
         text_of(arg(node, arg_name))
     }
 
+    /// An `ExprPart` as backend arithmetic. Parenthesised at every join, so the
+    /// tree's shape survives regardless of the target VM's precedence rules.
+    pub(super) fn render_expr(part: &ExprPart) -> Option<String> {
+        match part {
+            ExprPart::Const(v) => Some(v.clone()),
+            // A live call is COERCED. Every `sys.*` helper answers with a
+            // string, because a string is what a card renders and what
+            // concatenation composes — `"$" + sys.stock(…)` is how every live
+            // value reaches the screen. Arithmetic needs the other thing, and
+            // string subtraction evaluates to NaN: measured on device, an L1
+            // card drew "≈NaN°" in every row while every other value on the same
+            // row was correct.
+            //
+            // The coercion is emitted here rather than assumed of the helpers,
+            // because L1 can ask for arithmetic over any numeric field of any
+            // capability and the helpers cannot all change shape for it.
+            ExprPart::Call(binding) => vm_call(binding).map(|c| format!("sys.num({c})")),
+            ExprPart::Bin(lhs, op, rhs) => Some(format!(
+                "({} {op} {})",
+                render_expr(lhs)?,
+                render_expr(rhs)?
+            )),
+        }
+    }
+
+    /// Which member of the map family a `Map` is, in the WIDGET's vocabulary.
+    ///
+    /// Shared by both lowerings rather than written twice. Two backends that
+    /// each decide independently what `.drive` means is the shape of every
+    /// defect this profile keeps finding.
+    pub(super) fn map_mode(node: &UiNode) -> &'static str {
+        match arg(node, "mode") {
+            // `.drive` means the chase camera EXACTLY WHEN the card declared a
+            // live position for it to follow, and the static preview otherwise.
+            // This is a §4 rule, not a performance compromise.
+            //
+            // Following needs a position that updates as the user moves. L0 has
+            // no loop to supply one — that is what `fn tick()` is for, and
+            // `fn tick()` is L2 — so an earlier version lowered BOTH moving modes
+            // to the one that does not move. Handed a route and no position, the
+            // widget animates along the polyline on a timer: it draws motion the
+            // user is not making, which is a fabricated fact in the one currency
+            // a map trades in, and §4 does not stop applying because the invented
+            // value is a camera pose.
+            //
+            // It is also what made the card stutter: the widget's settle gate
+            // exists because a map that keeps asking for frames "was pinning the
+            // GPU at ~100%", and a timer-driven follow is permanently in motion
+            // so it never settles. Measured at 69% CPU and 1.9 GB resident on a
+            // OnePlus 6 for one card holding one map.
+            //
+            // `at:` is that missing declaration — a source answering `lat`/`lon`,
+            // in practice `sys.gps`. With it, the camera follows a MEASUREMENT:
+            // the frames are the ones the fix earns, so the map settles whenever
+            // the user is standing still, and nothing is invented. Without it the
+            // old argument holds unchanged, so a card that asks to drive and
+            // declares no position still gets the honest preview.
+            // `"follow"`, NOT the widget's `"2d"`. They render the same
+            // projection and differ in where the camera comes from: `"2d"` drives
+            // a simulated vehicle along the route at an assumed speed off a
+            // looping clock, which is the fabrication this whole rule exists to
+            // refuse — and a convincing one, because it looks exactly like
+            // navigating. `"follow"` takes the position the card declared.
+            Some(NodeValue::Token(t)) if t == "drive" && live_position(node).is_some() => {
+                // Tilted is the shipping app's driving view (R8.1); flat is its
+                // 2D alternative. Both follow the DECLARED position — the widget's
+                // own `3d` mode drives a simulated vehicle, and pointing either of
+                // these at it would reintroduce exactly the fabrication this rule
+                // exists to refuse.
+                match token_arg(node, "view") {
+                    Some("tilted") => "follow3d",
+                    _ => "follow",
+                }
+            }
+            Some(NodeValue::Token(t)) if t == "drive" || t == "plan" => "plan",
+            // `flat` and an unstated mode are the same thing to the widget: no
+            // nav shader at all, which also means no route ribbon.
+            _ => "",
+        }
+    }
+
+    /// One axis of a `Map` endpoint, as a live call.
+    ///
+    /// An endpoint names a SOURCE rather than coordinates, so each is asked for
+    /// its own axis — `at: here` becomes `sys.gps("lat")` and `sys.gps("lon")`.
+    fn map_coord(node: &UiNode, name: &str, axis: &str) -> Option<String> {
+        // An explicit `from_lat:`/`from_lon:` wins, because a card that supplied one
+        // meant it: it is naming a position no search would find. Card state resolves
+        // to a number at realize time, which is exactly what captured coordinates are.
+        let direct = format!("{name}_{axis}");
+        if let Some((_, b)) = node.bindings.iter().find(|(n, _)| *n == direct) {
+            if let Some(call) = vm_call(b) {
+                return Some(call);
+            }
+        }
+        if let Some(NodeValue::Number(n)) = arg(node, &direct) {
+            // FULL PRECISION, not `trim_num`. That formats to one decimal place,
+            // which is right for a zoom level or a gap and catastrophic for a
+            // coordinate: 37.2656 became 37.3, about 11 km at this latitude. The
+            // route drew from a place a quarter of the way to San Francisco and
+            // looked entirely plausible doing it.
+            return Some(format!("{n}"));
+        }
+        let (_, binding) = node.bindings.iter().find(|(n, _)| n == name)?;
+        // A collection answers `0.lat` and a scalar source answers `lat`.
+        for field in [axis.to_owned(), format!("0.{axis}")] {
+            let probe = SourceBinding {
+                field,
+                ..binding.clone()
+            };
+            if let Some(call) = vm_call(&probe) {
+                return Some(call);
+            }
+        }
+        None
+    }
+
+    /// A `Map`'s waypoints, as the route helpers' `lat,lon;lat,lon` argument.
+    ///
+    /// `via:` on a `Map` names a source the same way `from:`/`to:` do, so each axis
+    /// is asked for separately and the pair is assembled by `via_string`. A source
+    /// that cannot answer a coordinate yields no vias, because a map drawn through
+    /// a place that could not be resolved is a map of a different trip.
+    pub(super) fn map_vias(node: &UiNode) -> Option<String> {
+        let mut pairs: Vec<String> = Vec::new();
+        for slot in ["via", "via2"] {
+            let (Some(lat), Some(lon)) = (map_coord(node, slot, "lat"), map_coord(node, slot, "lon"))
+            else {
+                continue;
+            };
+            pairs.push(lat);
+            pairs.push(lon);
+        }
+        if pairs.is_empty() {
+            return None;
+        }
+        via_string(&pairs.join("\u{1}"))
+    }
+
+    /// The live position a `Map` was told to follow, if it was told one.
+    ///
+    /// This is the whole difference between a camera that reports where the user
+    /// is and one that invents it — see `map_mode`. Both axes must resolve: half
+    /// a fix is not a position.
+    pub(super) fn live_position(node: &UiNode) -> Option<(String, String)> {
+        Some((map_coord(node, "at", "lat")?, map_coord(node, "at", "lon")?))
+    }
+
+    /// A `Map`'s centre and route, as live calls: `(lat, lon, polyline)`.
+    ///
+    /// The centre is the live position when one was declared, and the route's
+    /// start otherwise — a driving map is centred on the driver, a planning map
+    /// on the trip. An endpoint whose capability cannot answer a coordinate
+    /// yields a neutral centre and no route, because a map drawn from a seeded
+    /// position is a map of somewhere the user is not.
+    pub(super) fn map_route(node: &UiNode) -> (String, String, String) {
+        let coord = |name: &str, axis: &str| map_coord(node, name, axis);
+        let (Some(a), Some(o)) = (coord("from", "lat"), coord("from", "lon")) else {
+            return ("0".into(), "0".into(), "\"\"".into());
+        };
+        // The WAYPOINTS the trip passes through, as the helper's sixth argument.
+        //
+        // A map that omits them draws a different journey from the one the card
+        // reports beside it: the line goes straight from origin to destination
+        // while the duration and distance are for a route through the stop. Both
+        // halves come from the same list now, rendered the same way — see
+        // `via_string`.
+        let vias = map_vias(node);
+        let poly = match (coord("to", "lat"), coord("to", "lon")) {
+            (Some(b), Some(p)) => match &vias {
+                Some(v) => format!("sys.navroute({a}, {o}, {b}, {p}, \"polyline\", {v})"),
+                None => format!("sys.navroute({a}, {o}, {b}, {p}, \"polyline\")"),
+            },
+            _ => "\"\"".to_owned(),
+        };
+        // The route is always the declared trip; only the CENTRE moves to the
+        // driver. Centring on the fix without keeping the trip's endpoints would
+        // redraw the route from wherever the user happens to be, which is a
+        // different trip from the one the card states.
+        match live_position(node) {
+            Some((at_lat, at_lon)) => (at_lat, at_lon, poly),
+            None => (a, o, poly),
+        }
+    }
+
+    /// A `via:` list, as the route helpers' `lat,lon;lat,lon` argument.
+    ///
+    /// The items arrive already resolved to live calls and U+0001-separated (see
+    /// `source_binding`), in coordinate PAIRS. An odd count is a card that named
+    /// half a waypoint, and half a coordinate is not a place — so it yields no
+    /// vias rather than a route through the equator.
+    ///
+    /// The result is a VM expression, not a string: every coordinate is a call, so
+    /// the separators are concatenated around them at evaluation time. The leading
+    /// `""` is what makes the first `+` a string concatenation rather than an
+    /// addition of two numbers — without it a stop at 37,-122 became -85.
+    /// The PINS a map stands on the route it draws: origin, each stop, destination.
+    ///
+    /// Built from the same coordinates as the polyline, and that is the point. The
+    /// L2 card composed this string by hand and pushed it with
+    /// `ui.<id>.set_route_markers(mk)`; deriving it here from the SAME resolved
+    /// endpoints means the pins cannot land somewhere the line does not go.
+    ///
+    /// `None` when there is no complete trip — a lone origin pin on a map with no
+    /// route reads as a dropped destination rather than a route still arriving.
+    /// The two lines of a route's badge — its duration over its distance.
+    ///
+    /// Joined by `\u{1}` here rather than composed by the card, for the same reason
+    /// the pin string is: it is a payload the widget parses, not text anyone reads
+    /// as written. The card names WHICH trip; both halves come from that one source,
+    /// so the bubble cannot describe a different journey from the line under it.
+    pub(super) fn map_badge(node: &UiNode) -> Option<String> {
+        let (_, binding) = node.bindings.iter().find(|(n, _)| n == "summary")?;
+        let field = |f: &str| {
+            vm_call(&SourceBinding {
+                field: f.to_owned(),
+                ..binding.clone()
+            })
+        };
+        let (Some(dur), Some(dist)) = (field("duration"), field("distance")) else {
+            return None;
+        };
+        // A PRINTABLE separator. `\u{1}` is the obvious choice and does not survive:
+        // emitted through `{:?}` it becomes the six characters `\u{1}` in the DSL,
+        // which the VM hands to the widget as literal text, so the split never fires
+        // and both facts render as one run. A pipe cannot occur in a duration or a
+        // distance and survives every hop as itself.
+        Some(format!("{dur} + \"|\" + {dist}"))
+    }
+
+    pub(super) fn map_pins(node: &UiNode) -> Option<String> {
+        // A CHASE map gets none, and this is not a preference.
+        //
+        // R3.12 is a plan-screen requirement: pins mark the ends of a route you are
+        // looking at. A follow camera already draws the driver's puck, and in 3D the
+        // widget appends pin geometry to the ribbon rather than drawing it
+        // separately — measured on device, a follow3d map handed markers rendered
+        // NO route and NO tiles at all, a blank beige screen. The plan map with the
+        // same pins was fine, which is how it went unnoticed: I verified pins on the
+        // screen the requirement is about and not on the other one.
+        if live_position(node).is_some() {
+            return None;
+        }
+        let coord = |name: &str, axis: &str| map_coord(node, name, axis);
+        let (a, o) = (coord("from", "lat")?, coord("from", "lon")?);
+        let (b, p) = (coord("to", "lat")?, coord("to", "lon")?);
+        // kind 0 origin, 1 a stop, 2 the destination — the widget's own encoding.
+        let mut out = format!("\"\" + {a} + \",\" + {o} + \",0\"");
+        // The same resolution the polyline's waypoints use, so a stop that routes
+        // through gets a pin and one that does not, does not — for both slots.
+        for slot in ["via", "via2"] {
+            if let (Some(vlat), Some(vlon)) = (coord(slot, "lat"), coord(slot, "lon")) {
+                let _ = write!(out, " + \";\" + {vlat} + \",\" + {vlon} + \",1\"");
+            }
+        }
+        let _ = write!(out, " + \";\" + {b} + \",\" + {p} + \",2\"");
+        Some(out)
+    }
+
+    pub(super) fn via_string(joined: &str) -> Option<String> {
+        let parts: Vec<&str> = joined.split('\u{1}').filter(|p| !p.is_empty()).collect();
+        if parts.len() < 2 || !parts.len().is_multiple_of(2) {
+            return None;
+        }
+        let mut out = String::from("\"\"");
+        for (i, pair) in parts.chunks(2).enumerate() {
+            if i > 0 {
+                out.push_str(" + \";\"");
+            }
+            let _ = write!(out, " + {} + \",\" + {}", pair[0], pair[1]);
+        }
+        Some(out)
+    }
+
     /// The VM helper that answers a declared capability, if one does.
     ///
     /// The names differ because the two vocabularies were designed apart: L0
     /// says `sys.quote(ticker:)` and the VM says `sys.stock(symbol, key)`. This
     /// table is the whole of the translation, and a helper or field missing from
     /// it means the seeded value is used — never a wrong call.
-    fn vm_call(binding: &SourceBinding) -> Option<String> {
+    /// Public so a conformance test can ask, per capability and field, whether
+    /// this backend answers at all — the check §4 says is owed and that no test
+    /// comparing Splash with itself can perform.
+    pub fn vm_call(binding: &SourceBinding) -> Option<String> {
         let arg = |name: &str| {
             binding
                 .args
@@ -4555,31 +6530,503 @@ pub mod makepad {
                 .find(|(n, _)| n == name)
                 .map(|(_, v)| v.clone())
         };
+        // An argument bound for a NUMERIC position, or nothing.
+        //
+        // A numeric slot is interpolated UNQUOTED — `sys.weather({lat}, {lon}, …)` —
+        // so whatever lands there is code. A string slot is safe by construction
+        // because `{:?}` quotes it; this is the other half.
+        //
+        // Without it, `sys.weather(lat: "1 + sys.navsecs(1)")` passed the checker as a
+        // perfectly ordinary L0 card and lowered to `sys.weather(1 + sys.navsecs(1),
+        // …)`: arithmetic and a host call the card never declared, in a language whose
+        // defining property is that it HAS no expression form. Found in review.
+        //
+        // Two things may appear here. A call this lowering generated, which is ours
+        // and is trusted; and a literal number. Anything else is a card trying to
+        // write code into a slot for a coordinate, and yields no translation at all —
+        // the same outcome as an unknown field, so the value stays seeded rather than
+        // becoming an injection site.
+        let num = |name: &str| -> Option<String> {
+            let v = arg(name)?;
+            (v.starts_with("sys.") || v.trim().parse::<f64>().is_ok()).then_some(v)
+        };
         match binding.helper.as_str() {
+            // THE FOUR THAT ANSWERED NOTHING. Each is in the catalog, so a card may
+            // declare it and the checker accepts it — and each fell through to
+            // `None`, which means the realized literal, which on this host is an
+            // EMPTY blob. Every field rendered an em dash with no diagnostic, and
+            // `sys.locale` was reached for by six of the seven exemplars.
+            //
+            // A capability the catalog documents and the lowering cannot emit is
+            // worse than one that is absent: absence is a checker refusal the
+            // generator can read, and this was a screen that looked like working
+            // software showing no data. `every_catalog_capability_lowers_to_a_call`
+            // holds the whole set now.
+            "sys.locale" => {
+                let key = match binding.field.as_str() {
+                    f @ ("lang" | "temp_unit") => f,
+                    _ => return None,
+                };
+                Some(format!("sys.locale({key:?})"))
+            }
+            // Answered from the SAME front-page fetch `sys.news` reads, found by
+            // `id` rather than by row. Sharing the fetch is what makes a detail
+            // screen agree with the list it was opened from — a second endpoint
+            // could rank differently between the tap and the read.
+            "sys.news_item" => {
+                let id = arg("id")?;
+                let key = match binding.field.as_str() {
+                    f @ ("id" | "title" | "author" | "points" | "comments" | "url") => f,
+                    _ => return None,
+                };
+                Some(format!("sys.newsitem({id}, {key:?})"))
+            }
+            // §5.12's read-only half. The store is the same `user.json` the durable
+            // collections live in, so a preference is one more reference the user
+            // owns rather than a second kind of storage.
+            "sys.prefs" => {
+                let key = match binding.field.as_str() {
+                    f @ ("units" | "range" | "home" | "work" | "mode") => f,
+                    _ => return None,
+                };
+                Some(format!("sys.prefs({key:?})"))
+            }
+            // The extremes of the SAME close series the plot draws, off the same
+            // one fetch. `points` is not here: the catalog listed it, nothing could
+            // deliver a series as a value, and `StockPlot` fetches its own — so the
+            // catalog dropped it rather than this pretending to answer it.
+            "sys.series" => {
+                let ticker = arg("ticker")?;
+                let range = arg("range").unwrap_or_else(|| "\"d1\"".to_owned());
+                let key = match binding.field.as_str() {
+                    "min" => "low",
+                    "max" => "high",
+                    _ => return None,
+                };
+                Some(format!("sys.stockrange({ticker}, {range}, {key:?})"))
+            }
             "sys.quote" => {
                 let symbol = arg("ticker")?;
                 // What this helper can actually answer, verified against a live
                 // response rather than against its documentation.
                 //
-                // `open` is NOT here even though `sys.stock` accepts it: it
-                // resolves `regularMarketOpen`, and that key is absent from the
-                // Yahoo chart response while `regularMarketDayHigh`, `…DayLow`,
-                // `regularMarketPrice` and `chartPreviousClose` are all present.
-                // Emitting the call rendered `$—` on device where the seeded blob
-                // held a real opening price. Market cap and P/E are absent from
-                // the helper outright.
+                // `open` was excluded here for a while, because `sys.stock`
+                // resolved it from `regularMarketOpen` — a key absent from the
+                // Yahoo chart response — and emitting the call drew `$—` beside
+                // two live values. That was worked around at the wrong layer:
+                // falling back left a SEEDED opening price under a live one, and
+                // a stale number that looks real is worse than a visible gap.
+                // The helper reads the bar series now, so the call is emitted.
                 //
-                // This is the case the fallback exists for, and it took putting
-                // it on a phone to find — the DSL was well-formed and the unit
-                // tests were green.
+                // Market cap and P/E are still absent from the helper outright —
+                // the chart endpoint does not carry them — so those two fall back
+                // and always will until something fetches them.
+                //
+                // Every entry here is verified against a live response rather
+                // than against the helper's documentation, which is what the
+                // `open` episode cost: the DSL was well-formed and the unit tests
+                // were green, and only a phone showed the number was wrong.
                 let key = match binding.field.as_str() {
                     "last" => "price",
                     "pct" => "changepct",
                     "volume" => "vol",
-                    f @ ("name" | "change" | "high" | "low") => f,
+                    f @ ("name" | "change" | "changemoney" | "high" | "low" | "open") => f,
                     _ => return None,
                 };
                 Some(format!("sys.stock({symbol:?}, {key:?})"))
+            }
+            // A mover, by index. `sys.movers` takes the row's position rather
+            // than a ticker, so the loop index has to reach here — which it does
+            // because a binding inside a `for` carries the item's index in its
+            // field path.
+            //
+            // Every field below was checked against a live screener response,
+            // not against the helper's accepted-key list. That distinction is
+            // why `open` is absent from `sys.quote` above: the key is accepted
+            // there and the value is not in the payload, so emitting the call
+            // drew `$—` where the seeded blob held a real price.
+            // A place NAME resolved to a fact. `geocodenum` for the numbers the
+            // other helpers take as arguments, `geocode` for the words.
+            "sys.geocode" => {
+                let name = arg("name")?;
+                match binding.field.as_str() {
+                    "lat" | "lon" => Some(format!("sys.geocodenum({name:?}, {:?})", binding.field)),
+                    "name" | "country" | "admin1" | "timezone" => {
+                        Some(format!("sys.geocode({name:?}, {:?})", binding.field))
+                    }
+                    _ => None,
+                }
+            }
+            // The forecast. L0 names a FIELD; open-meteo wants a path, and the
+            // daily ones are indexed by the row being drawn.
+            "sys.weather" => {
+                let lat = num("lat")?;
+                let lon = num("lon")?;
+                let (row, field) = match binding.field.split_once('.') {
+                    Some((i, f)) if i.parse::<u32>().is_ok() => (i, f),
+                    _ => ("0", binding.field.as_str()),
+                };
+                let path = match field {
+                    "temp" => "current.temperature_2m".to_string(),
+                    "feels" => "current.apparent_temperature".to_string(),
+                    "humidity" => "current.relative_humidity_2m".to_string(),
+                    "wind" => "current.wind_speed_10m".to_string(),
+                    "pressure" => "current.surface_pressure".to_string(),
+                    "hi" => format!("daily.temperature_2m_max.{row}"),
+                    "lo" => format!("daily.temperature_2m_min.{row}"),
+                    "uv" => format!("daily.uv_index_max.{row}"),
+                    "precip" => format!("daily.precipitation_probability_max.{row}"),
+                    // The condition is a WMO code the host turns into a word, so
+                    // the card never states weather it has not observed.
+                    "cond" => {
+                        return Some(format!(
+                            "sys.weatherword({lat}, {lon}, {:?})",
+                            format!("daily.weather_code.{row}")
+                        ))
+                    }
+                    // `sys.dayname(lat, lon, n, locale)` — FOUR arguments. This
+                    // emitted three, putting `"en"` in the lat slot and the row
+                    // in the lon slot, so `n` coerced to 0 and every forecast row
+                    // said "Today". Seven rows of it, under seven different
+                    // temperatures, which is what made it look like a labelling
+                    // choice rather than a bug.
+                    "dayname" => return Some(format!("sys.dayname({lat}, {lon}, {row}, \"en\")")),
+                    // §5.11's aggregates — properties of the WEEK, not of a day,
+                    // and the reason a `TempBar` knows how long its bar should
+                    // be. Untranslated, both fell back to zero: every bar drew
+                    // against a range of nothing, so seven days of different
+                    // temperatures all rendered the same flat line.
+                    "min_lo" => return Some(format!("sys.weekmin({lat}, {lon})")),
+                    "max_hi" => return Some(format!("sys.weekmax({lat}, {lon})")),
+                    _ => return None,
+                };
+                Some(format!("sys.weather({lat}, {lon}, {path:?})"))
+            }
+            // Sunrise and sunset are STRINGS in the forecast the weather helper
+            // already fetches; `sys.daylight` answers only the arc progress, so
+            // the three L0 fields come from two different helpers.
+            "sys.daylight" => {
+                let lat = num("lat")?;
+                let lon = num("lon")?;
+                match binding.field.as_str() {
+                    "rise" => Some(format!("sys.weather({lat}, {lon}, \"daily.sunrise.0\")")),
+                    "set" => Some(format!("sys.weather({lat}, {lon}, \"daily.sunset.0\")")),
+                    "now" => Some(format!("sys.daylight({lat}, {lon})")),
+                    _ => None,
+                }
+            }
+            "sys.moonphase" => match binding.field.as_str() {
+                // The VM spells it `illum`; L0 spells it out.
+                "illumination" => Some("sys.moonphase(\"illum\")".to_string()),
+                "name" | "phase" => Some(format!("sys.moonphase({:?})", binding.field)),
+                _ => None,
+            },
+            "sys.airquality" => {
+                let lat = num("lat")?;
+                let lon = num("lon")?;
+                let path = match binding.field.as_str() {
+                    "aqi" => "current.us_aqi",
+                    "pm25" => "current.pm2_5",
+                    "pm10" => "current.pm10",
+                    "ozone" => "current.ozone",
+                    _ => return None,
+                };
+                Some(format!("sys.airquality({lat}, {lon}, {path:?})"))
+            }
+            // A headline feed, indexed like the movers list.
+            "sys.news" => {
+                let (index, field) = binding.field.split_once('.')?;
+                let row: u32 = index.parse().ok()?;
+                // `offset` is why the feed starts BELOW the lead. Ignoring it
+                // made row 0 of "latest" the lead story again.
+                let offset: u32 = arg("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
+                let index = row + offset;
+                let key = match field {
+                    "comments" => "comments",
+                    f @ ("title" | "url" | "author" | "points" | "id") => f,
+                    _ => return None,
+                };
+                Some(format!("sys.news({index}, {key:?})"))
+            }
+            "sys.photo" => {
+                let query = arg("query")?;
+                Some(format!("sys.photo({query:?})"))
+            }
+            // The activity app's whole data surface. Missing from this table, a
+            // declared `sys.places` source fell to the seeded blob -- which a
+            // LIVE card does not have -- so every venue row rendered an em dash
+            // and the card looked like a fetch that never landed. Measured:
+            // "list museums in Kyoto" produced eight rows of "—".
+            // The device's last-known fix, read synchronously from the platform
+            // global. No network, so unlike every other arm here it cannot be
+            // pending — but it CAN be absent, and the VM answers -9999 for a
+            // number with no fix rather than an em dash. A card guards with
+            // `ok` before trusting the coordinates.
+            //
+            // On Android this is fed by the platform LocationListener, which is
+            // the same path that currently crashes the shipping activity with a
+            // missing `LocationListener$-CC` desugaring class. So this arm makes
+            // the card correct and does not by itself make GPS usable.
+            // A TRIP's own facts — how long and how far — from the same cached
+            // fetch the map's polyline comes from, so asking costs nothing extra.
+            "sys.route" => {
+                // `mode:` DECIDES THE DURATION, and it was being dropped.
+                //
+                // The argument was accepted, documented and never emitted, so a
+                // card that asked how long a trip takes on foot was answered with
+                // how long it takes by car — the same number under a lit "Walk"
+                // chip, which is the shape of every defect this profile keeps
+                // finding: accepted, rendered, confidently wrong.
+                //
+                // The helper's own fields are the translation. `walk` and `bike`
+                // are the host's ESTIMATES from the measured distance (~5 km/h and
+                // ~15 km/h), because the public OSRM server serves the driving
+                // graph for every profile it is asked for — verified: `foot`,
+                // `bike` and `cycling` all return the driving answer. The estimate
+                // is the host's to make and to document; what §4 forbids is the
+                // CARD stating a duration, and it still states nothing.
+                //
+                // Distance is the same geometry either way, so it does not vary.
+                let mode = arg("mode").unwrap_or_default();
+                let key = match binding.field.as_str() {
+                    "duration" => match mode.trim() {
+                        "walk" => "walk",
+                        "bike" => "bike",
+                        _ => "min",
+                    },
+                    "distance" => "km",
+                    // The step list is a collection a card loops over, not a
+                    // scalar a call answers.
+                    _ => return None,
+                };
+                let a = num("from_lat")?;
+                let o = num("from_lon")?;
+                let b = num("to_lat")?;
+                let p = num("to_lon")?;
+                // The waypoints, as the helper's sixth argument: a `lat,lon;lat,lon`
+                // string built from the coordinate calls the card listed. Emitted
+                // as CONCATENATION rather than a literal, because each coordinate
+                // is a live call and the string has to be assembled where the
+                // numbers arrive.
+                //
+                // Omitted entirely when the card named none, so a stopless trip
+                // passes "" and takes the same two-coordinate path it always did.
+                let via = via_string(&arg("via").unwrap_or_default());
+                match via {
+                    Some(vias) => {
+                        Some(format!("sys.navroute({a}, {o}, {b}, {p}, {key:?}, {vias})"))
+                    }
+                    None => Some(format!("sys.navroute({a}, {o}, {b}, {p}, {key:?})")),
+                }
+            }
+            // Navigation's live half, and the one place a fabricated number was
+            // load-bearing in the app this replaces.
+            //
+            // `sys.navstep` needs a progress-along-the-route in metres. The
+            // original nav app supplied `sys.navsecs(period) * 15.2` — a looping
+            // clock times an assumed 34 mph — so the card announced turns for a
+            // vehicle that was moving whether or not anything was. It read as a
+            // demo because it WAS one: the instruction advanced on a timer.
+            //
+            // `sys.navprog` answers the same slot from the device's own fix, by
+            // projecting it onto the route. Every argument is now a measurement,
+            // so an instruction changes because the device moved. Both helpers
+            // share `sys.navroute`'s one cached fetch.
+            "sys.step" => {
+                let key = match binding.field.as_str() {
+                    "instruction" => "instr",
+                    // The helper calls it `rem`. `"remain"` is what the field is
+                    // called in L0's vocabulary and would have answered "" — the
+                    // helper returns the empty string for a field it does not
+                    // know, so the banner would have shown a live instruction
+                    // above a blank distance, which reads as "still loading"
+                    // rather than "asked for the wrong key".
+                    "remaining" => "rem",
+                    // How long is left, in minutes. The helper spells it
+                    // `remmin`; a card asks for `eta`, which is what the
+                    // number MEANS to whoever is driving.
+                    "eta" => "remmin",
+                    "progress" => "progress",
+                    _ => return None,
+                };
+                let a = num("from_lat")?;
+                let o = num("from_lon")?;
+                let b = num("to_lat")?;
+                let p = num("to_lon")?;
+                let at_lat = num("at_lat")?;
+                let at_lon = num("at_lon")?;
+                let along = format!("sys.navprog({a}, {o}, {b}, {p}, {at_lat}, {at_lon})");
+                if key == "progress" {
+                    return Some(along);
+                }
+                Some(format!("sys.navstep({a}, {o}, {b}, {p}, {along}, {key:?})"))
+            }
+            "sys.gps" => {
+                let key = match binding.field.as_str() {
+                    "accuracy" => "acc",
+                    f @ ("lat" | "lon" | "ok") => f,
+                    _ => return None,
+                };
+                Some(format!("sys.gps({key:?})"))
+            }
+            // Free-text PLACE search, indexed like `sys.places`. `searchnum`
+            // answers the numbers, `search` the words — the same split
+            // `geocode`/`geocodenum` uses, and for the same reason: a coordinate
+            // fed to another call has to arrive as a number.
+            "sys.search" => {
+                // An UNINDEXED read is row 0.
+                //
+                // A `count: 1` search is one place, and a card reads it as a
+                // record — `dest_place.name`, not `dest_place.0.name`. Requiring
+                // the index meant the nav card's destination fell back to the
+                // seed and rendered an em dash beside a correct card: the model
+                // had put "Osaka Castle" in the initial state, the checker
+                // accepted it, and the one thing missing was this arm's ability
+                // to answer the spelling the card used.
+                let (index, field) = match binding.field.split_once('.') {
+                    Some((i, f)) if i.parse::<u32>().is_ok() => (i, f),
+                    _ => ("0", binding.field.as_str()),
+                };
+                let query = arg("query")?;
+                match field {
+                    "lat" | "lon" => Some(format!("sys.searchnum({query:?}, {index}, {field:?})")),
+                    // `label` is the secondary line the helper has always answered —
+                    // city, region, country. Five results named "Stanford" are what
+                    // Photon returns for "Stanford", and without this they render as
+                    // five identical rows nobody can choose between.
+                    // `query` is the text that finds this hit again — what a
+                    // results row must carry, or picking the third "Stanford" sets
+                    // state to "Stanford" and routes to the first.
+                    "name" | "label" | "query" => {
+                        Some(format!("sys.search({query:?}, {index}, {field:?})"))
+                    }
+                    // `id` and `distance` have no answer in the helper, so they
+                    // fall back rather than emitting a call that returns "".
+                    _ => None,
+                }
+            }
+            "sys.places" => {
+                let (index, field) = binding.field.split_once('.')?;
+                index.parse::<u32>().ok()?;
+                let lat = num("lat")?;
+                let lon = num("lon")?;
+                let category = arg("category").unwrap_or_default();
+                // L0 says `distance`; the VM answers `dist`. Same translation
+                // job as `ticker`/`symbol` above.
+                let key = match field {
+                    "distance" => "dist",
+                    f @ ("name" | "lat" | "lon" | "category") => f,
+                    _ => return None,
+                };
+                Some(format!(
+                    "sys.places({lat}, {lon}, {category:?}, {index}, {key:?})"
+                ))
+            }
+            "sys.movers" => {
+                let (index, field) = binding.field.split_once('.')?;
+                index.parse::<u32>().ok()?;
+                let key = match field {
+                    "ticker" => "symbol",
+                    "last" => "price",
+                    "pct" => "changepct",
+                    "volume" => "vol",
+                    "mktcap" => "marketcap",
+                    f @ ("name" | "change" | "changemoney" | "high" | "low" | "open") => f,
+                    _ => return None,
+                };
+                let universe = binding
+                    .args
+                    .iter()
+                    .find(|(n, _)| n == "symbols")
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default();
+                Some(format!("sys.movers({index}, {key:?}, {universe:?})"))
+            }
+            // §5.12. Indexed like `sys.movers` — the host holds the user's list
+            // in order, so a row is addressed by position — but every value
+            // beside the ticker is FETCHED. The store holds only the reference,
+            // which is why this lowers to a live call at all rather than to the
+            // realized literal: a stored price would render stale and look live.
+            "sys.watchlist" => {
+                // The membership probe: `kept.has` on a watchlist source WITH
+                // a ticker argument answers whether THAT ticker is in the
+                // user's list — "1" or "0", synchronously from the published
+                // store. It is what lets a quote page show Add or Remove.
+                if binding.field == "has" {
+                    let ticker = arg("ticker")?;
+                    return Some(format!("sys.watchlist_has({ticker})"));
+                }
+                let (index, field) = binding.field.split_once('.')?;
+                index.parse::<u32>().ok()?;
+                let key = match field {
+                    "ticker" => "symbol",
+                    "last" => "price",
+                    "pct" => "changepct",
+                    "volume" => "vol",
+                    "mktcap" => "marketcap",
+                    f @ ("name" | "change" | "changemoney" | "high" | "low" | "open") => f,
+                    _ => return None,
+                };
+                Some(format!("sys.watchlist({index}, {key:?})"))
+            }
+            // A saved STORY. The id is the stored reference; everything beside
+            // it is fetched by that id, so a bookmark shows today's points for
+            // a story saved last month.
+            "sys.reading" => {
+                let (index, field) = binding.field.split_once('.')?;
+                index.parse::<u32>().ok()?;
+                let key = match field {
+                    f @ ("id" | "title" | "author" | "points" | "comments" | "url") => f,
+                    _ => return None,
+                };
+                Some(format!("sys.reading({index}, {key:?})"))
+            }
+            // The reader overlay's current page — published by the host the
+            // same way locale and the position fix are.
+            "sys.link" => {
+                let key = match binding.field.as_str() {
+                    f @ "url" => f,
+                    _ => return None,
+                };
+                Some(format!("sys.link({key:?})"))
+            }
+            // A followed topic. `name` is the stored word; the `top_*` keys
+            // are the first hit of a fresh search for it, fetched at read time
+            // like every other joined value in this table.
+            "sys.topics" => {
+                let (index, field) = binding.field.split_once('.')?;
+                index.parse::<u32>().ok()?;
+                let key = match field {
+                    f @ ("name" | "top_title" | "top_points" | "top_id") => f,
+                    _ => return None,
+                };
+                Some(format!("sys.topics({index}, {key:?})"))
+            }
+            // A saved place. `name`/`lat`/`lon` identify it and come from the
+            // store; the readings beside them are fetched, which is why this
+            // lowers to a call rather than to the realized literal.
+            "sys.cities" => {
+                let (index, field) = binding.field.split_once('.')?;
+                index.parse::<u32>().ok()?;
+                let key = match field {
+                    f @ ("name" | "lat" | "lon" | "temp" | "feels" | "hi" | "lo" | "cond"
+                    | "humidity" | "wind") => f,
+                    _ => return None,
+                };
+                Some(format!("sys.cities({index}, {key:?})"))
+            }
+            // The query is a path into declared state, so it reaches the helper
+            // as whatever the user committed — the card never builds it.
+            "sys.symbol_search" => {
+                let (index, field) = binding.field.split_once('.')?;
+                index.parse::<u32>().ok()?;
+                let query = arg("query")?;
+                let key = match field {
+                    "ticker" => "symbol",
+                    f @ ("name" | "exchange" | "kind") => f,
+                    _ => return None,
+                };
+                Some(format!("sys.symbol_search({query:?}, {index}, {key:?})"))
             }
             _ => None,
         }
@@ -4664,7 +7111,12 @@ pub mod makepad {
     }
 
     /// The live form, or `None` when any part of it does not survive.
-    fn live_valued(node: &UiNode) -> Option<String> {
+    ///
+    /// `pub(super)` because the kit's tick stamp (`live_call_of`) must compose
+    /// EXACTLY this — decoration, `format:` prefix, the `signed_money`
+    /// changemoney redirect, and the refusals — or the first tick redraws the
+    /// value without whichever part it dropped.
+    pub(super) fn live_valued(node: &UiNode) -> Option<String> {
         let decoration = decoration_of(node);
         live_value(
             node,
@@ -4689,10 +7141,25 @@ pub mod makepad {
 
     fn decoration_of(node: &UiNode) -> Decoration {
         Decoration {
-            unit: match arg(node, "unit") {
-                Some(NodeValue::Token(t)) if t == "c" || t == "f" => "°",
-                Some(NodeValue::Text(t)) if t == "c" || t == "f" => "°",
-                Some(NodeValue::Token(t)) if t == "pct" => "%",
+            unit: match token_arg(node, "unit") {
+                Some("c" | "f") => "°",
+                Some("pct") => "%",
+                // A duration is minutes, and "34" alone is not a duration —
+                // beside a distance it reads as another distance. The word is
+                // the theme's to supply, not the card's: a card that wrote
+                // `suffix: "min"` would be asserting the unit its own number
+                // came in, and would be wrong the day the helper answers hours.
+                Some("duration") => " min",
+                // What the backend actually answers: open-meteo serves
+                // `wind_speed_10m` in km/h and `surface_pressure` in hPa (no
+                // unit override in any fetch), and the L2 reference suffixed
+                // exactly these. Both tokens were catalog-legal and rendered
+                // NOTHING — a bare "12.5" beside a labelled tile, which reads
+                // as a number in whatever unit the reader assumes. (`index`
+                // is gone from the catalog instead: an index is dimensionless,
+                // so there is no honest suffix to give it.)
+                Some("speed") => " km/h",
+                Some("pressure") => " hPa",
                 _ => "",
             },
             glyph: match arg(node, "glyph") {
@@ -4721,6 +7188,38 @@ pub mod makepad {
             suffix,
             format: format_kind,
         } = decoration_of(node);
+        // A `value:` the backend can answer goes LIVE, exactly as `text:` does.
+        //
+        // This branch built its string from the REALIZED literal and never
+        // looked at the bindings, so every number on a card — temperature,
+        // high/low, price, distance — rendered whatever the host had seeded no
+        // matter how many capabilities were translated. Only `text:` went live,
+        // which is why a card could show a live city name above a stale
+        // temperature.
+        //
+        // NOT when the card declares a `format:`. Scaling and currency are
+        // applied HERE, to a realized number; a live call returns a string this
+        // side never sees, so going live would silently drop the format —
+        // measured, `compact` stopped turning 41200000 into "41.2M". A helper
+        // that formats its own output (`sys.movers` volume) already reads right;
+        // one that does not keeps the seeded value until the format can travel
+        // with the call.
+        if format_kind.is_none() {
+            // An L1 expression: emit the ARITHMETIC, so a live operand is still
+            // fetched and the multiply happens against data that arrives later.
+            // Realization already computed a number, but only for whatever the
+            // host seeded — which for a live card is nothing.
+            if let Some((_, shape)) = node.exprs.iter().find(|(n, _)| n == "value") {
+                if let Some(rendered) = render_expr(shape) {
+                    return decorate(rendered, &glyph, unit, &suffix);
+                }
+            }
+            if let Some((_, binding)) = node.bindings.iter().find(|(n, _)| n == "value") {
+                if let Some(call) = vm_call(binding) {
+                    return decorate(call, &glyph, unit, &suffix);
+                }
+            }
+        }
         match value {
             Some(NodeValue::Missing) => "\"—\"".into(),
             Some(v) => {
@@ -4732,8 +7231,57 @@ pub mod makepad {
                 };
                 format!("{:?}", format!("{glyph}{body}{unit}{suffix}"))
             }
-            None => expr_of(node, "text"),
+            // A `text:` argument decorates too. It did not, and every caption
+            // in `activity.card` read "300 m" where the card said
+            // "300 m away · quiet green space". Nothing caught it because every
+            // `suffix` in the original three cards pairs with `value:`, and only
+            // that path applied the decoration.
+            None => decorate(expr_of(node, "text"), &glyph, unit, &suffix),
         }
+    }
+
+    /// Wrap an already-emitted text in its glyph, unit and suffix.
+    ///
+    /// The text may be a literal (`"300 m"`) or a live call, so the decoration
+    /// is concatenated in the DSL rather than in Rust — `"a" + call + "b"` works
+    /// for both, and quoting a call would draw it instead of evaluating it.
+    /// This node's decoration applied to an already-built expression.
+    ///
+    /// The kit needs it to compose a live call for `fn tick()`: a value with a
+    /// `suffix:` must be set as `call + " left"`, not as the bare call. Excluding
+    /// decorated values left the most visibly moving number on a driving screen as
+    /// the only reason to rebuild the card, which defeats the tick entirely.
+    pub(super) fn decorated(node: &UiNode, body: String) -> String {
+        let Decoration {
+            glyph,
+            unit,
+            suffix,
+            ..
+        } = decoration_of(node);
+        decorate(body, &glyph, unit, &suffix)
+    }
+
+    fn decorate(body: String, glyph: &str, unit: &str, suffix: &str) -> String {
+        let head = glyph.to_string();
+        let tail = format!("{unit}{suffix}");
+        if head.is_empty() && tail.is_empty() {
+            return body;
+        }
+        // A plain quoted literal can be spliced directly, which keeps the common
+        // case readable rather than emitting `"" + "300 m" + " away"`.
+        if body.starts_with('"') && body.ends_with('"') && !body[1..body.len() - 1].contains('"') {
+            let inner = &body[1..body.len() - 1];
+            return format!("{:?}", format!("{head}{inner}{tail}"));
+        }
+        let mut out = String::new();
+        if !head.is_empty() {
+            out.push_str(&format!("{head:?} + "));
+        }
+        out.push_str(&body);
+        if !tail.is_empty() {
+            out.push_str(&format!(" + {tail:?}"));
+        }
+        out
     }
 
     /// How large a hero should be, given what it will DRAW.
@@ -4744,12 +7292,15 @@ pub mod makepad {
     /// drift.
     pub(super) fn hero_points(node: &UiNode, emitted: &str) -> u32 {
         let measured = sizing_text(node, emitted);
+        // The ramp, at 70%. Every text size in the theme came down by the same
+        // factor, so the hierarchy between a hero, a value and a caption is
+        // unchanged — only the scale is.
         match measured.trim_matches('"').chars().count() {
-            0..=4 => 62,
-            5..=6 => 50,
-            7..=8 => 40,
-            9..=12 => 32,
-            _ => 24,
+            0..=4 => 43,
+            5..=6 => 35,
+            7..=8 => 28,
+            9..=12 => 22,
+            _ => 17,
         }
     }
 
@@ -4814,9 +7365,25 @@ pub mod makepad {
         format_kind: Option<&str>,
     ) -> Option<String> {
         let (_, binding) = node.bindings.iter().find(|(n, _)| n == "value")?;
+        // `signed_money` puts the currency INSIDE the sign — `+$7.13` — and a
+        // prefix cannot express that: `"$" + "+7.13"` is `$+7.13`. This used to
+        // give up and keep the seeded value, which put a fixture's `+$3.10`
+        // beside a live `+3.55%`, two numbers describing one move and
+        // disagreeing. The helper composes the whole string, so the binding is
+        // redirected to the field that returns it already ordered.
+        let binding = &if format_kind == Some("signed_money") && binding.field == "change" {
+            SourceBinding {
+                field: "changemoney".to_owned(),
+                ..binding.clone()
+            }
+        } else {
+            binding.clone()
+        };
         let call = vm_call(binding)?;
         let prefix = match format_kind {
-            None | Some("signed_pct") => String::new(),
+            // Already whole: the helper returned the sign and the symbol in the
+            // right order, so nothing may be prepended.
+            None | Some("signed_pct") | Some("signed_money") => String::new(),
             Some("money") => "$".to_owned(),
             Some(_) => return None,
         };
@@ -4896,14 +7463,198 @@ pub mod makepad {
     fn element_body(node: &UiNode, depth: usize, out: &mut String) {
         let p = pad(depth);
         match node.kind.as_str() {
+            // A card holding a MAP is laid out the way the shipping nav card lays
+            // one out: the map is the BOTTOM layer of an overlay and everything
+            // else floats above it. Any other card keeps the ordinary column.
+            //
+            // This is not a style preference. A `MapView` is a fixed-pixel
+            // full-bleed surface — `Fill`/`Fit` "resolve to 0 and hide the map",
+            // so the shipping card's MANDATORY rules give every map an explicit
+            // 812 — and it paints its route ribbon through the GPU nav projection
+            // rather than inside a laid-out rect. Stacked in a column beneath the
+            // card's own content it draws straight over it.
+            //
+            // Measured, both ways round. With the map in a column: the route and
+            // its ribbon covered the whole screen and the FROM/TO fields, the
+            // duration and the Go button were simply not visible; in the drive
+            // screen the ribbon painted across the turn banner, cutting a street
+            // name in half. `a2app/apps/nav` has four maps and none of them is in
+            // a column — every one is the first child of a `flow: Overlay` with a
+            // floating sheet on top, and that is why they work.
+            //
+            // So the ORDER is inverted here relative to the card's text. A card
+            // reads "the trip, then the map"; the screen is "the map, with the
+            // trip over it". Which layer a role belongs on is presentation, and
+            // presentation is the backend's to decide — the card still says only
+            // what it has and in what order it matters.
             "Surface" => {
+                let map = node.children.iter().find(|c| c.kind == "Map");
+                let Some(map) = map else {
+                    let _ = writeln!(
+                        out,
+                        "{p}SolidView{{ width: Fill height: Fit flow: Down new_batch: true \
+                         draw_bg.color: {BASE} padding: {PAGE_PAD}"
+                    );
+                    children(node, depth, out);
+                    let _ = writeln!(out, "{p}}}");
+                    return;
+                };
+                // FIXED 812, not `Fill`. The shipping card's first MANDATORY rule
+                // is "root is `flow: Overlay`, `new_batch: true`, fixed
+                // `height: 812`", and the reason is the same one that governs the
+                // map itself: `Fill` resolves to 0 inside a `Fit` parent, and a
+                // card is an item in a chat list, so its container hugs content.
+                // Measured — `height: Fill` here rendered an entirely empty screen,
+                // map and sheet both, which is what a height of zero looks like.
                 let _ = writeln!(
                     out,
-                    "{p}SolidView{{ width: Fill height: Fit flow: Down new_batch: true \
-                     draw_bg.color: {BASE} padding: {PAGE_PAD}"
+                    "{p}SolidView{{ width: Fill height: 812 flow: Overlay new_batch: true \
+                     draw_bg.color: {BASE}"
                 );
-                children(node, depth, out);
+                element(map, depth + 1, out);
+                // The floating sheet, OPAQUE, in the shipping card's own colour.
+                //
+                // `height: Fit` so it is only as tall as what it holds — filling
+                // would put a panel over the whole map and swallow every pan and
+                // pinch that missed a control.
+                //
+                // Opaque because the theme's ordinary panel is `#ffffff12`, 7% white,
+                // which over a map is a window rather than a surface. Measured: the
+                // FROM and TO fields, the duration and the distance all rendered and
+                // all of them were unreadable, with the map's own road labels —
+                // "Bayshore Freeway", "22", "20" — drawn across the middle of them.
+                // Legible-on-anything is not something a translucent panel can be,
+                // and a map is the one backdrop a card cannot predict.
+                // 76 at the bottom where the shipping card uses 30. That card is a
+                // full-screen app card; an L0 card is an item in the chat list, and
+                // the app's composer bar sits over the bottom of it. Measured with
+                // 30: the duration, the distance and the Go button were half cut off
+                // behind "Reconnecting…". The sheet was positioned exactly where it
+                // was asked to be.
+                //
+                // AT THE BOTTOM, and that is the widget's requirement rather than a
+                // taste. `update_plan_preview_camera` fits the whole route and frames
+                // it "into the top band above the card's summary sheet" — so a sheet
+                // at the top sits exactly where the widget put the route. Measured:
+                // the trip's Saratoga end was behind the panel, and the camera was
+                // doing its job.
+                // A `.top` panel floats in its own band, above everything. That is
+                // where a turn instruction belongs and where the app this replaces
+                // puts it; the summary sheet is the bottom one.
+                let docked_top = |c: &UiNode| {
+                    c.kind == "Panel"
+                        && matches!(arg(c, "dock"), Some(NodeValue::Token(t)) if t == "top")
+                };
+                // A docked panel contributes its CHILDREN, not itself — the band and
+                // the sheet below ARE the panel's chrome, drawn here. Emitting the
+                // `Panel` too nested a second rounded fill inside each, and because
+                // that inner box is full-width the sheet's centring applied to the box
+                // rather than to the number in it. The kit backend had the same fault.
+                let docked_children = |child: &UiNode, depth: usize, out: &mut String| {
+                    for inner in &child.children {
+                        element(inner, depth, out);
+                    }
+                };
+                for child in node.children.iter().filter(|c| docked_top(c)) {
+                    let _ = writeln!(
+                        out,
+                        "{p}  View{{ width: Fill height: Fit flow: Down align: Align{{x: 0.5 y: 0.0}} \
+                         margin: Inset{{left: 8 top: 46 right: 8}}"
+                    );
+                    docked_children(child, depth + 2, out);
+                    let _ = writeln!(out, "{p}  }}");
+                }
+                let _ = writeln!(
+                    out,
+                    "{p}  View{{ width: Fill height: Fill flow: Down align: Align{{x: 0.5 y: 1.0}}"
+                );
+                let _ = writeln!(
+                    out,
+                    "{p}    RoundedView{{ width: Fill height: Fit flow: Down \
+                     draw_bg.color: #0f1620 draw_bg.border_radius: 22 \
+                     align: Align{{x: 0.5}} \
+                     margin: Inset{{left: 8 right: 8 bottom: 40}} \
+                     padding: Inset{{left: 14 top: 4 right: 14 bottom: 8}}"
+                );
+                for child in node
+                    .children
+                    .iter()
+                    .filter(|c| c.kind != "Map" && !docked_top(c))
+                {
+                    // Docked panels unwrap here too; anything else placed straight on
+                    // the surface is emitted whole, or a lone chip floated over the
+                    // map would lose the chip and keep its label.
+                    if child.kind == "Panel" && arg(child, "dock").is_some() {
+                        docked_children(child, depth + 3, out);
+                    } else {
+                        element(child, depth + 3, out);
+                    }
+                }
+                let _ = writeln!(out, "{p}    }}");
+                let _ = writeln!(out, "{p}  }}");
                 let _ = writeln!(out, "{p}}}");
+            }
+            // The card names a TRIP; the widget draws the route.
+            //
+            // `Map` was admitted by the catalog and lowered by NEITHER backend,
+            // so `nav.card` — which §1.0 cites as settling its central argument,
+            // "the same screen as the 664-line L2 exemplar in 54 lines" — drew
+            // "no makepad lowering for Map" where the map goes. Admitted at L0
+            // was true; the same screen was not.
+            //
+            // `MapView` does not fetch its own route despite the catalog note
+            // saying so: `nav_polyline` is a live field it renders and does not
+            // populate. But `sys.navroute` answers the polyline, and the helper's
+            // own comment prescribes exactly this pairing — so the fetch is the
+            // card's declared source resolved into a call, which is the same
+            // shape every other live value takes.
+            "Map" => {
+                let (lat, lon, poly) = map_route(node);
+                let mode = map_mode(node);
+                let zoom = match arg(node, "zoom") {
+                    Some(NodeValue::Number(n)) => trim_num(*n),
+                    _ => "15".to_owned(),
+                };
+                // The settings a `MapView` does not work without, taken from the
+                // SHIPPING nav card rather than reasoned about — `a2app/apps/nav`
+                // is a working four-map reference whose "MANDATORY rules" section
+                // says why each one matters, and the values below are the ones it
+                // uses.
+                //
+                // `use_local_mbtiles: false` is the one that bites. The widget
+                // defaults to a local `.mbtiles` file for offline development, and
+                // an L0 card cannot ship one — so the omission draws the land fill
+                // and nothing else. Measured: a nav card whose route ribbon and
+                // whose duration were both correct, over a blank beige rectangle,
+                // with `local mbtiles source missing` in logcat and nothing on
+                // screen saying so. The app's own emitter already carried these
+                // and this backend did not, which is the same one-backend gap
+                // `Field`, `Grid.cols` and `Map` itself were each found in.
+                //
+                // `max_zoom` differs BY MODE, as it does in the shipping card: a
+                // whole-route preview is capped at 16 and a driving view goes to
+                // 19. A narrow clamp also has a cost under a finger — a card
+                // sitting exactly on the floor cannot pinch out, so half the
+                // gesture is dead and the map reads as broken rather than clamped.
+                let max_zoom = if mode == "plan" { "16.0" } else { "19.0" };
+                // The ribbon is drawn in ground metres, so a route seen from the
+                // whole-trip view needs a far wider line than one seen from a car.
+                let ribbon = match mode {
+                    "plan" => "40.0",
+                    "2d" => "11.0",
+                    _ => "14.0",
+                };
+                let _ = write!(
+                    out,
+                    "{p}MapView{{ width: Fill height: 812 nav_mode: {mode:?} zoom: {zoom} \
+                     min_zoom: 3.0 max_zoom: {max_zoom} nav_route_width: {ribbon} \
+                     nav_period: 100 use_network: true use_local_mbtiles: false \
+                     center_lat: {lat} center_lon: {lon}"
+                );
+                if poly != "\"\"" {
+                    let _ = write!(out, " nav_polyline: {poly}");
+                }
+                let _ = writeln!(out, " }}");
             }
             "Photo" => {
                 // Overlay: photo, scrim, then the column. A `Fit` overlay takes
@@ -4966,13 +7717,25 @@ pub mod makepad {
                 let _ = writeln!(out, "{p}}}");
             }
             "Grid" => {
-                // Two columns, emitted as rows of two so the existing layout
-                // engine needs no grid primitive.
+                // Emitted as rows of `cols` so the existing layout engine needs
+                // no grid primitive.
+                //
+                // The column count was hardcoded to two, which is what every
+                // card in the corpus asks for — so `cols:` was accepted by the
+                // catalog, checked, and then ignored, and a `Grid(cols: 3)`
+                // rendered as pairs with nothing saying it had been overruled.
+                // Found by the conformance test rather than by a card.
+                let cols = match arg(node, "cols") {
+                    Some(NodeValue::Number(n)) if *n >= 1.0 => *n as usize,
+                    // A grid that did not say is a grid of two, which is what
+                    // the corpus means by a detail grid.
+                    _ => 2,
+                };
                 let _ = writeln!(
                     out,
                     "{p}View{{ width: Fill height: Fit flow: Down spacing: 8"
                 );
-                for pair in node.children.chunks(2) {
+                for pair in node.children.chunks(cols) {
                     let _ = writeln!(
                         out,
                         "{p}  View{{ width: Fill height: Fit flow: Right spacing: 8"
@@ -5045,6 +7808,18 @@ pub mod makepad {
                     trim_num(num_of(arg(node, "phase")))
                 );
             }
+            // Live satellite cloud imagery. An IMAGE rather than a shader, so it
+            // is the one visualisation whose helper answers a URL — the widget
+            // fetches what the URL points at, and the card said only where.
+            "Satellite" => {
+                let _ = writeln!(
+                    out,
+                    "{p}Image{{ width: Fill height: 190 fit: ImageFit.CropToFill \
+                     src: http_resource(sys.satellite({}, {})) }}",
+                    expr_of(node, "lat"),
+                    expr_of(node, "lon")
+                );
+            }
             "AqiContour" => {
                 // lat/lon/span, not a field: the widget fetches its own data.
                 // Emitting `draw_bg.idx` was writing a GPU uniform from the
@@ -5102,17 +7877,14 @@ pub mod makepad {
                 // Only constrain the width when the card asked. Forcing
                 // `width: Fill` made a long hero title wrap one character per
                 // line — "Top Movers" became "Top / Mover / s" on device.
-                let width = match arg(node, "width") {
-                    Some(NodeValue::Token(t)) if t == "fill" => " width: Fill",
-                    Some(NodeValue::Token(t)) if t == "fit" => " width: Fit",
-                    Some(NodeValue::Token(_)) => " width: Fit",
+                let width = match token_arg(node, "width") {
+                    Some("fill") => " width: Fill",
+                    Some(_) => " width: Fit",
                     _ => "",
                 };
-                let body = if arg(node, "value").is_some() || arg(node, "glyph").is_some() {
-                    valued(node)
-                } else {
-                    expr_of(node, "text")
-                };
+                // Always through `valued`: it falls back to `text:` and
+                // decorates either way.
+                let body = valued(node);
                 // A hero is sized for the ONE dominant value. "18°" fits at 62;
                 // "$184.20" clipped off the right edge on device. Scaling to fit
                 // is the runtime's call — the card says "this is the hero", not
@@ -5136,6 +7908,61 @@ pub mod makepad {
                     out,
                     "{p}{role}{{{width} text: {body} draw_text.color: {colour}{size}{} }}",
                     tap_binding(node)
+                );
+            }
+            // Content a swipe reveals — hidden until then. See the catalog.
+            "Reveal" => {
+                let _ = writeln!(
+                    out,
+                    "{p}l0reveal := View{{ width: Fill height: Fit flow: Down visible: false"
+                );
+                children(node, depth, out);
+                let _ = writeln!(out, "{p}}}");
+            }
+            // The one role that lets a card receive something the user typed.
+            //
+            // This backend admitted `Field` and lowered none of it, so the nav
+            // card's two editable rows — the whole of "the map planner cannot
+            // change its origin or destination" — rendered as two red warnings.
+            // The kit had it and this did not, which is the same one-backend gap
+            // `Grid.cols` and `Map` were each found in: a role is admitted once
+            // and must be lowered twice.
+            //
+            // `on_return` rather than a tap wrapper. A hit target over a text
+            // input eats the focus and there is nothing left to type into, and the
+            // payload here is what was TYPED — which does not exist until commit,
+            // so the target is assembled at that moment. `$$` is where the typed
+            // text goes.
+            "Field" => {
+                // A field that was not told a width FILLS, unlike a text run.
+                // `Field(width: .fill)` is what every card writes and the row it
+                // sits in is `Fit`, so a `Fit` field collapses to its content —
+                // an empty one to nothing at all, which is a search box that
+                // cannot be tapped.
+                let width = match token_arg(node, "width") {
+                    Some("fit") => " width: Fit",
+                    _ => " width: Fill",
+                };
+                let target = match arg(node, "on_commit") {
+                    Some(NodeValue::Event(event)) => {
+                        let json = serde_json::json!({ "e": event, "k": node.key, "v": "$$" });
+                        format!("l0:{json}")
+                    }
+                    _ => String::new(),
+                };
+                let (head, tail) = target.split_once("$$").unwrap_or((target.as_str(), ""));
+                let commit = if target.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " on_return: |t| agent.notify(\"l0\", {{target: {head:?} + t + {tail:?}}})"
+                    )
+                };
+                let _ = writeln!(
+                    out,
+                    "{p}TextInput{{{width} height: 48 text: {} empty_text: {}{commit} }}",
+                    expr_of(node, "text"),
+                    expr_of(node, "placeholder"),
                 );
             }
             other => {
@@ -5183,6 +8010,13 @@ pub struct InstanceStore {
 impl InstanceStore {
     pub fn get(&self, key: &str, field: &str) -> Option<&serde_json::Value> {
         self.cells.get(key)?.get(field)
+    }
+
+    /// Write a cell. Public because a HOST owns when a captured initial becomes
+    /// durable — see `RealizeReport::captured`. The realizer decides what was
+    /// captured; only the host can decide it is now the state's value.
+    pub fn set_cell(&mut self, key: &str, field: &str, value: serde_json::Value) {
+        self.set(key, field, value);
     }
 
     fn set(&mut self, key: &str, field: &str, value: serde_json::Value) {
@@ -5364,7 +8198,30 @@ pub fn dispatch_with_data(
     payload: Option<&serde_json::Value>,
     data: &serde_json::Value,
 ) -> bool {
-    !dispatch_writes(source, store, instance_key, event, payload, data).is_empty()
+    let (changed, durable) = dispatch_writes(source, store, instance_key, event, payload, data);
+    !changed.is_empty() || !durable.is_empty()
+}
+
+/// A write to a durable collection that the HOST must perform (§5.12).
+///
+/// L0 reports it and never performs it, exactly as `source_plan` reports a fetch
+/// it never performs. The card names a capability; only the host knows what
+/// answers it, and only the host owns the store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CollectionWrite {
+    /// The declared source name the card wrote through — `watch`.
+    pub source: String,
+    /// The capability behind it — `sys.watchlist`.
+    pub helper: String,
+    /// `append`, `remove`, `set` or `clear`, already checked against what the
+    /// capability declares it accepts.
+    pub op: String,
+    /// The payload the tapped element carried. Empty for `clear`.
+    pub value: String,
+    /// For a KEYED capability (`sys.prefs`), the key the write lands under —
+    /// the source's single declared field, which the checker guarantees exists.
+    /// Empty for list capabilities, whose store is named by the helper alone.
+    pub field: String,
 }
 
 /// What a dispatch did, and what it obliges the host to do next.
@@ -5381,11 +8238,17 @@ pub struct DispatchOutcome {
     /// Whether any transition committed. False means refused or unknown — see
     /// §3, a batch that does not fully resolve does not partially apply.
     pub applied: bool,
-    /// The state paths written, in the order the batch wrote them.
+    /// The state paths whose value MOVED, in the order the batch wrote them. A
+    /// transition that writes the value already there is committed and not
+    /// reported: a host rebuilds on any non-empty outcome, and rebuilding a card
+    /// to redraw the identical screen is the cost of tapping a selected chip.
     pub changed: Vec<String>,
     /// The declared sources those writes invalidate, following the dependency
     /// cascade. The host should refetch these before the next realization.
     pub stale: Vec<String>,
+    /// §5.12 writes the host must perform against its durable store, in order.
+    /// L0 reports them and never performs them.
+    pub writes: Vec<CollectionWrite>,
 }
 
 /// Apply an event and report what it invalidated.
@@ -5401,18 +8264,29 @@ pub fn dispatch_reporting(
     payload: Option<&serde_json::Value>,
     data: &serde_json::Value,
 ) -> DispatchOutcome {
-    let changed = dispatch_writes(source, store, instance_key, event, payload, data);
-    if changed.is_empty() {
+    let (changed, writes) = dispatch_writes(source, store, instance_key, event, payload, data);
+    if changed.is_empty() && writes.is_empty() {
         return DispatchOutcome::default();
     }
     // `stale_sources` takes the changed names; a write to `selected` is a change
     // to `selected` as a source argument reads it.
-    let names: Vec<&str> = changed.iter().map(String::as_str).collect();
-    let stale = stale_sources(source, &names);
+    //
+    // A durable write invalidates the source it wrote THROUGH, and anything
+    // reading that source, by the same cascade. Appending to a watchlist and not
+    // refetching it is a card that swallowed the tap.
+    let mut names: Vec<&str> = changed.iter().map(String::as_str).collect();
+    names.extend(writes.iter().map(|w| w.source.as_str()));
+    let mut stale = stale_sources(source, &names);
+    for w in &writes {
+        if !stale.contains(&w.source) {
+            stale.push(w.source.clone());
+        }
+    }
     DispatchOutcome {
         applied: true,
         changed,
         stale,
+        writes,
     }
 }
 
@@ -5423,10 +8297,10 @@ fn dispatch_writes(
     event: &str,
     payload: Option<&serde_json::Value>,
     data: &serde_json::Value,
-) -> Vec<String> {
+) -> (Vec<String>, Vec<CollectionWrite>) {
     let mut sink = Diagnostics::default();
     let Some(tokens) = lex(source, &mut sink) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     let card = Parser::new(&tokens, &mut sink).parse_card();
 
@@ -5463,11 +8337,11 @@ fn dispatch_writes(
                 &instance_key[..boundary],
                 Some((component, schema_id(component))),
             ),
-            None => return Vec::new(),
+            None => return (Vec::new(), Vec::new()),
         },
         None => match card.events.iter().find(|e| e.name == event) {
             Some(d) => (d, &card.states, CARD_STATE_KEY, None),
-            None => return Vec::new(),
+            None => return (Vec::new(), Vec::new()),
         },
     };
 
@@ -5479,11 +8353,54 @@ fn dispatch_writes(
     // left the earlier writes standing when a later one could not be computed —
     // a half-applied event, which is the thing atomicity exists to prevent.
     // Stage every write first, commit only if the whole batch resolves.
-    let mut staged: Vec<(String, serde_json::Value)> = Vec::new();
+    // (target, next, effective current) — the third is what decides whether this
+    // transition is a change at all.
+    let mut staged: Vec<(String, serde_json::Value, serde_json::Value)> = Vec::new();
+    // §5.12 writes are staged alongside the cells, so §3's atomicity covers both:
+    // a batch that sets a preference AND appends to a list must do neither if the
+    // preference cannot be resolved.
+    let mut durable: Vec<CollectionWrite> = Vec::new();
 
     for transition in &declared.transitions {
+        // A source target leaves the card. Nothing is written here — the host
+        // owns the store — so this records the write and moves on, the same way
+        // `source_plan` records a fetch it will never perform.
+        if let Some(decl) = card.sources.iter().find(|s| s.name == transition.target) {
+            let op = match &transition.form {
+                Form::Append => "append",
+                Form::Remove => "remove",
+                Form::Clear => "clear",
+                Form::Set(_) => "set",
+                _ => return (Vec::new(), Vec::new()),
+            };
+            // All but `clear` carry the payload, so a tap without one is a no-op
+            // rather than a write of nothing — the same choice `set` makes.
+            let value = match (op, payload) {
+                ("clear", _) => String::new(),
+                (_, Some(serde_json::Value::String(v))) => v.clone(),
+                (_, Some(v)) => v.to_string(),
+                (_, None) => return (Vec::new(), Vec::new()),
+            };
+            let field = decl
+                .args
+                .iter()
+                .find(|(n, _)| n == "fields")
+                .and_then(|(_, a)| match a {
+                    SourceArg::List(l) if l.len() == 1 => Some(l[0].clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            durable.push(CollectionWrite {
+                source: decl.name.clone(),
+                helper: decl.helper.clone(),
+                op: op.to_owned(),
+                value,
+                field,
+            });
+            continue;
+        }
         let Some(state) = states.iter().find(|s| s.path == transition.target) else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
         // The declared initial, path-valued or not. `clear` and a first `cycle`
         // both fell back to the SHAPE default here, so a card whose initial
@@ -5496,9 +8413,28 @@ fn dispatch_writes(
         let current = staged
             .iter()
             .rev()
-            .find(|(t, _)| *t == transition.target)
-            .map(|(_, v)| v.clone())
+            .find(|(t, _, _)| *t == transition.target)
+            .map(|(_, v, _)| v.clone())
             .or_else(|| store.get(instance_key, &transition.target).cloned())
+            // The HOST-SEEDED value, and it has to be here because it is here in
+            // the renderer.
+            //
+            // Card state resolves store → data → initial when the screen is drawn.
+            // A transition resolved store → initial, skipping the middle, so a
+            // state the host seeded was cycled from a value nobody was looking at:
+            // the nav card seeded `screen: "drive"`, the drive screen rendered, and
+            // `End` — a `cycle(.plan, .drive)` — read the declared initial `.plan`
+            // and advanced to `.drive`. The tap applied, the store changed, the card
+            // re-resolved, and it landed on the screen it was already on. Every
+            // layer reported success.
+            //
+            // Card scope only, since that is the only scope the renderer reads the
+            // blob for; a component's cells are per-instance and have no key in it.
+            .or_else(|| {
+                (instance_key == CARD_STATE_KEY)
+                    .then(|| data.get(&transition.target).cloned())
+                    .flatten()
+            })
             .or_else(|| declared_initial.clone())
             .unwrap_or_else(|| initial_for(&state.shape));
 
@@ -5516,16 +8452,48 @@ fn dispatch_writes(
                     .unwrap_or(0);
                 serde_json::Value::String(members[(at + 1) % members.len()].clone())
             }
+            // The collection walk. Rows come from the dispatch data — the
+            // host merges durable rows in before dispatch — and the walk wraps.
+            // A value not in the list lands on the first (next) or last (prev)
+            // row: the swipe that discovers the list starts at its edge.
+            (Form::Next(path) | Form::Prev(path), Shape::Text) => {
+                let forward = matches!(&transition.form, Form::Next(_));
+                let (root, field) = path.split_once('.').unwrap_or((path.as_str(), ""));
+                let rows: Vec<String> = data
+                    .get(root)
+                    .and_then(|v| v.as_array())
+                    .map(|rows| {
+                        rows.iter()
+                            .filter_map(|r| r.get(field))
+                            .filter_map(|v| v.as_str())
+                            .map(|s| s.to_owned())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if rows.is_empty() {
+                    // Nothing to walk: refuse the batch so the gesture that
+                    // carried it falls through instead of consuming the swipe.
+                    return (Vec::new(), Vec::new());
+                }
+                let here = current.as_str().and_then(|c| rows.iter().position(|r| r == c));
+                let at = match (here, forward) {
+                    (Some(i), true) => (i + 1) % rows.len(),
+                    (Some(i), false) => (i + rows.len() - 1) % rows.len(),
+                    (None, true) => 0,
+                    (None, false) => rows.len() - 1,
+                };
+                serde_json::Value::String(rows[at].clone())
+            }
             (Form::Set(source), _) => match source {
                 SetSource::Payload => match payload {
                     // The one value that arrives from OUTSIDE, so it is the one
                     // that has to be checked at runtime: every other set form is
                     // decided against the declared shape at check time.
                     Some(v) if value_fits_shape(&state.shape, v) => v.clone(),
-                    Some(_) => return Vec::new(),
+                    Some(_) => return (Vec::new(), Vec::new()),
                     // No payload is a no-op rather than a silent clear: falling
                     // back to the initial would look like a deliberate reset.
-                    None => return Vec::new(),
+                    None => return (Vec::new(), Vec::new()),
                 },
                 // A path READS. Treating it as the payload meant
                 // `n: set(config.answer)` wrote whatever the tap carried — or
@@ -5534,28 +8502,47 @@ fn dispatch_writes(
                     Some(v) if value_fits_shape(&state.shape, &v) => v,
                     // Unresolvable or ill-shaped: the batch cannot complete, and
                     // §3 says a batch is all or nothing.
-                    _ => return Vec::new(),
+                    _ => return (Vec::new(), Vec::new()),
                 },
                 SetSource::Token(t) | SetSource::Text(t) => serde_json::Value::String(t.clone()),
                 SetSource::Num(n) => serde_json::Value::from(*n),
                 SetSource::Bool(b) => serde_json::Value::Bool(*b),
             },
-            _ => return Vec::new(),
+            _ => return (Vec::new(), Vec::new()),
         };
-        staged.push((transition.target.clone(), next));
+        staged.push((transition.target.clone(), next, current));
     }
 
-    // Commit, and report what was written. The targets are what a host needs
-    // to know which sources went stale -- discarding them is why §5.9's
-    // invalidation story had pieces that nothing joined.
+    // Commit, and report what CHANGED. The targets are what a host needs to know
+    // which sources went stale -- discarding them is why §5.9's invalidation
+    // story had pieces that nothing joined.
+    //
+    // A transition that writes the value already there is not a change, and
+    // reporting it as one is not free: a host rebuilds a card on any non-empty
+    // outcome, so tapping the already-selected chip cost a full realize, a full
+    // lowering, a full VM pass over every live call on the card, and a widget
+    // rebuild -- to arrive at the identical screen. Measured on the stock card,
+    // that is 11 nodes and every `sys.movers` call re-issued for nothing; the
+    // weather card is 62 nodes and 28 calls.
+    //
+    // The comparison is against the EFFECTIVE current value -- an earlier write
+    // in this same batch, else the stored cell, else the declared initial -- so
+    // a first tap that selects what was already the initial is a no-op too.
+    //
+    // The batch is still staged and validated in full before any of this: §3's
+    // atomicity is about whether a batch may partially apply, not about which of
+    // its transitions moved. A batch that sets one cell to a new value and
+    // another to the value it holds reports the first and rebuilds once.
     let mut written = Vec::new();
-    for (target, value) in staged {
+    for (target, value, previous) in staged {
+        let unchanged = value == previous;
         store.set(instance_key, &target, value);
-        if !written.contains(&target) {
-            written.push(target);
+        if unchanged || written.contains(&target) {
+            continue;
         }
+        written.push(target);
     }
-    written
+    (written, durable)
 }
 
 // ───────────────────────────────────────────────────────────────── source plan ──
@@ -5948,10 +8935,29 @@ pub fn patch_points(source: &str, changed: &[&str]) -> Vec<String> {
 /// The measurable claim behind "one event, one state change, one reconciliation
 /// pass": toggling a unit should touch the records that read it, not the tree.
 pub fn dirty_records(source: &str, changed: &[&str]) -> Vec<String> {
-    let roots: Vec<String> = changed.iter().map(root_of).collect();
+    // Follow the SOURCE cascade first, exactly as `patch_points` does.
+    //
+    // This filtered on the changed roots alone, so a state that reaches a view
+    // only through a source argument dirtied nothing: `sys.quote(ticker: sel)`
+    // read by `TextHero(value: q.last)` reported no record when `sel` changed,
+    // because no record reads `sel` — they read `q`. That is the stock card's
+    // whole shape, and it is the under-approximating direction, which the
+    // profile is explicit shows stale data.
+    //
+    // `patch_points` had this and this did not, which is the more dangerous half
+    // of a disagreement between two functions answering one question: the coarse
+    // one is what a host reaches for first.
+    let mut sink = Diagnostics::default();
+    let invalidated = match lex(source, &mut sink) {
+        Some(tokens) => {
+            let card = Parser::new(&tokens, &mut sink).parse_card();
+            invalidated_by(&card, changed)
+        }
+        None => changed.iter().map(root_of).collect(),
+    };
     record_dependencies(source)
         .into_iter()
-        .filter(|d| d.reads.iter().any(|r| roots.iter().any(|c| c == r)))
+        .filter(|d| d.reads.iter().any(|r| invalidated.iter().any(|c| c == r)))
         .map(|d| d.record)
         .collect()
 }
@@ -5972,19 +8978,32 @@ fn collect_reads(element: &Element, reads: &mut Vec<String>, pulls: &mut Vec<Str
     // A loop binder shadows: `for d in week` makes `d` local, not a dependency.
     let binders = &element.binders;
 
-    for arg in &element.args {
-        match &arg.value {
-            Operand::Path(p) | Operand::Predicate { path: p, .. } => {
-                let root = root_of(p);
-                if !binders.contains(&root) {
-                    reads.push(root);
-                }
+    // EVERY path an operand reads is a dependency, however it is nested.
+    //
+    // This matched shapes one at a time and missed two of them, in the direction
+    // that is a correctness bug rather than a cost: a comparison's right operand
+    // (`active: a == b` never re-realized when `b` changed) and a guard's right
+    // operand beyond a bare path (`when a == b * 2` likewise). Both render a
+    // stale screen, which is what this whole mechanism exists to prevent.
+    //
+    // `expr_paths` already walks all three forms, and is the same function §4's
+    // must-read rule and the checker use — so a shape it learns is picked up
+    // here for free rather than needing a third arm added in a third place.
+    let collect = |operand: &Operand, reads: &mut Vec<String>| {
+        let mut paths = Vec::new();
+        expr_paths(operand, &mut paths);
+        for p in paths {
+            let root = root_of(&p);
+            if !binders.contains(&root) {
+                reads.push(root);
             }
-            _ => {}
         }
+    };
+    for arg in &element.args {
+        collect(&arg.value, reads);
     }
-    if let Some(Operand::Path(p)) = element.rhs.as_ref() {
-        reads.push(root_of(p));
+    if let Some(rhs) = element.rhs.as_ref() {
+        collect(rhs, reads);
     }
 
     if element.is_reference || !element.name.is_empty() {
@@ -6172,7 +9191,10 @@ pub mod kit {
     /// loses its temperature bars still looks complete (§1.1).
     fn kit_fn(role: &str) -> Option<&'static str> {
         Some(match role {
+            "Field" => "l0_field",
+            "Map" => "l0_map",
             "Surface" => "l0_surface",
+            "Reveal" => "l0_reveal",
             "Col" => "l0_col",
             "Row" => "l0_row",
             "Grid" => "l0_grid",
@@ -6182,6 +9204,12 @@ pub mod kit {
             "Chip" => "l0_chip",
             "Photo" => "l0_photo",
             "WeatherIcon" => "l0_weathericon",
+            "TempBar" => "l0_tempbar",
+            "SunArc" => "l0_sunarc",
+            "MoonPhase" => "l0_moonphase",
+            "AqiContour" => "l0_aqicontour",
+            "Satellite" => "l0_satellite",
+            "StockPlot" => "l0_stockplot",
             "TextHero" => "l0_hero",
             "TextTitle" => "l0_title",
             "TextBody" => "l0_body",
@@ -6197,6 +9225,29 @@ pub mod kit {
         node.args.iter().find(|(n, _)| n == name).map(|(_, v)| v)
     }
 
+    /// A `TokenOrPath` argument, whichever it turned out to be.
+    ///
+    /// `unit`, `width`, `view`, `controls` and `range` each admit a token OR a path
+    /// to card state, and REALIZE ERASES THE DIFFERENCE: `view: .tilted` survives as
+    /// `Token("tilted")`, while `view: view` reading `.tilted` out of the state
+    /// arrives as `Text("tilted")`. A reader that matches only `Token` therefore sees
+    /// nothing whenever the card chose the state form and silently takes its default.
+    ///
+    /// That is what broke the nav card's on-map 2D/3D switch. The chip relabelled on
+    /// every tap because its own guard reads the state directly, so the toggle looked
+    /// live — but `view` reached the lowering as `Text` and the camera stayed flat on
+    /// both settings. A control that responds and changes nothing is worse than one
+    /// that is missing; the screen asserts the camera tilted and it did not.
+    ///
+    /// Every `TokenOrPath` read goes through here so the class cannot come back one
+    /// argument at a time.
+    fn token_arg<'a>(node: &'a UiNode, name: &str) -> Option<&'a str> {
+        match arg(node, name) {
+            Some(NodeValue::Token(t) | NodeValue::Text(t)) => Some(t.as_str()),
+            _ => None,
+        }
+    }
+
     /// A statistic's direction — the SIGN, not the colour.
     ///
     /// Red-versus-green is presentation and belongs to the kit; "this value
@@ -6210,6 +9261,36 @@ pub mod kit {
             Some(NodeValue::Token(t)) if t == "up" => 1,
             Some(NodeValue::Token(t)) if t == "down" => -1,
             _ => 0,
+        }
+    }
+
+    /// The tint argument, as a LIVE call where the backend can answer it.
+    ///
+    /// `direction` reads the realized value, which is the seeded one. Once
+    /// `value:` went live the two disagreed on screen: the top-movers list drew
+    /// `+29.45%` in red because the seed behind that row was negative, and
+    /// `+29.20%` in green two rows down because that one was positive. Four
+    /// positive rows, two of them red — two numbers describing one move,
+    /// side by side, contradicting each other. That is precisely what §4 exists
+    /// to prevent, and making values live without making tints live is what
+    /// turned a hidden staleness into a visible contradiction.
+    ///
+    /// No kit change is needed: `l0_tint` branches on `dir > 0` / `dir < 0`, so
+    /// it takes the SIGN of whatever it is handed and a raw change value works
+    /// exactly as `1` or `-1` did.
+    ///
+    /// `None` means "do not tint at all" — no `tint:` was declared. A declared
+    /// tint the backend cannot answer still falls back to the realized sign,
+    /// which is the same choice every other binding makes.
+    fn tint_expr(node: &UiNode) -> Option<String> {
+        if let Some((_, binding)) = node.bindings.iter().find(|(n, _)| n == "tint") {
+            if let Some(call) = makepad::vm_call(binding) {
+                return Some(call);
+            }
+        }
+        match direction(node) {
+            0 => None,
+            d => Some(d.to_string()),
         }
     }
 
@@ -6240,6 +9321,25 @@ pub mod kit {
         let Some(NodeValue::Event(event)) = arg(node, "on_tap") else {
             return None;
         };
+        // A payload bound to a source is emitted as a LIVE CALL, not as the
+        // value realization happened to see.
+        //
+        // The two disagree whenever the row's text is live and its payload is
+        // not, which is every card with no seed blob: the screen said `ATKR` and
+        // the tap carried `""`, so the write was refused and the row read as
+        // dead. Worse when a blob IS present and stale — the tap then carries a
+        // different company from the one the user is looking at.
+        //
+        // The result is a DSL EXPRESSION, so the caller emits it unquoted.
+        if let Some((_, binding)) = node.bindings.iter().find(|(n, _)| n == "value") {
+            if let Some(call) = makepad::vm_call(binding) {
+                let head = serde_json::json!({ "e": event, "k": node.key });
+                let head = head.to_string();
+                // `{"e":…,"k":…}` → `l0:{"e":…,"k":…,"v":"` + <call> + `"}`
+                let open = format!("l0:{},\"v\":\"", head.trim_end_matches('}'));
+                return Some(format!("{open:?} + {call} + {:?}", "\"}"));
+            }
+        }
         let value = match arg(node, "value") {
             Some(NodeValue::Text(t)) => t.clone(),
             Some(NodeValue::Number(n)) => makepad::trim_num(*n),
@@ -6247,23 +9347,183 @@ pub mod kit {
             _ => String::new(),
         };
         let json = serde_json::json!({ "e": event, "k": node.key, "v": value });
+        Some(format!("{:?}", format!("l0:{json}")))
+    }
+
+    /// A visualisation's argument, as the kit takes it.
+    ///
+    /// A missing one is `0` rather than an omission: these functions have fixed
+    /// arity, and a card that failed to supply a bound would otherwise not
+    /// parse. Zero at least draws something visibly wrong, where a parse error
+    /// takes the whole card down.
+    /// A scalar argument — live where the backend can answer it.
+    ///
+    /// The bindings were never consulted here, so `WeatherIcon(cond: d.cond)`
+    /// lowered the weather code realization happened to see. Against a seed blob
+    /// that is right by accident; on a live card, which carries no blob, every
+    /// icon in a seven-day forecast fell back to the same default. Exactly the
+    /// defect `tint` had, in the other place that reads a realized value and
+    /// emits a literal — and the icon is the harder one to notice, because a
+    /// wrong icon looks precisely like a right one.
+    fn scalar_of(node: &UiNode, name: &str) -> String {
+        scalar_inner(node, name, false)
+    }
+
+    /// The same, COERCED to a number.
+    ///
+    /// Every `sys.*` helper answers with a string, because a string is what a
+    /// card renders. A visualisation's parameters are not rendered — they drive a
+    /// shader uniform, and the node model types them as numbers, so a string
+    /// arrives as `None` and the uniform gets 0.
+    ///
+    /// Measured: a `TempBar`'s `lo`, `hi`, `min` and `max` were all live calls
+    /// and all four reached the widget as zero, so seven days of different
+    /// temperatures drew seven identical flat bars against a range of nothing.
+    /// The same defect as an L1 operand subtracting strings, in the other place
+    /// a number is needed and a string is what a helper gives.
+    fn scalar_num_of(node: &UiNode, name: &str) -> String {
+        scalar_inner(node, name, true)
+    }
+
+    fn scalar_inner(node: &UiNode, name: &str, numeric: bool) -> String {
+        if let Some((_, binding)) = node.bindings.iter().find(|(n, _)| n == name) {
+            if let Some(call) = makepad::vm_call(binding) {
+                return if numeric {
+                    format!("sys.num({call})")
+                } else {
+                    call
+                };
+            }
+        }
+        match arg(node, name) {
+            Some(NodeValue::Number(n)) => makepad::trim_num(*n),
+            Some(NodeValue::Text(t)) => format!("{t:?}"),
+            Some(NodeValue::Token(t)) => format!("{t:?}"),
+            _ => "0".into(),
+        }
+    }
+
+    /// A declared width, as the kit call that applies it.
+    ///
+    /// Composed around the role rather than threaded into it, for the reason
+    /// `tint` is: `width` is optional on every text role, and a parameter on
+    /// all seven kit functions would have six passing a default forever.
+    ///
+    /// `fit` returns `None` because it is already this backend's default, and
+    /// emitting a wrapper for it would say the same thing twice. The fixed
+    /// tokens pass the TOKEN and not a pixel count: how wide a rank column is
+    /// is the theme's answer, and deciding here would put styling in the
+    /// lowering.
+    fn width_wrap(node: &UiNode) -> Option<(&'static str, String)> {
+        let Some(t) = token_arg(node, "width") else {
+            return None;
+        };
+        match t {
+            "fill" => Some(("l0_wide(", ")".into())),
+            // NOT a no-op, though it is the default for a text role: `l0_row`
+            // fills, so a row can only stop filling by saying so.
+            "fit" => Some(("l0_fit(", ")".into())),
+            "rank" | "day" | "temp" | "label" => Some(("l0_colw(", format!(", {t:?})"))),
+            _ => None,
+        }
+    }
+
+    /// A `Field`'s commit target, carrying what the user typed.
+    ///
+    /// `on_commit` is not `on_tap` and must not be wrapped in a hit target: the
+    /// payload is the TEXT, which does not exist until the moment of commit, so
+    /// the target is assembled at that moment from the value the backend hands
+    /// back. `$$` is the placeholder the backend substitutes.
+    fn commit_target(node: &UiNode) -> Option<String> {
+        field_target(node, "on_commit")
+    }
+
+    /// A field's target for one of its two moments. `$$` is where the typed text
+    /// goes, assembled at the moment rather than baked at lowering time.
+    fn field_target(node: &UiNode, arg_name: &str) -> Option<String> {
+        let Some(NodeValue::Event(event)) = arg(node, arg_name) else {
+            return None;
+        };
+        let json = serde_json::json!({ "e": event, "k": node.key, "v": "$$" });
         Some(format!("l0:{json}"))
     }
 
+    /// The live expression behind this node's displayed value, if it has one.
+    ///
+    /// Stamped onto the node by `l0_live` so the renderer can refresh it in place
+    /// with `fn tick()` instead of re-resolving the ledger and re-parsing the whole
+    /// document. On a driving screen a re-resolve lands inside a frame: measured on a
+    /// OnePlus 6, frame hitches and card re-resolves correlate 1:1, up to 327 ms.
+    ///
+    /// L0 is untouched. The constraint is on what a CARD may say, and the card still
+    /// says `TextRow(text: step.instruction)`; `fn tick()` belongs to the backend in
+    /// exactly the way `sys.navstep` does.
+    fn live_call_of(node: &UiNode) -> Option<String> {
+        // A bound `value:` must TICK with the same composition it DREW with.
+        // This built `decorated(vm_call(…))` — glyph/unit/suffix but never
+        // `format:` — so every `.money` price lost its `$` on the first tick,
+        // `.signed_money` ticked the raw `change` field the changemoney
+        // redirect exists to avoid, and a `.compact`/`.ratio` value (which
+        // cannot go live at all) was overwritten with the raw number the
+        // format was protecting the screen from. `live_valued` IS the drawn
+        // composition; the tick stamps exactly that, and refuses to stamp
+        // exactly where the draw refused to go live.
+        if node.bindings.iter().any(|(n, _)| n == "value") {
+            return makepad::live_valued(node);
+        }
+        let (_, binding) = node.bindings.iter().find(|(n, _)| n == "text")?;
+        let call = makepad::vm_call(binding)?;
+        Some(makepad::decorated(node, call))
+    }
+
     fn element(node: &UiNode, depth: usize, out: &mut String) {
+        // A `Field` carries its own commit target and must NOT be wrapped in a
+        // tap: a hit target over a text input eats the focus, and the payload
+        // here is what was typed rather than what the row was bound to.
+        if node.kind == "Field" {
+            let _ = write!(
+                out,
+                "l0_field({}, {}, {:?}, {:?})",
+                makepad::expr_of(node, "text"),
+                makepad::expr_of(node, "placeholder"),
+                commit_target(node).unwrap_or_default(),
+                field_target(node, "on_change").unwrap_or_default()
+            );
+            return;
+        }
         // A tappable node is WRAPPED. A `card`, `chip` or `image` carrying
         // `tapto` renders and does nothing — the attribute is dropped before it
         // reaches the UI — so only a container carries a tap.
         if let Some(target) = tap_target(node) {
-            // The wrapper sizes like what it wraps: a Chip is intrinsic and sits
-            // in a row of chips, and a filling wrapper makes the first one eat
-            // the row.
-            let f = if node.kind == "Chip" {
-                "l0_tap_fit"
-            } else {
-                "l0_tap"
-            };
-            let _ = write!(out, "{f}({target:?}, ");
+            // The wrapper sizes like what it WRAPS.
+            //
+            // A filling wrapper around an intrinsic thing takes the whole line
+            // and the thing sits at its left edge. The first chip in a row of
+            // chips ate the row; then the weather card's hero temperature — a
+            // tappable `TextHero` inside a centred column — stopped centring,
+            // because what the column had to place was a full-width wrapper and
+            // not the six characters inside it. The place name and the icon
+            // centred correctly beside it, which is what made it look like a
+            // font problem rather than a layout one.
+            //
+            // A text role that ASKED to fill is not intrinsic, so it keeps the
+            // filling wrapper.
+            let asked_to_fill =
+                token_arg(node, "width") == Some("fill");
+            let intrinsic =
+                // A `.danger` chip is the exception: it SPANS the sheet, so a
+                // fit-width hit target is the one thing that can hide it. It emitted
+                // a `width: Fill` bar inside a `width: Fit` wrapper and the End
+                // button rendered as an empty gap — the same Fill-inside-Fit trap
+                // that resolves to nothing, three times over in this card now.
+                (node.kind == "Chip"
+                    && (!matches!(arg(node, "tone"), Some(NodeValue::Token(t)) if t == "danger")
+                        // A danger chip that ASKS to fit is a row-scoped one
+                        // (the compact variant below) — its hit target fits it.
+                        || matches!(arg(node, "width"), Some(NodeValue::Token(t)) if t == "fit")))
+                    || (node.kind.starts_with("Text") && !asked_to_fill);
+            let f = if intrinsic { "l0_tap_fit" } else { "l0_tap" };
+            let _ = write!(out, "{f}({target}, ");
             element_untapped(node, depth, out);
             out.push(')');
             return;
@@ -6271,12 +9531,183 @@ pub mod kit {
         element_untapped(node, depth, out);
     }
 
+    /// A declared child alignment, as the kit call that applies it.
+    ///
+    /// `start` returns `None`: it is the default, and a wrapper that restated it
+    /// on every container would make the one container that asked for something
+    /// indistinguishable from the dozen that did not.
+    ///
+    /// Which AXIS this means is the kit's to decide, not the lowering's — a
+    /// column aligns horizontally and a row vertically, and only the thing
+    /// holding the flow knows which it is.
+    fn align_wrap(node: &UiNode) -> Option<(&'static str, String)> {
+        let Some(NodeValue::Token(t)) = arg(node, "align") else {
+            return None;
+        };
+        match t.as_str() {
+            "center" | "end" => Some(("l0_aligned(", format!(", {t:?})"))),
+            _ => None,
+        }
+    }
+
+    /// Wrappers COMPOSE around a role — the pattern `tint` established.
+    ///
+    /// `width` and `align` are optional on many roles and meaningless on most,
+    /// so a parameter on every kit function would have nearly all of them
+    /// carrying a default forever. Each attribute the catalog admits needs an
+    /// entry HERE or it is accepted by the profile and silently discarded, which
+    /// is this layer's recurring defect and the reason the list is explicit.
     fn element_untapped(node: &UiNode, depth: usize, out: &mut String) {
+        let wraps: Vec<(&'static str, String)> = [
+            // OUTERMOST. `l0_live` only stamps the call onto the node, so where it
+            // sits makes no functional difference — but the width and align helpers
+            // read as a pair, and slipping between them makes both harder to see.
+            live_call_of(node).map(|call| ("l0_live(", format!(", {call:?})"))),
+            width_wrap(node),
+            align_wrap(node),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        for (open, _) in &wraps {
+            out.push_str(open);
+        }
+        element_unsized(node, depth, out);
+        for (_, close) in wraps.iter().rev() {
+            out.push_str(close);
+        }
+    }
+
+    fn element_unsized(node: &UiNode, depth: usize, out: &mut String) {
         let Some(f) = kit_fn(&node.kind) else {
             let _ = write!(out, "l0_unsupported({:?})", node.kind);
             return;
         };
         match node.kind.as_str() {
+            // A card holding a MAP is a map with the card floating over it, and
+            // this is the backend the DEVICE renders through — the app's path is
+            // `kit::lower` -> `_kit.splash` -> eval -> `l0_widgets`, so the same
+            // fix landing only in `makepad::lower` would have looked verified and
+            // changed nothing on a phone. That is exactly the one-backend gap
+            // `Field`, `Grid.cols` and `Map` were each found in, and the reason
+            // `every_admitted_role_is_lowered_by_both_backends` exists.
+            //
+            // See `l0_surface_map` in the kit for why the map is the bottom layer
+            // and why every number in the sheet is the shipping nav card's.
+            "Surface" if node.children.iter().any(|c| c.kind == "Map") => {
+                let map = node
+                    .children
+                    .iter()
+                    .find(|c| c.kind == "Map")
+                    .expect("guarded above");
+                // THREE slots: the map, the band docked to the top, and the sheet at
+                // the bottom. A turn instruction belongs in the top band and the
+                // summary in the sheet, which is how the app this replaces arranges
+                // its driving screen and how every map app does.
+                let docked = |c: &UiNode, where_: &str| {
+                    c.kind == "Panel"
+                        && matches!(arg(c, "dock"), Some(NodeValue::Token(t)) if t == where_)
+                };
+                let docked_top = |c: &&UiNode| docked(c, "top");
+                let docked_right = |c: &&UiNode| docked(c, "right");
+                out.push_str("l0_surface_map(");
+                element(map, depth, out);
+                for pass in 0..3 {
+                    out.push_str(", [");
+                    let mut first = true;
+                    for child in node.children.iter().filter(|c| {
+                        c.kind != "Map"
+                            && match pass {
+                                0 => docked_top(c),
+                                1 => docked_right(c),
+                                // The sheet takes everything else, which is what an
+                                // undocked panel on a map card has always meant.
+                                _ => !docked_top(c) && !docked_right(c),
+                            }
+                    }) {
+                        // A docked panel contributes its CHILDREN, not itself.
+                        //
+                        // `l0_surface_map` already draws the dock: the band at the
+                        // top and the sheet at the bottom are its own chrome. Emitting
+                        // the `Panel` as well put an `l0_panel` inside each of them —
+                        // a second rounded box, with its own fill, `pady: 12` and
+                        // `margintop: 16`. Three faults, one wrapper: the sheet had a
+                        // visible box drawn inside it; the wrapper is `fillw`, so the
+                        // sheet's `alignx` centred the wrapper and nothing inside it,
+                        // and the hero went left; and the 40 extra units it added
+                        // pushed the distance under the bottom of the screen.
+                        // Only a DOCKED panel unwraps — that is the one whose
+                        // chrome the surface has already drawn. Anything else
+                        // placed directly on the surface is emitted whole, or a
+                        // card that floats a lone chip over the map would have
+                        // emitted the chip's children and lost the chip.
+                        let docked = child.kind == "Panel" && arg(child, "dock").is_some();
+                        let emit: Vec<&UiNode> = if docked {
+                            child.children.iter().collect()
+                        } else {
+                            vec![child]
+                        };
+                        for one in emit {
+                            if !first {
+                                out.push_str(", ");
+                            }
+                            first = false;
+                            // A side-docked Chip stands ON THE MAP, in the same
+                            // column as the zoom pill and the recenter ring — so it
+                            // is drawn to the ring's spec (`l0_mapchip`, 38x38)
+                            // rather than as a sheet chip. The eye-test asked for
+                            // the 2D/3D switch and the location button to be the
+                            // same size, and a text pill in a rounded box cannot be.
+                            if pass == 1 && one.kind == "Chip" {
+                                // UNQUOTED, like the ordinary hit path above:
+                                // `tap_target` returns a DSL EXPRESSION carrying its
+                                // own quoting (and, for live payloads, a
+                                // concatenated call). Debug-quoting it turned the
+                                // expression into a string of escapes, the runtime
+                                // target into garbage, and the dispatch into an
+                                // empty event "applied to nothing".
+                                if let Some(target) = tap_target(one) {
+                                    let _ = write!(
+                                        out,
+                                        "l0_tap_fit({target}, l0_mapchip({}))",
+                                        makepad::expr_of(one, "text")
+                                    );
+                                } else {
+                                    let _ = write!(
+                                        out,
+                                        "l0_mapchip({})",
+                                        makepad::expr_of(one, "text")
+                                    );
+                                }
+                                continue;
+                            }
+                            element(one, depth + 1, out);
+                        }
+                    }
+                    out.push(']');
+                }
+                // Whether anything is DOCKED at the top. The theme cannot ask a list
+                // its length, and a band drawn for an empty one is a dark pill
+                // floating over the map saying nothing — which is what every
+                // planning screen had.
+                let has_top = node.children.iter().any(|c| docked_top(&c));
+                let _ = write!(out, ", {}", u8::from(has_top));
+                // The controls the MAP asked for, laid out by the SURFACE: they
+                // belong in the same column as anything docked to the side, below
+                // the banner, and only the surface knows where that is. `none`
+                // unless the card said otherwise — a map that grows buttons nobody
+                // mentioned is the theme deciding what a screen offers.
+                let controls = token_arg(map, "controls").unwrap_or("none").to_owned();
+                let _ = write!(out, ", {controls:?}");
+                // And whether anything is docked to the SIDE, for the same reason
+                // `has_top` exists. The theme gives that column the dark backing the
+                // zoom pill has, so a chip the card put on the map reads over pale
+                // tiles instead of vanishing into them — and a card that docks
+                // nothing there must not get an empty box for it.
+                let has_side = node.children.iter().any(|c| docked(&c, "right"));
+                let _ = write!(out, ", {}", u8::from(has_side));
+                out.push(')');
+            }
             "Surface" => {
                 let _ = write!(out, "{f}(");
                 children(node, depth, out);
@@ -6296,7 +9727,45 @@ pub mod kit {
                 children(node, depth, out);
                 out.push(')');
             }
-            "Panel" | "Card" | "Grid" => {
+            // A GRID IS ROWS OF `cols`, chunked HERE.
+            //
+            // `l0_grid` took a flat child list and the node model renders a grid
+            // as a column, so a `Grid(cols: 2)` drew one tile per line — the
+            // weather card's feels-like / humidity / wind / pressure / UV /
+            // visibility ran six rows deep instead of three across. `cols` was
+            // accepted by the catalog and honoured only by `makepad::lower`,
+            // which is not the path the device renders through.
+            //
+            // The chunking is here rather than in the theme because the kit
+            // language has no loop, and it is where `makepad::lower` already does
+            // it — so both backends now divide the same way.
+            "Grid" => {
+                let cols = match arg(node, "cols") {
+                    Some(NodeValue::Number(n)) if *n >= 1.0 => *n as usize,
+                    _ => 2,
+                };
+                let pad = "  ".repeat(depth + 1);
+                let _ = writeln!(out, "l0_col([");
+                let rows: Vec<&[UiNode]> = node.children.chunks(cols).collect();
+                for (r, row) in rows.iter().enumerate() {
+                    let _ = writeln!(out, "{pad}l0_row([");
+                    for (i, cell) in row.iter().enumerate() {
+                        let _ = write!(out, "{pad}  ");
+                        element(cell, depth + 2, out);
+                        if i + 1 < row.len() {
+                            out.push(',');
+                        }
+                        out.push('\n');
+                    }
+                    let _ = write!(out, "{pad}])");
+                    if r + 1 < rows.len() {
+                        out.push(',');
+                    }
+                    out.push('\n');
+                }
+                let _ = write!(out, "{}])", "  ".repeat(depth));
+            }
+            "Panel" | "Card" => {
                 let _ = write!(out, "{f}(");
                 children(node, depth, out);
                 out.push(')');
@@ -6313,8 +9782,34 @@ pub mod kit {
                 );
             }
             "Chip" => {
-                let on = i32::from(matches!(arg(node, "active"), Some(NodeValue::Bool(true))));
-                let _ = write!(out, "{f}({}, {on})", makepad::expr_of(node, "text"));
+                // `.danger` is a different role in the kit, not a parameter: it is
+                // full width and centred as well as red, and threading three
+                // presentation decisions through one flag reads worse than naming
+                // the thing.
+                if matches!(arg(node, "tone"), Some(NodeValue::Token(t)) if t == "danger") {
+                    // The card says the scope: `width: .fit` names the compact
+                    // row-sized variant (the tap pass strips value/on_tap before
+                    // this runs, so the payload cannot be the discriminator);
+                    // without it a danger chip is a screen action and spans.
+                    // Both are red — what destructive looks like stays the
+                    // theme's call.
+                    if matches!(arg(node, "width"), Some(NodeValue::Token(t)) if t == "fit") {
+                        let _ =
+                            write!(out, "l0_chip_danger_row({})", makepad::expr_of(node, "text"));
+                    } else {
+                        let _ = write!(out, "l0_chip_danger({})", makepad::expr_of(node, "text"));
+                    }
+                } else if matches!(arg(node, "tone"), Some(NodeValue::Token(t)) if t == "primary")
+                {
+                    // The same reasoning as `.danger`: a primary action is bigger
+                    // type AND a rounder target AND a lit fill, and threading three
+                    // presentation decisions through a flag reads worse than naming
+                    // the thing the theme is being asked for.
+                    let _ = write!(out, "l0_chip_primary({})", makepad::expr_of(node, "text"));
+                } else {
+                    let on = i32::from(matches!(arg(node, "active"), Some(NodeValue::Bool(true))));
+                    let _ = write!(out, "{f}({}, {on})", makepad::expr_of(node, "text"));
+                }
             }
             // A `Photo` WITH children is not an image, it is the page: the
             // weather card wraps the whole card in one, and a lowering that made
@@ -6322,6 +9817,12 @@ pub mod kit {
             // attempt made, and it is why `l0_surface_photo` exists — image,
             // scrim, then the content, so text stays legible over whatever the
             // image turns out to be.
+            // Content a swipe reveals — hidden until then. See the catalog.
+            "Reveal" => {
+                out.push_str("l0_reveal(");
+                children(node, depth, out);
+                out.push(')');
+            }
             "Photo" if !node.children.is_empty() => {
                 let _ = write!(out, "l0_surface_photo({}, ", makepad::expr_of(node, "src"));
                 children(node, depth, out);
@@ -6330,16 +9831,87 @@ pub mod kit {
             "Photo" => {
                 let _ = write!(out, "{f}({})", makepad::expr_of(node, "src"));
             }
+            // The trip, as the kit takes it: which member of the map family, how
+            // close, where to centre, and the route already resolved.
+            //
+            // The route is a CALL — `sys.navroute` over both endpoints' own
+            // coordinate calls — so the geometry is fetched when the card draws
+            // rather than baked at realization. The kit was emitting
+            // `l0_unsupported("Map")` until now, which is what put an error box
+            // in the middle of the nav card ON DEVICE, since the device renders
+            // through this path and not through `makepad::lower`.
+            "Map" => {
+                let (lat, lon, poly) = makepad::map_route(node);
+                // No follow FLAG is passed. `map_mode` already emits `follow` or
+                // `follow3d` only when the card declared a live position, and the
+                // widget reads the device's fix directly in those modes — a position
+                // that changes every second is not a property, so routing it through
+                // one bought nothing and cost a frozen camera when the property was a
+                // constant expression. See `update_nav_camera`.
+                let _ = write!(
+                    out,
+                    "{f}({:?}, {}, {lat}, {lon}, {poly}, {}, {})",
+                    makepad::map_mode(node),
+                    scalar_of(node, "zoom"),
+                    // The pins. `""` rather than omitted, because the widget reads
+                    // an empty marker string as "no pins" and that is exactly what a
+                    // map with no complete trip has.
+                    makepad::map_pins(node).unwrap_or_else(|| "\"\"".to_owned()),
+                    makepad::map_badge(node).unwrap_or_else(|| "\"\"".to_owned()),
+                );
+            }
+            // `cond` is a NUMBER — the WMO code the forecast returns — and this
+            // matched only `Text` and `Token`, so every one of them fell through
+            // to `""`. All seven forecast rows drew the same default icon over a
+            // week that was cloudy, rainy and clear on different days, and
+            // nothing on screen said so: a wrong icon looks exactly like a right
+            // one. `scalar_of` takes whichever the card bound.
+            //
+            // `size` says WHERE the icon sits — hero block, forecast row, tile —
+            // and the kit decides how big each of those is.
             "WeatherIcon" => {
-                let cond = match arg(node, "cond") {
-                    Some(NodeValue::Text(c)) => format!("{c:?}"),
-                    Some(NodeValue::Token(c)) => format!("{c:?}"),
-                    _ => "\"\"".into(),
+                let size = match arg(node, "size") {
+                    Some(NodeValue::Token(t)) => t.clone(),
+                    _ => "row".to_owned(),
                 };
-                let _ = write!(out, "{f}({cond})");
+                let _ = write!(out, "{f}({}, {size:?})", scalar_of(node, "cond"));
             }
             "TextStat" => {
-                let _ = write!(out, "{f}({}, {})", makepad::valued(node), direction(node));
+                // `l0_stat` takes the direction as a parameter rather than
+                // composing it, so an untinted stat passes the neutral `0`.
+                let dir = tint_expr(node).unwrap_or_else(|| "0".to_owned());
+                let _ = write!(out, "{f}({}, {dir})", makepad::valued(node));
+            }
+            // Five text roles may carry a tint, and the stock LIST tints a
+            // `TextValue` while the detail tints a `TextStat`. Lowering only the
+            // latter dropped the colour from every row on the list — the
+            // percentages rendered white, and "this one fell" stopped being
+            // said at all. `tint` is §1.1's instructive case for exactly this:
+            // red-versus-green is presentation, but the SIGN is meaning.
+            "TextTitle" | "TextBody" | "TextCaption" | "TextValue" if tint_expr(node).is_some() => {
+                // Always through `valued`: it falls back to `text:` and
+                // decorates either way. Branching here meant a `text:` carrying a
+                // `suffix:` skipped the decoration entirely.
+                let body = makepad::valued(node);
+                let dir = tint_expr(node).unwrap_or_else(|| "0".to_owned());
+                let _ = write!(out, "l0_tinted({f}({body}), {dir})");
+            }
+            // The five data visualisations. Each takes its declared arguments in
+            // the catalog's order — no defaults, because a bar drawn against a
+            // range nobody supplied is a bar drawn against zero, and it looks
+            // like data.
+            "TempBar" | "SunArc" | "MoonPhase" | "AqiContour" | "StockPlot" | "Satellite" => {
+                let params: &[&str] = match node.kind.as_str() {
+                    "TempBar" => &["lo", "hi", "min", "max"],
+                    "SunArc" => &["rise", "set", "now"],
+                    "MoonPhase" => &["phase", "illum"],
+                    "AqiContour" => &["lat", "lon", "span"],
+                    "Satellite" => &["lat", "lon"],
+                    _ => &["symbol", "range"],
+                };
+                // Numeric: these drive shader uniforms, not text.
+                let args: Vec<String> = params.iter().map(|p| scalar_num_of(node, p)).collect();
+                let _ = write!(out, "{f}({})", args.join(", "));
             }
             // A hero is sized by the caller, because only the lowering knows
             // what will be DRAWN — a live value's text is not in the DSL.
@@ -6349,11 +9921,10 @@ pub mod kit {
             }
             // The remaining text roles take one string.
             _ => {
-                let body = if arg(node, "value").is_some() || arg(node, "glyph").is_some() {
-                    makepad::valued(node)
-                } else {
-                    makepad::expr_of(node, "text")
-                };
+                // Always through `valued`: it falls back to `text:` and
+                // decorates either way. Branching here meant a `text:` carrying a
+                // `suffix:` skipped the decoration entirely.
+                let body = makepad::valued(node);
                 let _ = write!(out, "{f}({body})");
             }
         }

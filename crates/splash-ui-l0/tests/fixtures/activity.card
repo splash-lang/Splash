@@ -1,0 +1,61 @@
+# level: L0
+# model: activity
+#
+# The FIRST reference card L0 was not designed against.
+#
+# weather, news and stock shaped the profile — every role and capability in the
+# catalog exists because one of them needed it, so "L0 renders them" is close to
+# circular. This one comes from `a2app/apps/activity/app.md`, written for a
+# different framework, and what it needs that L0 lacks is the point of it.
+
+source place  sys.geocode(name: state.city)
+source parks  sys.places(lat: place.lat, lon: place.lon, category: "park",
+                         count: 4, fields: [id, name, distance])
+source cafes  sys.places(lat: place.lat, lon: place.lon, category: "cafe",
+                         count: 4, fields: [id, name, distance])
+source env.locale sys.locale()
+
+state city { shape: text, initial: "" }          # empty ⇒ device location
+
+copy eyebrow  { class: vocabulary, en: "NEARBY · GREEN & COFFEE" }
+copy heading  { class: vocabulary, en: "Around You" }
+copy loading  { class: vocabulary, en: "Finding places nearby…" }
+copy park_why { class: vocabulary, en: "away · quiet green space" }
+copy cafe_why { class: vocabulary, en: "away · somewhere to sit" }
+
+view root Surface {
+  Col(gap: 2) {
+    TextCaption(text: copy.eyebrow)
+    TextTitle(text: copy.heading)
+  }
+
+  # §5.9's lifecycle, where the source framework used a -9999 sentinel. The
+  # card asks whether the fetch has landed; it does not compare against a magic
+  # number that also has to mean "no data".
+  when parks.$state == .pending { TextBody(text: copy.loading) }
+
+  when parks.$state == .ready {
+    Panel {
+      for p, i in parks key p.id {
+        Row(align: .center, gap: 10) {
+          TextRow(text: "🌳")
+          Col(gap: 2) {
+            TextRow(text: p.name)
+            TextCaption(text: p.distance, suffix: copy.park_why)
+          }
+        }
+        Rule()
+      }
+      for c, i in cafes key c.id {
+        Row(align: .center, gap: 10) {
+          TextRow(text: "☕")
+          Col(gap: 2) {
+            TextRow(text: c.name)
+            TextCaption(text: c.distance, suffix: copy.cafe_why)
+          }
+        }
+        Rule()
+      }
+    }
+  }
+}

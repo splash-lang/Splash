@@ -388,7 +388,7 @@ against an empty host surface. Three reference cards exercise it.
 
 **Implemented** in `splash-core::ui_l0`: parser, validator, per-instance state store,
 event dispatch, a renderer-neutral realizer, a source plan, and static dependency tracking for
-reconciliation. 85 tests; the three reference cards are accepted and the shipping nav card is
+reconciliation. 224 tests; the three reference cards are accepted and the shipping nav card is
 rejected as L2; four cases render on a OnePlus 6T through an unmodified downstream host, checked
 against golden images.
 
@@ -430,15 +430,58 @@ Remaining:
   a shared helper definition. That mapping is what would end the duplication of
   `sys.*` across four hosts, where every divergence so far has produced a
   device-visible bug.
-- **Reconciliation is derived but not applied.** `record_dependencies`,
+- **Reconciliation is derived and deliberately not applied.** `record_dependencies`,
   `dirty_records` and `patch_points` compute what a state write invalidates;
-  realization still rebuilds the tree rather than patching those points.
+  realization still rebuilds the tree rather than patching those points. **Measured
+  on a OnePlus 6, that costs nothing worth recovering**: 30 taps each triggering a
+  complete rebuild of the weather card — 62 nodes, 28 live calls, the whole kit
+  script re-evaluated, the widget tree discarded and rebuilt — take the same wall
+  clock as 30 taps on a dead region, with the difference inside the ±25 ms noise of
+  the method and negative on one run. The parts assumed expensive are not: realize
+  plus lower is 0.14–0.22 ms, and the `sys.*` helpers are URL-cached, so a rebuild's
+  live calls are cache hits rather than fetches. A 62-node card and an 11-node card
+  cost the same, which is the tell that the fixed overhead dominates. So the tree
+  work is free at these card sizes, and patching would save nothing measurable while
+  costing the renderer a per-record addressing scheme it does not have.
+
+  What *was* worth fixing is the work that accomplished nothing: a transition
+  writing the value already in the cell reported a change, so tapping the selected
+  chip rebuilt the card to redraw the identical screen. That is fixed. The
+  dependency tracking was also completed — three under-approximations, each of which
+  would have put a stale value on screen — but on its own merits: they were live
+  defects in `dirty_records` and in the checker regardless of whether patching ever
+  ships. Revisit if a card ever gets large enough to move the number.
 - **`makepad::lower` is in the wrong crate.** It belongs in a backend crate, not
   in `splash-core`, which otherwise names no renderer.
-- **`StockPlot` and `AqiContour` lower without their data arrays**, so both
-  render as empty frames on device.
-- **L1 and L2 are unimplemented.** Both are specified only as what L0 excludes,
-  so the level classifier can name them but cannot check them.
+- **L1 is implemented ahead of its specification.** A card declaring `level: L1`
+  is admitted and gets an expression form — arithmetic over already-declared
+  values, where an expression must read something so a literal-only formula
+  stays a fabricated fact. But the profile is titled Level 0 and specifies L1
+  only as what L0 excludes: §7 licenses the admission and no section states the
+  grammar, the evaluation rules, or the §4 argument. The checker currently
+  blesses a level no document defines, and the spec pass is owed.
+- **L2 is unimplemented and refused before parsing.** Imperative widget commands
+  are a different grammar rather than a wider one, so nothing below parses them.
+  The nearest thing to a card that needed it was the shipping nav app's drive
+  screen, which updates a vehicle position every frame through `ui.<id>.set_*`
+  inside a `fn tick()` that must never rebuild. §1.0 predicted that a declared
+  position for the widget to follow would make navigation declarative — a widget
+  change rather than a language one — and that has now been done: `Map(at:)`
+  takes a position, `sys.step` answers the next manoeuvre from the trip's
+  coordinates plus the device's own, and the widget gained a `follow` camera. The
+  nav card's drive screen is admitted at L0.
+
+  What the exercise found is worth recording, because it is the argument for the
+  level and not merely a feature. The widget ALREADY had a follow camera, and
+  pointing `.drive` at it would have shipped a finished-looking feature: it drives
+  a vehicle along the route at an assumed 34 mph off a looping clock. §4 forbids
+  it — a camera pose is a fact about where the user is — and the same fabrication
+  turned out to be load-bearing in the L2 exemplar, whose turn banner ran on that
+  clock and so announced turns, and arrived on schedule, from a parked car. **What
+  L0 forced was not a smaller nav card but a truthful one.**
+
+  So L2 still has no card that requires it, and the strongest candidate for one
+  has now been written at L0 instead.
 
 ## Before a stable language release
 
