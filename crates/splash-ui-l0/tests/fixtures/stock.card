@@ -36,8 +36,7 @@ state range    { shape: enum[d1, w1, m1, m6, y1], initial: range_pref.range }
 event open_quote { selected: set($value) }
 event back       { selected: clear, range: clear }              # two writes, one gesture
 event set_range  { range: set($value), range_pref: set($value) }
-# The star on a mover saves its ticker; Remove on a saved row forgets it.
-event keep       { watch: append($value) }
+# Remove on a saved row (revealed by the manage swipe) forgets its ticker.
 event forget     { watch: remove($value) }
 # The add flow. Looking is not keeping: tapping a result only OPENS its quote;
 # Add is the one event that stores, and the × closes with nothing stored.
@@ -52,7 +51,6 @@ event swipe_right { managing: set(.off) }
 copy movers  { class: vocabulary, en: "Top Movers", zh: "涨跌榜" }
 copy back_lbl { class: vocabulary, en: "‹ Back", zh: "‹ 返回" }
 copy watch_hd { class: vocabulary, en: "WATCHLIST", zh: "自选" }
-copy star     { class: vocabulary, en: "☆" }
 copy unstar   { class: vocabulary, en: "Remove", zh: "删除" }
 copy plus     { class: vocabulary, en: "+" }
 copy add_lbl  { class: vocabulary, en: "Add", zh: "添加" }
@@ -119,17 +117,16 @@ view list  Col {
              }
              TextTitle(text: copy.movers)
              Panel {
+               # No per-row save shortcut — saving is the add flow's explicit
+               # Add, so a mover row is just the tap that opens its quote.
                for m in movers key m.ticker {
-                 Row(align: .center, gap: 8) {
-                   Chip(text: copy.star, on_tap: keep, value: m.ticker)
-                   Row(align: .center, width: .fill, on_tap: open_quote, value: m.ticker) {
-                     Col(gap: 2, width: .fill) {
-                       TextRow(text: m.ticker)
-                       TextCaption(text: m.name, width: .fill)
-                     }
-                     TextValue(value: m.last, format: .money)
-                     TextValue(value: m.pct, format: .signed_pct, tint: m.change)
+                 Row(align: .center, gap: 8, on_tap: open_quote, value: m.ticker) {
+                   Col(gap: 2, width: .fill) {
+                     TextRow(text: m.ticker)
+                     TextCaption(text: m.name, width: .fill)
                    }
+                   TextValue(value: m.last, format: .money)
+                   TextValue(value: m.pct, format: .signed_pct, tint: m.change)
                  }
                  Rule()
                }
