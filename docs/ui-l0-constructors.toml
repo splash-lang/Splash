@@ -464,8 +464,11 @@ answers = ["url"]
 writes = ["set", "clear"]
 
 [sources."sys.watchlist"]
-args = ["fields"]
-answers = ["ticker", "name", "last", "change", "pct", "open", "high", "low", "prev", "volume", "mktcap", "pe", "currency", "exchange"]
+# `ticker` turns the source into a membership probe: `has` answers "1" when
+# that ticker is in the user's list, else "0" — what lets a quote page show
+# Add or Remove for the stock it is looking at.
+args = ["ticker", "fields"]
+answers = ["ticker", "name", "last", "change", "pct", "open", "high", "low", "prev", "volume", "mktcap", "pe", "currency", "exchange", "has"]
 writes = ["append", "remove"]
 
 # READ-ONLY for now. A preference write must name WHICH preference, and a

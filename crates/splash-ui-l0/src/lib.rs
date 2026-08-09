@@ -3085,7 +3085,7 @@ pub mod catalog {
         // IS the user's list — and the host joins the stored tickers to live
         // quotes, so a card asks for the fields it wants to show and never
         // learns that a store exists.
-        ("sys.watchlist", &["fields"]),
+        ("sys.watchlist", &["ticker", "fields"]),
         ("sys.prefs", &["fields"]),
         ("sys.reading", &["fields"]),
         ("sys.topics", &["fields"]),
@@ -3207,6 +3207,9 @@ pub mod catalog {
             &[
                 "ticker", "name", "last", "change", "pct", "open", "high", "low", "prev", "volume",
                 "mktcap", "pe", "currency", "exchange",
+                // The membership probe, for a source that names a ticker:
+                // "1" when that ticker is in the user's list, else "0".
+                "has",
             ],
         ),
         ("sys.prefs", &["units", "range", "home", "work", "mode"]),
@@ -6945,6 +6948,14 @@ pub mod makepad {
             // which is why this lowers to a live call at all rather than to the
             // realized literal: a stored price would render stale and look live.
             "sys.watchlist" => {
+                // The membership probe: `kept.has` on a watchlist source WITH
+                // a ticker argument answers whether THAT ticker is in the
+                // user's list — "1" or "0", synchronously from the published
+                // store. It is what lets a quote page show Add or Remove.
+                if binding.field == "has" {
+                    let ticker = arg("ticker")?;
+                    return Some(format!("sys.watchlist_has({ticker})"));
+                }
                 let (index, field) = binding.field.split_once('.')?;
                 index.parse::<u32>().ok()?;
                 let key = match field {
