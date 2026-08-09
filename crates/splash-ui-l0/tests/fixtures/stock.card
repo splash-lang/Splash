@@ -114,21 +114,17 @@ view list  Col {
              }
              TextTitle(text: copy.movers)
              Panel {
-               # A mover row taps to its quote and swipes to reveal Add —
-               # the watch rows' gesture, answering with what THIS row can do.
+               # Movers are the market's recommendations, not the user's list:
+               # no swipe menu here — a mover row is the tap that opens its
+               # quote, and the quote page is where Add lives.
                for m in movers key m.ticker {
-                 Row(align: .center, gap: 8) {
-                   Row(align: .center, gap: 8, width: .fill, on_tap: open_quote, value: m.ticker) {
-                     Col(gap: 2, width: .fill) {
-                       TextRow(text: m.ticker)
-                       TextCaption(text: m.name, width: .fill)
-                     }
-                     TextValue(value: m.last, format: .money)
-                     TextValue(value: m.pct, format: .signed_pct, tint: m.change)
+                 Row(align: .center, gap: 8, on_tap: open_quote, value: m.ticker) {
+                   Col(gap: 2, width: .fill) {
+                     TextRow(text: m.ticker)
+                     TextCaption(text: m.name, width: .fill)
                    }
-                   Reveal {
-                     Chip(text: copy.add_lbl, on_tap: keep, value: m.ticker)
-                   }
+                   TextValue(value: m.last, format: .money)
+                   TextValue(value: m.pct, format: .signed_pct, tint: m.change)
                  }
                  Rule()
                }
@@ -139,8 +135,13 @@ view list  Col {
 # "fetching" or "can't reach", never a silent grid of em dashes.
 view detail  Col {
                # A word, not a lone glyph: the glyph alone measured ~20px of
-               # hit target on device, too small for a thumb.
-               Row(align: .center, on_tap: back) { TextRow(text: copy.back_lbl) }
+               # hit target on device, too small for a thumb. Add sits in the
+               # page's top-right corner: the quote page is where a stock is
+               # kept (append is idempotent, so a kept one re-taps to nothing).
+               Row(align: .center, gap: 8) {
+                 Row(align: .center, width: .fill, on_tap: back) { TextRow(text: copy.back_lbl) }
+                 Chip(text: copy.add_lbl, on_tap: keep, value: selected)
+               }
                when quote.$state == .pending { TextBody(text: copy.loading) }
                when quote.$state == .failed  { TextBody(text: copy.offline) }
                header

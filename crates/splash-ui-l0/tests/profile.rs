@@ -1117,10 +1117,10 @@ fn a_tappable_node_lowers_to_a_reachable_notify() {
         .unwrap_or_else(|| panic!("no reachable tap for open_quote:\n{dsl}"));
     assert!(notify.contains("event: \"open_quote\""), "event:\n{notify}");
     assert!(notify.contains("value: \"NVDA\""), "payload:\n{notify}");
-    // The mover's tap row nests inside its swipe-reveal wrapper: the row
-    // swipes to reveal Add, so the tappable half is the inner filling row.
+    // A mover row is a single tap: movers are the market's recommendations,
+    // so there is no per-row menu — Add lives on the quote page.
     assert!(
-        notify.contains("key: \"root/when#0/w:list#0/list/Panel#0/for#0[NVDA]/Row#0/Row#0\""),
+        notify.contains("key: \"root/when#0/w:list#0/list/Panel#0/for#0[NVDA]/Row#0\""),
         "instance key:\n{notify}"
     );
 
