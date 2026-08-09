@@ -22,6 +22,9 @@ source env.locale  sys.locale()
 # The reading list (§5.12): saved story IDS, each row fetched by id — so a
 # bookmark outlives the front page it was found on.
 source saved       sys.reading(fields: [id, title, points])
+# Followed TOPICS (§5.12): the store keeps a word per row; the top story
+# beside it is searched fresh at read time, so a topic row is never stale.
+source topics      sys.topics(fields: [name, top_title, top_id])
 
 state selected { shape: text, initial: "" }        # "" ⇒ feed, else a story id
 
@@ -31,6 +34,10 @@ event back        { selected: clear }
 # store; title and points are fetched fresh every time the list renders.
 event keep_story  { saved: append($value) }
 event drop_story  { saved: remove($value) }
+# Following is idempotent in the store, so a suggestion chip can stay on
+# screen after it was picked: tapping it again is nothing, not a duplicate.
+event follow      { topics: append($value) }
+event unfollow    { topics: remove($value) }
 
 copy masthead { class: vocabulary, en: "Top Stories",  zh: "头条" }
 copy source   { class: vocabulary, en: "HACKER NEWS", zh: "科技新闻" }
@@ -38,6 +45,11 @@ copy saved_hd { class: vocabulary, en: "READING LIST", zh: "收藏" }
 copy keep_lbl { class: vocabulary, en: "☆ Save" }
 copy drop_lbl { class: vocabulary, en: "Remove" }
 copy latest   { class: vocabulary, en: "LATEST",      zh: "最新" }
+copy topics_hd { class: vocabulary, en: "TOPICS",     zh: "关注" }
+copy t_ai     { class: vocabulary, en: "AI" }
+copy t_nba    { class: vocabulary, en: "NBA" }
+copy t_soccer { class: vocabulary, en: "Soccer" }
+copy t_crypto { class: vocabulary, en: "Crypto" }
 copy lead     { class: vocabulary, en: "LEAD",        zh: "焦点" }
 copy pts      { class: vocabulary, en: "pts",         zh: "分" }
 copy comments { class: vocabulary, en: "comments",    zh: "评论" }
@@ -109,6 +121,27 @@ view latest  Col {
                Panel {
                  for s, i in feed key s.id {
                    StoryRow(story: s, position: i, on_open: open_story)
+                 }
+               }
+               # Suggested topics to follow; the row of chips is host copy,
+               # the VALUES are the stored words. Tap → append, idempotent.
+               TextCaption(text: copy.topics_hd)
+               Row(gap: 8) {
+                 Chip(text: copy.t_ai,     on_tap: follow, value: "ai")
+                 Chip(text: copy.t_nba,    on_tap: follow, value: "nba")
+                 Chip(text: copy.t_soccer, on_tap: follow, value: "soccer")
+                 Chip(text: copy.t_crypto, on_tap: follow, value: "crypto")
+               }
+               for t, i in topics key t.name {
+                 # Chip beside the tappable part (its own hit target would be
+                 # covered inside the row); the row opens the topic's current
+                 # top story by the id the search answered just now.
+                 Row(align: .center, gap: 8) {
+                   Row(align: .center, gap: 8, width: .fill, on_tap: open_story, value: t.top_id) {
+                     TextCaption(text: t.name, width: .label)
+                     TextRow(text: t.top_title, width: .fill)
+                   }
+                   Chip(text: copy.drop_lbl, on_tap: unfollow, value: t.name)
                  }
                }
                for b, i in saved key b.id {

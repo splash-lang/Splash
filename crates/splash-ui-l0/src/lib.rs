@@ -3059,6 +3059,7 @@ pub mod catalog {
         ("sys.watchlist", &["fields"]),
         ("sys.prefs", &["fields"]),
         ("sys.reading", &["fields"]),
+        ("sys.topics", &["fields"]),
         // Free-text ticker lookup, so a card can offer something the top-movers
         // list does not happen to contain. `sys.search` is the PLACE search and
         // answers a different question; naming them apart is what stops a card
@@ -3183,6 +3184,10 @@ pub mod catalog {
         // The id is the identity Algolia serves forever, so a bookmarked story
         // outlives the front page it was found on.
         ("sys.reading", &["id", "title", "author", "points", "comments", "url"]),
+        // Followed TOPICS: the store holds a topic word ("ai", "nba"); the
+        // top story beside it is searched fresh on every read, so a followed
+        // topic never pins the story that was hot when it was followed.
+        ("sys.topics", &["name", "top_title", "top_points", "top_id"]),
         // Verified against the live endpoint, not its documentation: `longname`
         // comes back null for plenty of listings, so `name` falls back to
         // `shortname` in the helper. `kind` distinguishes an equity from a
@@ -3232,6 +3237,7 @@ pub mod catalog {
         // written prefs source; a read-only one may still ask for several.
         ("sys.prefs", &["set", "clear"]),
         ("sys.reading", &["append", "remove"]),
+        ("sys.topics", &["append", "remove"]),
     ];
 
     pub fn mutable(name: &str) -> Option<&'static [&'static str]> {
@@ -6875,6 +6881,18 @@ pub mod makepad {
                     _ => return None,
                 };
                 Some(format!("sys.reading({index}, {key:?})"))
+            }
+            // A followed topic. `name` is the stored word; the `top_*` keys
+            // are the first hit of a fresh search for it, fetched at read time
+            // like every other joined value in this table.
+            "sys.topics" => {
+                let (index, field) = binding.field.split_once('.')?;
+                index.parse::<u32>().ok()?;
+                let key = match field {
+                    f @ ("name" | "top_title" | "top_points" | "top_id") => f,
+                    _ => return None,
+                };
+                Some(format!("sys.topics({index}, {key:?})"))
             }
             // A saved place. `name`/`lat`/`lon` identify it and come from the
             // store; the readings beside them are fetched, which is why this

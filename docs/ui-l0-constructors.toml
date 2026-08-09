@@ -445,6 +445,13 @@ args = ["fields"]
 answers = ["id", "title", "author", "points", "comments", "url"]
 writes = ["append", "remove"]
 
+# Followed topics. The store keeps only the topic word; top_title/top_points/
+# top_id are the first hit of a search run when the row is read.
+[sources."sys.topics"]
+args = ["fields"]
+answers = ["name", "top_title", "top_points", "top_id"]
+writes = ["append", "remove"]
+
 [sources."sys.watchlist"]
 args = ["fields"]
 answers = ["ticker", "name", "last", "change", "pct", "open", "high", "low", "prev", "volume", "mktcap", "pe", "currency", "exchange"]
