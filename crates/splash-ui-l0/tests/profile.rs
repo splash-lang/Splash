@@ -6945,6 +6945,8 @@ fn every_offered_field_has_a_translation() {
                         ("lon".into(), "2".into()),
                         ("ticker".into(), "N".into()),
                         ("query".into(), "q".into()),
+                        ("countries".into(), "CHN".into()),
+                        ("indicator".into(), "NY.GDP.MKTP.KD.ZG".into()),
                         ("name".into(), "n".into()),
                         ("id".into(), "1".into()),
                         ("category".into(), "c".into()),
