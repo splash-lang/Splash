@@ -1117,11 +1117,10 @@ fn a_tappable_node_lowers_to_a_reachable_notify() {
         .unwrap_or_else(|| panic!("no reachable tap for open_quote:\n{dsl}"));
     assert!(notify.contains("event: \"open_quote\""), "event:\n{notify}");
     assert!(notify.contains("value: \"NVDA\""), "payload:\n{notify}");
-    // A mover row is a single tap again: the per-row ☆ save shortcut is
-    // gone (saving is the add flow's explicit Add), so nothing shares the
-    // row and it needs no sibling wrapper.
+    // The mover's tap row nests inside its swipe-reveal wrapper: the row
+    // swipes to reveal Add, so the tappable half is the inner filling row.
     assert!(
-        notify.contains("key: \"root/when#0/w:list#0/list/Panel#0/for#0[NVDA]/Row#0\""),
+        notify.contains("key: \"root/when#0/w:list#0/list/Panel#0/for#0[NVDA]/Row#0/Row#0\""),
         "instance key:\n{notify}"
     );
 

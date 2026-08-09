@@ -33,7 +33,9 @@ state range    { shape: enum[d1, w1, m1, m6, y1], initial: range_pref.range }
 event open_quote { selected: set($value) }
 event back       { selected: clear, range: clear }              # two writes, one gesture
 event set_range  { range: set($value), range_pref: set($value) }
-# Remove on a saved row (revealed by the manage swipe) forgets its ticker.
+# Swipe a SAVED row: Remove forgets its ticker. Swipe a MOVER row: Add
+# keeps it — the same gesture answers with what the row can do.
+event keep       { watch: append($value) }
 event forget     { watch: remove($value) }
 # The add flow. Looking is not keeping: tapping a result only OPENS its quote;
 # Add is the one event that stores, and the × closes with nothing stored.
@@ -112,16 +114,21 @@ view list  Col {
              }
              TextTitle(text: copy.movers)
              Panel {
-               # No per-row save shortcut — saving is the add flow's explicit
-               # Add, so a mover row is just the tap that opens its quote.
+               # A mover row taps to its quote and swipes to reveal Add —
+               # the watch rows' gesture, answering with what THIS row can do.
                for m in movers key m.ticker {
-                 Row(align: .center, gap: 8, on_tap: open_quote, value: m.ticker) {
-                   Col(gap: 2, width: .fill) {
-                     TextRow(text: m.ticker)
-                     TextCaption(text: m.name, width: .fill)
+                 Row(align: .center, gap: 8) {
+                   Row(align: .center, gap: 8, width: .fill, on_tap: open_quote, value: m.ticker) {
+                     Col(gap: 2, width: .fill) {
+                       TextRow(text: m.ticker)
+                       TextCaption(text: m.name, width: .fill)
+                     }
+                     TextValue(value: m.last, format: .money)
+                     TextValue(value: m.pct, format: .signed_pct, tint: m.change)
                    }
-                   TextValue(value: m.last, format: .money)
-                   TextValue(value: m.pct, format: .signed_pct, tint: m.change)
+                   Reveal {
+                     Chip(text: copy.add_lbl, on_tap: keep, value: m.ticker)
+                   }
                  }
                  Rule()
                }
