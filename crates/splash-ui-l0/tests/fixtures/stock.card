@@ -33,6 +33,7 @@ event keep       { watch: append($value) }
 event forget     { watch: remove($value) }
 
 copy movers  { class: vocabulary, en: "Top Movers", zh: "涨跌榜" }
+copy back_lbl { class: vocabulary, en: "‹ Back", zh: "‹ 返回" }
 copy watch_hd { class: vocabulary, en: "WATCHLIST", zh: "自选" }
 copy star     { class: vocabulary, en: "☆" }
 copy unstar   { class: vocabulary, en: "Remove" }
@@ -91,7 +92,9 @@ view list  Col {
 # §5.9: the quote's lifecycle is a state to branch on — a tapped ticker says
 # "fetching" or "can't reach", never a silent grid of em dashes.
 view detail  Col {
-               Row(on_tap: back) { TextCaption(glyph: "‹") }
+               # A word, not a lone glyph: the glyph alone measured ~20px of
+               # hit target on device, too small for a thumb.
+               Row(align: .center, on_tap: back) { TextRow(text: copy.back_lbl) }
                when quote.$state == .pending { TextBody(text: copy.loading) }
                when quote.$state == .failed  { TextBody(text: copy.offline) }
                header

@@ -923,6 +923,12 @@ enum Form {
     /// card names the operation and the runtime performs it.
     Append,
     Remove,
+    /// §3's collection cousins of `cycle`: move a TEXT cell to the next/prev
+    /// value of a collection field (`city: next(cities.name)`), wrapping.
+    /// Total like cycle — the card names the walk, the runtime performs it —
+    /// which is what a swipe gesture needs a declared transition for.
+    Next(String),
+    Prev(String),
     /// Anything else — an expression, which L0 has no form for.
     NotTotal(String),
 }
@@ -1756,6 +1762,26 @@ impl<'a> Parser<'a> {
                     self.expect_punct(")");
                 }
                 (Form::Cycle, members)
+            }
+            "next" | "prev" => {
+                let verb = t.text.clone();
+                self.at += 1;
+                let mut path = None;
+                if self.peek().is_some_and(|t| t.is_punct("(")) {
+                    self.at += 1;
+                    path = self.dotted_name();
+                    self.expect_punct(")");
+                }
+                match path {
+                    Some(p) if verb == "next" => (Form::Next(p), Vec::new()),
+                    Some(p) => (Form::Prev(p), Vec::new()),
+                    None => (
+                        Form::NotTotal(format!(
+                            "`{verb}` names a collection field, like {verb}(cities.name)"
+                        )),
+                        Vec::new(),
+                    ),
+                }
             }
             // §5.12: the two collection forms. Both take `$value` and nothing
             // else — `remove($value)` matches an exact payload rather than
@@ -3494,6 +3520,7 @@ fn check_event_batch(
                     Form::Clear => "clear",
                     Form::Toggle => "toggle",
                     Form::Cycle => "cycle",
+                    Form::Next(_) | Form::Prev(_) => "",
                     Form::NotTotal(_) => "",
                 };
                 match accepted {
@@ -3755,6 +3782,48 @@ fn check_event_batch(
                         format!("`cycle` needs an enum state, but {:?} is not", transition.target),
                     ),
                 },
+                // The collection walk: the path must name a declared source's
+                // field, and the cell it moves must be text — the walked field
+                // IS the value written.
+                Form::Next(path) | Form::Prev(path) => {
+                    if !matches!(&state.shape, Shape::Text) {
+                        sink.push(
+                            transition.line,
+                            transition.column,
+                            format!(
+                                "`next`/`prev` write a text state, but {:?} is not",
+                                transition.target
+                            ),
+                        );
+                    }
+                    let (root, field) = path.split_once('.').unwrap_or((path.as_str(), ""));
+                    match sources.iter().find(|s| s.name == root) {
+                        None => sink.push(
+                            transition.line,
+                            transition.column,
+                            format!("`next({path})` walks a source, and {root:?} is not one"),
+                        ),
+                        Some(decl) => {
+                            let declared = decl.args.iter().find(|(n, _)| n == "fields").and_then(
+                                |(_, a)| match a {
+                                    SourceArg::List(l) => Some(l),
+                                    _ => None,
+                                },
+                            );
+                            if field.is_empty()
+                                || declared.is_some_and(|l| !l.iter().any(|f| f == field))
+                            {
+                                sink.push(
+                                    transition.line,
+                                    transition.column,
+                                    format!(
+                                        "`next({path})` walks a field {root:?} does not declare                                          — add it to the source's fields",
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -8368,6 +8437,38 @@ fn dispatch_writes(
                     .and_then(|s| members.iter().position(|m| m == s))
                     .unwrap_or(0);
                 serde_json::Value::String(members[(at + 1) % members.len()].clone())
+            }
+            // The collection walk. Rows come from the dispatch data — the
+            // host merges durable rows in before dispatch — and the walk wraps.
+            // A value not in the list lands on the first (next) or last (prev)
+            // row: the swipe that discovers the list starts at its edge.
+            (Form::Next(path) | Form::Prev(path), Shape::Text) => {
+                let forward = matches!(&transition.form, Form::Next(_));
+                let (root, field) = path.split_once('.').unwrap_or((path.as_str(), ""));
+                let rows: Vec<String> = data
+                    .get(root)
+                    .and_then(|v| v.as_array())
+                    .map(|rows| {
+                        rows.iter()
+                            .filter_map(|r| r.get(field))
+                            .filter_map(|v| v.as_str())
+                            .map(|s| s.to_owned())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if rows.is_empty() {
+                    // Nothing to walk: refuse the batch so the gesture that
+                    // carried it falls through instead of consuming the swipe.
+                    return (Vec::new(), Vec::new());
+                }
+                let here = current.as_str().and_then(|c| rows.iter().position(|r| r == c));
+                let at = match (here, forward) {
+                    (Some(i), true) => (i + 1) % rows.len(),
+                    (Some(i), false) => (i + rows.len() - 1) % rows.len(),
+                    (None, true) => 0,
+                    (None, false) => rows.len() - 1,
+                };
+                serde_json::Value::String(rows[at].clone())
             }
             (Form::Set(source), _) => match source {
                 SetSource::Payload => match payload {

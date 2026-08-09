@@ -45,6 +45,11 @@ state editing { shape: enum[none, add], initial: .none }
 
 # ── events: total transitions, applied atomically ────────────────────────────
 event toggle_units { units: cycle(.c, .f) }
+# The pager: a horizontal swipe (host gesture, offered as these events) walks
+# the SAVED list, wrapping. On the device-location view ("" is in no row) a
+# first swipe left lands on the first saved city, right on the last.
+event swipe_left   { city: next(cities.name) }
+event swipe_right  { city: prev(cities.name) }
 event open_city    { city: set($value) }              # a saved row re-points the card
 event add_city     { editing: set(.add), query: clear }
 event typing       { query: set($value) }
@@ -129,16 +134,15 @@ view saved  Panel {
                   }
                 }
               }
-              when editing != .add {
-                Row(align: .center, gap: 10, on_tap: add_city, value: "1") {
-                  TextCaption(text: copy.plus, width: .label)
-                  TextRow(text: copy.addcity, width: .fill)
-                }
-              }
             }
 
 view current  Col(align: .center) {
-                TextTitle(text: place.name)
+                # The add affordance lives in the top-right corner, not in a
+                # full-width row below the strip — asked for by hand on device.
+                Row(align: .center, gap: 8) {
+                  TextTitle(text: place.name, width: .fill)
+                  Chip(text: copy.plus, on_tap: add_city, value: "1")
+                }
                 WeatherIcon(cond: now.cond, size: .hero)
                 TextHero(value: now.temp, unit: units, on_tap: toggle_units)
                 # `width: .fit` so the centred column can centre it. A row fills

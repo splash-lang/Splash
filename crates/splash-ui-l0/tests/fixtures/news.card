@@ -50,6 +50,7 @@ copy source   { class: vocabulary, en: "HACKER NEWS", zh: "科技新闻" }
 copy saved_hd { class: vocabulary, en: "READING LIST", zh: "收藏" }
 copy keep_lbl { class: vocabulary, en: "☆ Save" }
 copy drop_lbl { class: vocabulary, en: "Remove" }
+copy back_lbl { class: vocabulary, en: "‹ Back", zh: "‹ 返回" }
 copy read_lbl { class: vocabulary, en: "Read ↗", zh: "阅读原文 ↗" }
 copy latest   { class: vocabulary, en: "LATEST",      zh: "最新" }
 copy topics_hd { class: vocabulary, en: "TOPICS",     zh: "关注" }
@@ -165,7 +166,9 @@ view latest  Col {
              }
 
 view story  Col {
-              Row(on_tap: back) { TextCaption(glyph: "‹") }
+              # A word, not a lone glyph: the glyph alone measured ~20px of
+              # hit target on device, too small for a thumb.
+              Row(align: .center, on_tap: back) { TextRow(text: copy.back_lbl) }
               Row(gap: 8) {
                 Chip(text: copy.keep_lbl, on_tap: keep_story, value: selected)
                 Chip(text: copy.read_lbl, on_tap: read_story, value: article.url)
