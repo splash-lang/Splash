@@ -26,9 +26,6 @@ source found       sys.symbol_search(query: state.query, count: 5, fields: [tick
 state selected { shape: text, initial: "" }                    # "" ⇒ movers list
 state query    { shape: text, initial: "" }
 state editing  { shape: enum[none, add], initial: .none }
-# Swipe-left reveals the red Remove beside each saved row; swipe-right hides
-# it — manage mode as a declared state the gesture events write.
-state managing { shape: enum[off, on], initial: .off }
 # CAPTURED from the stored preference (§5.13); the host guarantees "m1" until
 # the user ever picks a range, so the capture is always a member of the enum.
 state range    { shape: enum[d1, w1, m1, m6, y1], initial: range_pref.range }
@@ -45,8 +42,6 @@ event typing      { query: set($value) }
 event preview     { selected: set($value) }
 event confirm_add { watch: append($value), selected: set($value), editing: set(.none), query: clear }
 event close_add   { editing: set(.none), query: clear }
-event swipe_left  { managing: set(.on) }
-event swipe_right { managing: set(.off) }
 
 copy movers  { class: vocabulary, en: "Top Movers", zh: "涨跌榜" }
 copy back_lbl { class: vocabulary, en: "‹ Back", zh: "‹ 返回" }
@@ -99,18 +94,18 @@ view list  Col {
                }
              }
              for w, i in watch key w.ticker {
-               # The chip is a SIBLING of the tappable part, not a child of it —
-               # a row's transparent hit target covers its whole content, so a
-               # chip inside one fires the row's event, measured on device.
-               # The red Remove exists only in manage mode — a swipe left
-               # reveals it, a swipe right puts it away.
+               # Swipe THIS row left and ITS red Remove appears beside it;
+               # swipe right puts it away. `Reveal` is widget visibility, not
+               # card state — no other row moves, nothing re-realizes, and
+               # the swipe fires instead of the tap so a drag cannot also
+               # open the quote.
                Row(align: .center, gap: 8) {
                  Row(align: .center, gap: 8, width: .fill, on_tap: open_quote, value: w.ticker) {
                    TextRow(text: w.ticker, width: .fill)
                    TextValue(value: w.last, format: .money)
                    TextValue(value: w.pct, format: .signed_pct)
                  }
-                 when managing == .on {
+                 Reveal {
                    Chip(text: copy.unstar, on_tap: forget, value: w.ticker, tone: .danger, width: .fit)
                  }
                }
