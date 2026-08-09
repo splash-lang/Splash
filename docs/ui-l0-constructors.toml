@@ -270,6 +270,17 @@ span = { kind = "number" }
 # way to compute — §4's no-facts rule with the arithmetic hidden in the host.
 # Several countries' series on one axis, with a legend. Names WHAT to plot;
 # the widget fetches it and scales every series to one viewport.
+# A list row's image: a fixed 16:9 tile. `Photo` fills its width (it is a
+# backdrop); a row needs a thumbnail beside its text.
+[Thumb]
+src = { kind = "path" }
+
+# One YouTube search result. `embed` is a player url ready for sys.link — a
+# card cannot build one, because L0 has no string concatenation.
+[sources."sys.video"]
+args = ["query", "count", "fields"]
+answers = ["id", "title", "channel", "length", "views", "age", "thumb", "embed"]
+
 [IndicatorPlot]
 countries = { kind = "path" }
 indicator = { kind = "path" }

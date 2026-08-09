@@ -1,0 +1,83 @@
+# ledger youtube@1.0.0
+# level:   L0
+# profile: ui/l0
+# model:   glm-5.2
+#
+# Watch something. The card SEARCHES — it does not carry a list of video ids
+# the model remembered, which is what the web card it replaces had to do and
+# why its ids went stale. Playback is the host's: a tap hands the player url
+# to sys.link and the native overlay plays it over the card.
+
+# ── sources ──────────────────────────────────────────────────────────────────
+# Live YouTube search. `embed` is a player url the helper builds; a card cannot
+# concatenate one, which is exactly why the helper answers it.
+source hits        sys.video(query: state.q, count: 12,
+                             fields: [id, title, channel, length, views, age, thumb, embed])
+# The player overlay (host-owned): writing a url opens it over the card, and
+# the host closes it on system back.
+source page        sys.link(fields: [url])
+source env.locale  sys.locale()
+
+# ── state ────────────────────────────────────────────────────────────────────
+# What to watch. An intent fills this and the card is already the answer.
+state q       { shape: text, initial: "lofi hip hop radio" }
+state typed   { shape: text, initial: "" }
+state editing { shape: enum[none, find], initial: .none }
+
+# ── events ───────────────────────────────────────────────────────────────────
+event open_find { editing: set(.find), typed: clear }
+event typing    { typed: set($value) }
+# Committing the field searches for what was typed and closes the editor.
+event run_find  { q: set($value), typed: clear, editing: set(.none) }
+event close_find { editing: set(.none), typed: clear }
+# The tap that plays: the row carries its own player url.
+event play      { page: set($value) }
+
+# ── copy ─────────────────────────────────────────────────────────────────────
+copy eyebrow  { class: vocabulary, en: "YOUTUBE",  zh: "YOUTUBE" }
+copy find_lbl { class: vocabulary, en: "Search",   zh: "搜索" }
+copy loading  { class: vocabulary, en: "Searching…", zh: "正在搜索…" }
+copy offline  { class: vocabulary, en: "Can't reach YouTube", zh: "无法连接 YouTube" }
+
+# ── view ─────────────────────────────────────────────────────────────────────
+view root  Surface(pad: .page) {
+             Row(align: .center, gap: 8) {
+               TextCaption(text: copy.eyebrow, width: .fill)
+               Chip(text: copy.find_lbl, on_tap: open_find, value: "1")
+             }
+             # What the list is showing, in the user's own words.
+             TextTitle(text: q, width: .fill)
+             finder
+             when hits.$state == .pending { TextBody(text: copy.loading) }
+             when hits.$state == .failed  { TextBody(text: copy.offline) }
+             results
+           }
+
+view finder Col {
+              when editing == .find {
+                Panel {
+                  Row(align: .center, gap: 10) {
+                    Field(text: typed, placeholder: q, on_commit: run_find,
+                          on_change: typing, width: .fill)
+                    Chip(text: "×", on_tap: close_find)
+                  }
+                }
+              }
+            }
+
+# One row per result: the thumbnail, then what it is and who made it. The whole
+# row taps, carrying its OWN player url — so playing is one tap and the card
+# never has to know how a video is shown.
+view results Col {
+               for v, i in hits key v.id {
+                 Row(align: .center, gap: 10, on_tap: play, value: v.embed) {
+                   Thumb(src: v.thumb)
+                   Col(gap: 2, width: .fill) {
+                     TextRow(text: v.title, width: .fill)
+                     TextCaption(text: v.channel)
+                     TextCaption(text: v.length)
+                   }
+                 }
+                 Rule()
+               }
+             }

@@ -2820,6 +2820,9 @@ pub mod catalog {
     pub const CONSTRUCTORS: &[(&str, Args)] = &[
         ("Surface", &[("pad", Token(PAD))]),
         ("Photo", &[("src", Path), ("pad", Token(PAD))]),
+        // A row-sized image. `Photo` fills its width (it is a backdrop); a list
+        // row needs a fixed 16:9 tile beside its text.
+        ("Thumb", &[("src", Path)]),
         // A map. The card names the TRIP; the widget fetches its own route.
         //
         // The same correction `AqiContour` and `StockPlot` already took. The
@@ -3095,6 +3098,7 @@ pub mod catalog {
         // learns that a store exists.
         ("sys.watchlist", &["ticker", "fields"]),
         ("sys.indicator", &["countries", "indicator", "years", "fields"]),
+        ("sys.video", &["query", "count", "fields"]),
         ("sys.prefs", &["fields"]),
         ("sys.reading", &["fields"]),
         ("sys.topics", &["fields"]),
@@ -3227,6 +3231,13 @@ pub mod catalog {
         (
             "sys.indicator",
             &["name", "latest", "first", "change", "min", "max", "year", "title"],
+        ),
+        // A YouTube search result. `embed` is a player url ready to hand to
+        // sys.link — a card cannot build one, because L0 has no string
+        // concatenation, and that is the point.
+        (
+            "sys.video",
+            &["id", "title", "channel", "length", "views", "age", "thumb", "embed"],
         ),
         ("sys.prefs", &["units", "range", "home", "work", "mode"]),
         // The reading list: SAVED story ids, joined to the story each id names.
@@ -6997,6 +7008,18 @@ pub mod makepad {
                 };
                 Some(format!("sys.reading({index}, {key:?})"))
             }
+            // One search result, by row index.
+            "sys.video" => {
+                let (index, field) = binding.field.split_once('.')?;
+                index.parse::<u32>().ok()?;
+                let key = match field {
+                    f @ ("id" | "title" | "channel" | "length" | "views" | "age" | "thumb"
+                        | "embed") => f,
+                    _ => return None,
+                };
+                let query = arg("query")?;
+                Some(format!("sys.video({query:?}, {index}, {key:?})"))
+            }
             // One country's reading, by row index. The countries argument is the
             // card's own list, so row 0 is the first country it named.
             "sys.indicator" => {
@@ -7884,6 +7907,15 @@ pub mod makepad {
                     "{p}StockPlot{{ width: Fill height: 180 symbol: {} range: {} }}",
                     text_of(arg(node, "symbol")),
                     text_of(arg(node, "range")),
+                );
+            }
+            "Thumb" => {
+                // A fixed 16:9 tile, the size a list row wants beside its text.
+                let _ = writeln!(
+                    out,
+                    "{p}Image{{ width: 108 height: 61 fit: ImageFit.CropToFill \
+                     src: http_resource({}) }}",
+                    expr_of(node, "src")
                 );
             }
             "IndicatorPlot" => {
@@ -9162,6 +9194,7 @@ fn dsl_kind(role: &str) -> Option<&'static str> {
         "Tile" => "listitem",
         "Chip" => "chip",
         "Photo" => "image",
+        "Thumb" => "image",
         "WeatherIcon" => "weathericon",
         role if role.starts_with("Text") => "text",
         // TempBar, SunArc, MoonPhase, AqiContour, StockPlot — no kind exists.
@@ -9280,6 +9313,7 @@ pub mod kit {
             "Tile" => "l0_tile",
             "Chip" => "l0_chip",
             "Photo" => "l0_photo",
+            "Thumb" => "l0_thumb",
             "WeatherIcon" => "l0_weathericon",
             "TempBar" => "l0_tempbar",
             "SunArc" => "l0_sunarc",
@@ -9906,7 +9940,7 @@ pub mod kit {
                 children(node, depth, out);
                 out.push(')');
             }
-            "Photo" => {
+            "Photo" | "Thumb" => {
                 let _ = write!(out, "{f}({})", makepad::expr_of(node, "src"));
             }
             // The trip, as the kit takes it: which member of the map family, how
