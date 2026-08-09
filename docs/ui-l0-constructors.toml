@@ -452,6 +452,14 @@ args = ["fields"]
 answers = ["name", "top_title", "top_points", "top_id"]
 writes = ["append", "remove"]
 
+# The in-app reader. Writing a url opens the host's native web overlay over
+# the card; clear (or system back, host-owned) closes it. `url` answers the
+# page currently open, "" when closed.
+[sources."sys.link"]
+args = ["fields"]
+answers = ["url"]
+writes = ["set", "clear"]
+
 [sources."sys.watchlist"]
 args = ["fields"]
 answers = ["ticker", "name", "last", "change", "pct", "open", "high", "low", "prev", "volume", "mktcap", "pe", "currency", "exchange"]

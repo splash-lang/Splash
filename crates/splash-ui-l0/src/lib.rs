@@ -3060,6 +3060,7 @@ pub mod catalog {
         ("sys.prefs", &["fields"]),
         ("sys.reading", &["fields"]),
         ("sys.topics", &["fields"]),
+        ("sys.link", &["fields"]),
         // Free-text ticker lookup, so a card can offer something the top-movers
         // list does not happen to contain. `sys.search` is the PLACE search and
         // answers a different question; naming them apart is what stops a card
@@ -3188,6 +3189,12 @@ pub mod catalog {
         // top story beside it is searched fresh on every read, so a followed
         // topic never pins the story that was hot when it was followed.
         ("sys.topics", &["name", "top_title", "top_points", "top_id"]),
+        // The in-app reader. `url` is the page currently open in the host's
+        // native web overlay — "" when it is closed. A card WRITES a story's
+        // url to open the reader over itself; the host owns the overlay and
+        // closes it on system back, so the card never has to know how pages
+        // are shown, only which page it asked for.
+        ("sys.link", &["url"]),
         // Verified against the live endpoint, not its documentation: `longname`
         // comes back null for plenty of listings, so `name` falls back to
         // `shortname` in the helper. `kind` distinguishes an equity from a
@@ -3238,6 +3245,7 @@ pub mod catalog {
         ("sys.prefs", &["set", "clear"]),
         ("sys.reading", &["append", "remove"]),
         ("sys.topics", &["append", "remove"]),
+        ("sys.link", &["set", "clear"]),
     ];
 
     pub fn mutable(name: &str) -> Option<&'static [&'static str]> {
@@ -3849,6 +3857,14 @@ fn validate_sources(card: &Card, sink: &mut Diagnostics) {
     if !card.copies.is_empty() {
         read.insert("env".to_owned());
         read.insert("env.locale".to_owned());
+    }
+    // An event WRITE is a use too: `page: set($value)` resolves against the
+    // declared source to learn which capability it drives — a write-only
+    // reader/link source is not dead, it is an actuator.
+    for event in &card.events {
+        for transition in &event.transitions {
+            read.insert(root_of(&transition.target));
+        }
     }
     for source in &card.sources {
         // A dotted source name (`env.locale`) is read as its own root.
@@ -6881,6 +6897,15 @@ pub mod makepad {
                     _ => return None,
                 };
                 Some(format!("sys.reading({index}, {key:?})"))
+            }
+            // The reader overlay's current page — published by the host the
+            // same way locale and the position fix are.
+            "sys.link" => {
+                let key = match binding.field.as_str() {
+                    f @ "url" => f,
+                    _ => return None,
+                };
+                Some(format!("sys.link({key:?})"))
             }
             // A followed topic. `name` is the stored word; the `top_*` keys
             // are the first hit of a fresh search for it, fetched at read time

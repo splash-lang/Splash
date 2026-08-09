@@ -25,6 +25,9 @@ source saved       sys.reading(fields: [id, title, points])
 # Followed TOPICS (§5.12): the store keeps a word per row; the top story
 # beside it is searched fresh at read time, so a topic row is never stale.
 source topics      sys.topics(fields: [name, top_title, top_id])
+# The reader overlay (host-owned): writing a story's url opens the page over
+# the card; the host closes it on system back.
+source page        sys.link(fields: [url])
 
 state selected { shape: text, initial: "" }        # "" ⇒ feed, else a story id
 
@@ -38,12 +41,16 @@ event drop_story  { saved: remove($value) }
 # screen after it was picked: tapping it again is nothing, not a duplicate.
 event follow      { topics: append($value) }
 event unfollow    { topics: remove($value) }
+# The chip carries the article's url as its value: the card never fetches a
+# page, it asks the host to show one.
+event read_story  { page: set($value) }
 
 copy masthead { class: vocabulary, en: "Top Stories",  zh: "头条" }
 copy source   { class: vocabulary, en: "HACKER NEWS", zh: "科技新闻" }
 copy saved_hd { class: vocabulary, en: "READING LIST", zh: "收藏" }
 copy keep_lbl { class: vocabulary, en: "☆ Save" }
 copy drop_lbl { class: vocabulary, en: "Remove" }
+copy read_lbl { class: vocabulary, en: "Read ↗", zh: "阅读原文 ↗" }
 copy latest   { class: vocabulary, en: "LATEST",      zh: "最新" }
 copy topics_hd { class: vocabulary, en: "TOPICS",     zh: "关注" }
 copy t_ai     { class: vocabulary, en: "AI" }
@@ -161,6 +168,7 @@ view story  Col {
               Row(on_tap: back) { TextCaption(glyph: "‹") }
               Row(gap: 8) {
                 Chip(text: copy.keep_lbl, on_tap: keep_story, value: selected)
+                Chip(text: copy.read_lbl, on_tap: read_story, value: article.url)
               }
               TextTitle(text: article.title, width: .fill)
               Row(gap: 6) {
