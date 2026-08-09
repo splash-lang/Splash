@@ -50,16 +50,15 @@ event toggle_units { units: cycle(.c, .f) }
 # first swipe left lands on the first saved city, right on the last.
 event swipe_left   { city: next(cities.name) }
 event swipe_right  { city: prev(cities.name) }
-event open_city    { city: set($value) }              # a saved row re-points the card
 event add_city     { editing: set(.add), query: clear }
 event typing       { query: set($value) }
-# Picking a result does BOTH things it plainly means: it is the city on screen
-# now, and it joins the saved list. One declared transition composes a durable
-# write with three state writes — dispatch routes `cities:` to the host's store
-# (§5.12) and the rest to card state, then the written source goes stale and
-# refetches, so the new row appears with live values.
-event pick_city    { city: set($value), cities: append($value), query: clear, editing: set(.none) }
-event drop_city    { cities: remove($value) }
+# Looking is not keeping. Tapping a result (or committing the field) only
+# RE-POINTS the card — the editor stays up, nothing is stored — and the two
+# ways out are explicit: Add appends the result to the record AND shows it;
+# the × closes the editor with nothing added.
+event preview      { city: set($value) }
+event confirm_add  { city: set($value), cities: append($value), query: clear, editing: set(.none) }
+event close_add    { editing: set(.none), query: clear }
 
 # ── copy: declared literals, all host-owned vocabulary ───────────────────────
 copy feels      { class: vocabulary, en: "Feels like",   zh: "体感" }
@@ -76,6 +75,7 @@ copy sunrise    { class: vocabulary, en: "Sunrise",      zh: "日出" }
 copy sunset     { class: vocabulary, en: "Sunset",       zh: "日落" }
 copy addcity    { class: vocabulary, en: "Add a city",   zh: "添加城市" }
 copy plus       { class: vocabulary, en: "+",            zh: "+" }
+copy add_lbl    { class: vocabulary, en: "Add",          zh: "添加" }
 
 # ── view ─────────────────────────────────────────────────────────────────────
 # §5.9: the fetch lifecycle is a state the card branches on. "Not yet" and
@@ -93,42 +93,33 @@ view root  Photo(src: scene, pad: .page) {
              details
            }
 
-# The saved-cities strip: every row is the stored name beside a LIVE reading,
-# tappable to re-point the whole card (`open_city` writes the same state the
-# whole card hangs off). The add row is nav's editor pattern — a row until it
-# is tapped, a Field only while `editing` says so, because a permanently-live
-# Field cannot be focused on this renderer (measured; see nav.card). Results
-# render as bare rows in the panel: the panel is never empty (the add row is
-# always there), and a `for` with no rows must not leave an empty box behind.
-view saved  Panel {
-              # The remove chip is a SIBLING of the tappable area, not a child.
-              # A tappable row lowers to a transparent hit target drawn OVER its
-              # whole content, so a chip inside one is covered by it and cannot
-              # be hit — measured on the 6T: a tap dead-centre on the chip fired
-              # `open_city`. The row that opens and the chip that removes must
-              # not overlap, so the row wraps them and only its first half taps.
-              for c, i in cities key c.name {
-                Row(align: .center, gap: 10) {
-                  Row(align: .center, gap: 10, width: .fill, on_tap: open_city, value: c.name) {
-                    TextRow(text: c.name, width: .fill)
-                    TextValue(value: c.temp, unit: units)
-                  }
-                  Chip(text: "×", on_tap: drop_city, value: c.name)
-                }
-                Rule()
-              }
+# The add editor — and ONLY the editor. The saved list itself never renders:
+# the record lives in the store and the swipe pager walks it; a visible strip
+# was removed by hand on device. The whole panel exists only while editing,
+# so no empty box is left behind when it is not. Field-not-row is nav's
+# editor pattern (a permanently-live Field cannot be focused; measured).
+view saved  Col {
               when editing == .add {
-                Row(align: .center, gap: 10) {
-                  TextCaption(text: copy.plus, width: .label)
-                  Field(text: query, placeholder: city, on_commit: pick_city,
-                        on_change: typing, width: .fill)
-                }
-                when query != "" {
-                  for f, i in found key f.label {
-                    Row(align: .center, gap: 10, on_tap: pick_city, value: f.query) {
-                      Col(gap: 2) {
-                        TextRow(text: f.name)
-                        TextCaption(text: f.label)
+                Panel {
+                  Row(align: .center, gap: 10) {
+                    TextCaption(text: copy.plus, width: .label)
+                    Field(text: query, placeholder: city, on_commit: preview,
+                          on_change: typing, width: .fill)
+                    Chip(text: "×", on_tap: close_add)
+                  }
+                  when query != "" {
+                    # Row taps PREVIEW; only the Add chip beside a result
+                    # stores it (chip as sibling — a row's hit target covers
+                    # its children, measured).
+                    for f, i in found key f.label {
+                      Row(align: .center, gap: 10) {
+                        Row(align: .center, gap: 10, width: .fill, on_tap: preview, value: f.query) {
+                          Col(gap: 2) {
+                            TextRow(text: f.name)
+                            TextCaption(text: f.label)
+                          }
+                        }
+                        Chip(text: copy.add_lbl, on_tap: confirm_add, value: f.query)
                       }
                     }
                   }

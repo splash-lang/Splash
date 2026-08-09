@@ -2991,6 +2991,9 @@ pub mod catalog {
                 ("active", Bool),
                 // What the action MEANS. The theme decides `.danger` is red.
                 ("tone", Token(TONE)),
+                // `.fit` on a danger chip names the row-scoped compact variant;
+                // the spanning one is the screen action (nav's Stop).
+                ("width", Token(WIDTH)),
             ],
         ),
         ("WeatherIcon", &[("cond", Path), ("size", Token(ICON_SIZE))]),
@@ -9502,7 +9505,11 @@ pub mod kit {
                 // a `width: Fill` bar inside a `width: Fit` wrapper and the End
                 // button rendered as an empty gap — the same Fill-inside-Fit trap
                 // that resolves to nothing, three times over in this card now.
-                (node.kind == "Chip" && !matches!(arg(node, "tone"), Some(NodeValue::Token(t)) if t == "danger"))
+                (node.kind == "Chip"
+                    && (!matches!(arg(node, "tone"), Some(NodeValue::Token(t)) if t == "danger")
+                        // A danger chip that ASKS to fit is a row-scoped one
+                        // (the compact variant below) — its hit target fits it.
+                        || matches!(arg(node, "width"), Some(NodeValue::Token(t)) if t == "fit")))
                     || (node.kind.starts_with("Text") && !asked_to_fill);
             let f = if intrinsic { "l0_tap_fit" } else { "l0_tap" };
             let _ = write!(out, "{f}({target}, ");
@@ -9769,7 +9776,18 @@ pub mod kit {
                 // presentation decisions through one flag reads worse than naming
                 // the thing.
                 if matches!(arg(node, "tone"), Some(NodeValue::Token(t)) if t == "danger") {
-                    let _ = write!(out, "l0_chip_danger({})", makepad::expr_of(node, "text"));
+                    // The card says the scope: `width: .fit` names the compact
+                    // row-sized variant (the tap pass strips value/on_tap before
+                    // this runs, so the payload cannot be the discriminator);
+                    // without it a danger chip is a screen action and spans.
+                    // Both are red — what destructive looks like stays the
+                    // theme's call.
+                    if matches!(arg(node, "width"), Some(NodeValue::Token(t)) if t == "fit") {
+                        let _ =
+                            write!(out, "l0_chip_danger_row({})", makepad::expr_of(node, "text"));
+                    } else {
+                        let _ = write!(out, "l0_chip_danger({})", makepad::expr_of(node, "text"));
+                    }
                 } else if matches!(arg(node, "tone"), Some(NodeValue::Token(t)) if t == "primary")
                 {
                     // The same reasoning as `.danger`: a primary action is bigger

@@ -206,6 +206,9 @@ active = { kind = "bool" }        # a predicate is a bool operand
 # something — the theme decides that reads red and full-width, because a card that
 # named a colour would be stating presentation, which §4 keeps out of the ledger.
 tone   = { kind = "token", tokens = ["normal", "primary", "danger"] }
+# `.fit` on a danger chip names the compact row-scoped variant; without it a
+# danger chip is a screen action and spans the sheet (nav's Stop).
+width  = { kind = "token", tokens = ["fill", "fit", "day", "rank", "temp", "label"] }
 
 # ─── data-visualisation roles ─────────────────────────────────────────────────
 # Every argument is a path. These render live data and hold no authored values —

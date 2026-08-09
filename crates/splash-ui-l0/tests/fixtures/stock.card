@@ -19,8 +19,16 @@ source env.locale  sys.locale()
 # fresh every render; a price is never written down.
 source watch       sys.watchlist(fields: [ticker, last, pct])
 source range_pref  sys.prefs(fields: [range])
+# Free-text ticker lookup for the add flow — weather's editor pattern, the
+# stock way: results carry real listings, never a guessed symbol.
+source found       sys.symbol_search(query: state.query, count: 5, fields: [ticker, name])
 
 state selected { shape: text, initial: "" }                    # "" ⇒ movers list
+state query    { shape: text, initial: "" }
+state editing  { shape: enum[none, add], initial: .none }
+# Swipe-left reveals the red Remove beside each saved row; swipe-right hides
+# it — manage mode as a declared state the gesture events write.
+state managing { shape: enum[off, on], initial: .off }
 # CAPTURED from the stored preference (§5.13); the host guarantees "m1" until
 # the user ever picks a range, so the capture is always a member of the enum.
 state range    { shape: enum[d1, w1, m1, m6, y1], initial: range_pref.range }
@@ -31,12 +39,23 @@ event set_range  { range: set($value), range_pref: set($value) }
 # The star on a mover saves its ticker; Remove on a saved row forgets it.
 event keep       { watch: append($value) }
 event forget     { watch: remove($value) }
+# The add flow. Looking is not keeping: tapping a result only OPENS its quote;
+# Add is the one event that stores, and the × closes with nothing stored.
+event add_sym     { editing: set(.add), query: clear }
+event typing      { query: set($value) }
+event preview     { selected: set($value) }
+event confirm_add { watch: append($value), selected: set($value), editing: set(.none), query: clear }
+event close_add   { editing: set(.none), query: clear }
+event swipe_left  { managing: set(.on) }
+event swipe_right { managing: set(.off) }
 
 copy movers  { class: vocabulary, en: "Top Movers", zh: "涨跌榜" }
 copy back_lbl { class: vocabulary, en: "‹ Back", zh: "‹ 返回" }
 copy watch_hd { class: vocabulary, en: "WATCHLIST", zh: "自选" }
 copy star     { class: vocabulary, en: "☆" }
-copy unstar   { class: vocabulary, en: "Remove" }
+copy unstar   { class: vocabulary, en: "Remove", zh: "删除" }
+copy plus     { class: vocabulary, en: "+" }
+copy add_lbl  { class: vocabulary, en: "Add", zh: "添加" }
 copy loading { class: vocabulary, en: "Fetching the quote…", zh: "正在获取行情…" }
 copy offline { class: vocabulary, en: "Can't reach the market feed", zh: "无法获取行情" }
 copy open   { class: vocabulary, en: "Open",       zh: "开盘" }
@@ -52,22 +71,50 @@ view root  Surface(pad: .page) {
            }
 
 view list  Col {
+             # The header bar is always there: it names the saved list and
+             # hosts the add affordance in the top-right corner.
+             Row(align: .center, gap: 8) {
+               TextCaption(text: copy.watch_hd, width: .fill)
+               Chip(text: copy.plus, on_tap: add_sym, value: "1")
+             }
+             when editing == .add {
+               Panel {
+                 Row(align: .center, gap: 10) {
+                   Field(text: query, placeholder: copy.watch_hd, on_commit: preview,
+                         on_change: typing, width: .fill)
+                   Chip(text: "×", on_tap: close_add)
+                 }
+                 when query != "" {
+                   # Row taps PREVIEW the quote; only the Add chip beside a
+                   # result stores it (chip as sibling — a row's hit target
+                   # covers its children, measured).
+                   for f, i in found key f.ticker {
+                     Row(align: .center, gap: 10) {
+                       Row(align: .center, gap: 10, width: .fill, on_tap: preview, value: f.ticker) {
+                         TextRow(text: f.ticker, width: .label)
+                         TextCaption(text: f.name, width: .fill)
+                       }
+                       Chip(text: copy.add_lbl, on_tap: confirm_add, value: f.ticker)
+                     }
+                   }
+                 }
+               }
+             }
              for w, i in watch key w.ticker {
-               # Header on the first row only (the index binder is 1-based) —
-               # a per-row caption plus ticker, price, pct and the Remove chip
-               # overfilled the row on device: the fill-width ticker collapsed
-               # to nothing and the pct clipped.
-               when i == 1 { TextCaption(text: copy.watch_hd) }
                # The chip is a SIBLING of the tappable part, not a child of it —
                # a row's transparent hit target covers its whole content, so a
                # chip inside one fires the row's event, measured on device.
+               # The red Remove exists only in manage mode — a swipe left
+               # reveals it, a swipe right puts it away.
                Row(align: .center, gap: 8) {
                  Row(align: .center, gap: 8, width: .fill, on_tap: open_quote, value: w.ticker) {
                    TextRow(text: w.ticker, width: .fill)
                    TextValue(value: w.last, format: .money)
                    TextValue(value: w.pct, format: .signed_pct)
                  }
-                 Chip(text: copy.unstar, on_tap: forget, value: w.ticker)
+                 when managing == .on {
+                   Chip(text: copy.unstar, on_tap: forget, value: w.ticker, tone: .danger, width: .fit)
+                 }
                }
              }
              TextTitle(text: copy.movers)
