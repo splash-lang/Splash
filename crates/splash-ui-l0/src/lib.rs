@@ -2820,6 +2820,9 @@ pub mod catalog {
     pub const CONSTRUCTORS: &[(&str, Args)] = &[
         ("Surface", &[("pad", Token(PAD))]),
         ("Photo", &[("src", Path), ("pad", Token(PAD))]),
+        // A row-sized image. `Photo` fills its width (it is a backdrop); a list
+        // row needs a fixed 16:9 tile beside its text.
+        ("Thumb", &[("src", Path)]),
         // A map. The card names the TRIP; the widget fetches its own route.
         //
         // The same correction `AqiContour` and `StockPlot` already took. The
@@ -3016,6 +3019,14 @@ pub mod catalog {
             "StockPlot",
             &[("symbol", Path), ("range", TokenOrPath(UNIT))],
         ),
+        // Several countries' World Bank series on one axis. Like StockPlot it
+        // NAMES what to plot and the widget fetches it: a card that carried
+        // sixty numbers would be stating facts (§4), and they would be wrong
+        // the moment the series is revised.
+        (
+            "IndicatorPlot",
+            &[("countries", Path), ("indicator", Path), ("years", Path)],
+        ),
     ];
 
     pub fn lookup(name: &str) -> Option<Args> {
@@ -3086,6 +3097,8 @@ pub mod catalog {
         // quotes, so a card asks for the fields it wants to show and never
         // learns that a store exists.
         ("sys.watchlist", &["ticker", "fields"]),
+        ("sys.indicator", &["countries", "indicator", "years", "fields"]),
+        ("sys.video", &["query", "count", "fields"]),
         ("sys.prefs", &["fields"]),
         ("sys.reading", &["fields"]),
         ("sys.topics", &["fields"]),
@@ -3211,6 +3224,20 @@ pub mod catalog {
                 // "1" when that ticker is in the user's list, else "0".
                 "has",
             ],
+        ),
+        // One country's reading of a World Bank indicator, indexed like every
+        // other row source: `0.name`, `0.latest`, `0.change`. The SERIES is the
+        // chart's to fetch; these are the numbers a card puts beside it.
+        (
+            "sys.indicator",
+            &["name", "latest", "first", "change", "min", "max", "year", "title"],
+        ),
+        // A YouTube search result. `embed` is a player url ready to hand to
+        // sys.link — a card cannot build one, because L0 has no string
+        // concatenation, and that is the point.
+        (
+            "sys.video",
+            &["id", "title", "channel", "length", "views", "age", "thumb", "embed"],
         ),
         ("sys.prefs", &["units", "range", "home", "work", "mode"]),
         // The reading list: SAVED story ids, joined to the story each id names.
@@ -6981,6 +7008,46 @@ pub mod makepad {
                 };
                 Some(format!("sys.reading({index}, {key:?})"))
             }
+            // One search result, by row index.
+            "sys.video" => {
+                let (index, field) = binding.field.split_once('.')?;
+                index.parse::<u32>().ok()?;
+                let key = match field {
+                    f @ ("id" | "title" | "channel" | "length" | "views" | "age" | "thumb"
+                        | "embed") => f,
+                    _ => return None,
+                };
+                let query = arg("query")?;
+                Some(format!("sys.video({query:?}, {index}, {key:?})"))
+            }
+            // One country's reading, by row index. The countries argument is the
+            // card's own list, so row 0 is the first country it named.
+            "sys.indicator" => {
+                // `read.0.name` is a row; `read.title` is the indicator's own
+                // name, which is the same for every row — so a bare field
+                // reads row 0 rather than answering nothing (the card titles
+                // itself with it, and it rendered an em dash).
+                let (index, field) = match binding.field.split_once('.') {
+                    Some((i, f)) => (i, f),
+                    None => ("0", binding.field.as_str()),
+                };
+                index.parse::<u32>().ok()?;
+                let key = match field {
+                    f @ ("name" | "latest" | "first" | "change" | "min" | "max" | "year"
+                        | "title") => f,
+                    _ => return None,
+                };
+                let countries = arg("countries")?;
+                let indicator = arg("indicator")?;
+                let years = arg("years").unwrap_or_else(|| "30".to_owned());
+                // `:?` on the two text slots — a bare interpolation put
+                // `sys.indicator(CHN,IND, ...)` in the DSL, which parses as
+                // two arguments and answered nothing (measured on device).
+                // `years` is a numeric slot and stays unquoted.
+                Some(format!(
+                    "sys.indicator({countries:?}, {indicator:?}, {years}, {index}, {key:?})"
+                ))
+            }
             // The reader overlay's current page — published by the host the
             // same way locale and the position fix are.
             "sys.link" => {
@@ -7842,6 +7909,27 @@ pub mod makepad {
                     text_of(arg(node, "range")),
                 );
             }
+            "Thumb" => {
+                // A fixed 16:9 tile, the size a list row wants beside its text.
+                let _ = writeln!(
+                    out,
+                    "{p}Image{{ width: 108 height: 61 fit: ImageFit.CropToFill \
+                     src: http_resource({}) }}",
+                    expr_of(node, "src")
+                );
+            }
+            "IndicatorPlot" => {
+                // Same contract as StockPlot: the card names which countries
+                // and which indicator, the widget fetches the series.
+                let _ = writeln!(
+                    out,
+                    "{p}IndicatorPlot{{ width: Fill height: 210 countries: {} \
+                     indicator: {} years: {} }}",
+                    text_of(arg(node, "countries")),
+                    text_of(arg(node, "indicator")),
+                    expr_of(node, "years"),
+                );
+            }
             "Chip" => {
                 // `active` selects the fill. Dropping it made every range chip
                 // render identically, so a card could not show which was
@@ -8576,6 +8664,27 @@ pub struct SourcePlan {
 /// This returns *what to fetch*, never fetches it. The card names a helper; only
 /// the host knows what answers it. That separation is what lets realization run
 /// against an empty host surface.
+/// Each state's DECLARED literal initial, by path.
+///
+/// A host that has to resolve a source argument BEFORE realize — `sys.indicator
+/// (countries: state.countries)` has to know which countries to ask about
+/// before there is a tree — cannot read it from the store (nothing has been
+/// written yet) or from the seed data (an initial is a declaration, not data).
+/// It is in the card, and this is how a host reads it. Path-valued initials
+/// (`initial: env.locale.temp_unit`) are absent here on purpose: they resolve
+/// against injected data at realization, which is after this is useful.
+pub fn state_initials(source: &str) -> std::collections::BTreeMap<String, serde_json::Value> {
+    let mut sink = Diagnostics::default();
+    let Some(tokens) = lex(source, &mut sink) else {
+        return std::collections::BTreeMap::new();
+    };
+    let card = Parser::new(&tokens, &mut sink).parse_card();
+    card.states
+        .iter()
+        .filter_map(|st| st.initial.clone().map(|v| (st.path.clone(), v)))
+        .collect()
+}
+
 pub fn source_plan(source: &str) -> SourcePlan {
     let mut sink = Diagnostics::default();
     let Some(tokens) = lex(source, &mut sink) else {
@@ -9085,6 +9194,7 @@ fn dsl_kind(role: &str) -> Option<&'static str> {
         "Tile" => "listitem",
         "Chip" => "chip",
         "Photo" => "image",
+        "Thumb" => "image",
         "WeatherIcon" => "weathericon",
         role if role.starts_with("Text") => "text",
         // TempBar, SunArc, MoonPhase, AqiContour, StockPlot — no kind exists.
@@ -9203,6 +9313,7 @@ pub mod kit {
             "Tile" => "l0_tile",
             "Chip" => "l0_chip",
             "Photo" => "l0_photo",
+            "Thumb" => "l0_thumb",
             "WeatherIcon" => "l0_weathericon",
             "TempBar" => "l0_tempbar",
             "SunArc" => "l0_sunarc",
@@ -9210,6 +9321,7 @@ pub mod kit {
             "AqiContour" => "l0_aqicontour",
             "Satellite" => "l0_satellite",
             "StockPlot" => "l0_stockplot",
+            "IndicatorPlot" => "l0_indicatorplot",
             "TextHero" => "l0_hero",
             "TextTitle" => "l0_title",
             "TextBody" => "l0_body",
@@ -9828,7 +9940,7 @@ pub mod kit {
                 children(node, depth, out);
                 out.push(')');
             }
-            "Photo" => {
+            "Photo" | "Thumb" => {
                 let _ = write!(out, "{f}({})", makepad::expr_of(node, "src"));
             }
             // The trip, as the kit takes it: which member of the map family, how
@@ -9900,6 +10012,18 @@ pub mod kit {
             // the catalog's order — no defaults, because a bar drawn against a
             // range nobody supplied is a bar drawn against zero, and it looks
             // like data.
+            // The card names WHICH countries and WHICH indicator as text; the
+            // widget resolves the series. Kept out of the numeric group below
+            // because two of its three arguments are strings.
+            "IndicatorPlot" => {
+                let _ = write!(
+                    out,
+                    "{f}({}, {}, {})",
+                    makepad::expr_of(node, "countries"),
+                    makepad::expr_of(node, "indicator"),
+                    scalar_num_of(node, "years")
+                );
+            }
             "TempBar" | "SunArc" | "MoonPhase" | "AqiContour" | "StockPlot" | "Satellite" => {
                 let params: &[&str] = match node.kind.as_str() {
                     "TempBar" => &["lo", "hi", "min", "max"],

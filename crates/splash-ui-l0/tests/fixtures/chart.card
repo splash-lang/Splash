@@ -1,0 +1,100 @@
+# ledger chart@1.0.0
+# level:   L0
+# profile: ui/l0
+# model:   glm-5.2
+#
+# Compare countries on one World Bank indicator. The card names WHO and WHAT;
+# the chart fetches the series and the scalars beside it read the same request.
+# Nothing here states a number — a series baked into a card is wrong the moment
+# the World Bank revises it (§4).
+
+# ── sources ──────────────────────────────────────────────────────────────────
+# One reading per country, indexed in the order `countries` lists them — the
+# same order IndicatorPlot assigns its legend colours, so row 0's number and
+# the first line on the chart are the same country.
+source read        sys.indicator(countries: state.countries,
+                                 indicator: state.metric,
+                                 years: state.span,
+                                 fields: [name, latest, first, change, min, max, year, title])
+source env.locale  sys.locale()
+
+# ── state ────────────────────────────────────────────────────────────────────
+# The bootstrap surface: an intent fills these three and the whole card follows.
+state countries { shape: text, initial: "CHN,IND" }
+state metric    { shape: text, initial: "NY.GDP.MKTP.KD.ZG" }
+state span      { shape: number, initial: 30 }
+
+# ── events ───────────────────────────────────────────────────────────────────
+event show_span { span: set($value) }
+# The metric switcher: each chip names an indicator the World Bank publishes
+# for every country, so a comparison never half-answers.
+event pick_metric { metric: set($value) }
+
+# ── copy ─────────────────────────────────────────────────────────────────────
+copy eyebrow  { class: vocabulary, en: "WORLD BANK",   zh: "世界银行" }
+copy latest   { class: vocabulary, en: "Latest",       zh: "最新" }
+copy first_lbl { class: vocabulary, en: "Start",       zh: "起点" }
+copy change   { class: vocabulary, en: "Change",       zh: "变化" }
+copy peak     { class: vocabulary, en: "Peak",         zh: "峰值" }
+copy trough   { class: vocabulary, en: "Low",          zh: "谷值" }
+copy loading  { class: vocabulary, en: "Fetching the series…", zh: "正在获取数据…" }
+copy offline  { class: vocabulary, en: "Can't reach the World Bank", zh: "无法获取数据" }
+copy m_growth { class: vocabulary, en: "GDP growth",   zh: "GDP 增速" }
+copy m_gdp    { class: vocabulary, en: "GDP",          zh: "GDP" }
+copy m_cap    { class: vocabulary, en: "GDP/capita",   zh: "人均 GDP" }
+copy m_life   { class: vocabulary, en: "Life exp.",    zh: "预期寿命" }
+copy m_co2    { class: vocabulary, en: "CO₂/capita",   zh: "人均碳排" }
+copy y10      { class: vocabulary, en: "10y" }
+copy y30      { class: vocabulary, en: "30y" }
+copy y60      { class: vocabulary, en: "60y" }
+
+# ── view ─────────────────────────────────────────────────────────────────────
+# §5.9: the fetch lifecycle is a state the card branches on — "not yet" and
+# "went wrong" are different facts and each says so.
+view root  Surface(pad: .page) {
+             TextCaption(text: copy.eyebrow)
+             # The indicator's own name, as the API spells it — the card does
+             # not restate what it asked for.
+             TextTitle(text: read.title, width: .fill)
+             when read.$state == .pending { TextBody(text: copy.loading) }
+             when read.$state == .failed  { TextBody(text: copy.offline) }
+             chart
+             spans
+             metrics
+             readings
+           }
+
+view chart Col {
+             IndicatorPlot(countries: countries, indicator: metric, years: span)
+           }
+
+# The window. `active` is the chip's own guard, so the theme lights the one
+# the card is showing rather than the card describing a colour.
+view spans Row(gap: 8) {
+             Chip(text: copy.y10, on_tap: show_span, value: 10, active: span == 10)
+             Chip(text: copy.y30, on_tap: show_span, value: 30, active: span == 30)
+             Chip(text: copy.y60, on_tap: show_span, value: 60, active: span == 60)
+           }
+
+view metrics Row(gap: 8) {
+             Chip(text: copy.m_growth, on_tap: pick_metric, value: "NY.GDP.MKTP.KD.ZG",
+                  active: metric == "NY.GDP.MKTP.KD.ZG")
+             Chip(text: copy.m_gdp, on_tap: pick_metric, value: "NY.GDP.MKTP.CD",
+                  active: metric == "NY.GDP.MKTP.CD")
+             Chip(text: copy.m_cap, on_tap: pick_metric, value: "NY.GDP.PCAP.CD",
+                  active: metric == "NY.GDP.PCAP.CD")
+           }
+
+# One row per country, each carrying that country's own numbers. The row order
+# IS the legend order, so a reader can match a line to its figures without the
+# card having to name a colour.
+view readings Col {
+              for r, i in read key r.name {
+                Row(align: .center, gap: 10) {
+                  TextRow(text: r.name, width: .fill)
+                  TextValue(value: r.latest)
+                  TextCaption(text: r.change)
+                }
+                Rule()
+              }
+            }

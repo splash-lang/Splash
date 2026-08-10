@@ -268,6 +268,24 @@ span = { kind = "number" }
 # Likewise: the card names WHICH series, and the widget fetches it. Passing
 # `points`/`min`/`max` made the card responsible for a scaled series it has no
 # way to compute — §4's no-facts rule with the arithmetic hidden in the host.
+# Several countries' series on one axis, with a legend. Names WHAT to plot;
+# the widget fetches it and scales every series to one viewport.
+# A list row's image: a fixed 16:9 tile. `Photo` fills its width (it is a
+# backdrop); a row needs a thumbnail beside its text.
+[Thumb]
+src = { kind = "path" }
+
+# One YouTube search result. `embed` is a player url ready for sys.link — a
+# card cannot build one, because L0 has no string concatenation.
+[sources."sys.video"]
+args = ["query", "count", "fields"]
+answers = ["id", "title", "channel", "length", "views", "age", "thumb", "embed"]
+
+[IndicatorPlot]
+countries = { kind = "path" }
+indicator = { kind = "path" }
+years     = { kind = "path" }
+
 [StockPlot]
 symbol = { kind = "path" }
 range  = { kind = "unit" }
@@ -462,6 +480,14 @@ writes = ["append", "remove"]
 args = ["fields"]
 answers = ["url"]
 writes = ["set", "clear"]
+
+# One country's reading of a World Bank indicator (keyless). Rows are indexed
+# in the order the card listed its countries, so row 0 is the first one named.
+# The SERIES itself belongs to IndicatorPlot, which fetches it: a card that
+# carried the numbers would be stating facts that go stale on revision.
+[sources."sys.indicator"]
+args = ["countries", "indicator", "years", "fields"]
+answers = ["name", "latest", "first", "change", "min", "max", "year", "title"]
 
 [sources."sys.watchlist"]
 # `ticker` turns the source into a membership probe: `has` answers "1" when
