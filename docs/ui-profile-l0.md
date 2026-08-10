@@ -537,6 +537,32 @@ source env.theme   sys.theme()
 Anything reachable without a declared source is a defect by construction — which is also what
 makes an L0 view's dependency set readable without evaluating it.
 
+### 4.1 `theme` — the one presentation statement, and why it is not one
+
+```
+theme dark
+```
+
+At most one per card, and the name must be catalogued (`catalog::THEMES`: `dark`, `light`,
+`glass`, `photo`). An uncatalogued name is refused at parse time, with the known set named.
+
+This does not weaken the no-presentation rule, because a card declaring `theme glass` has said
+nothing about what glass *is*. The kit answers it: a theme is a palette concatenated in front of
+the kit body (`Splash-Makepad/components/l0/_palette_*.splash`), so the page colour, the panel
+fill, the hairline and the ink are all still decided one layer down. A card still cannot write
+`#ffffff`, a font size or a radius — those are refused exactly as before.
+
+**Declaring a theme is not the same as reading one.** The `source env.theme sys.theme()` sketched
+above is the opposite direction — a card ASKING what the ambient theme is — and it is *not
+implemented*: `sys.theme` has never been in the catalog, so that line is a sketch and a card
+naming it is refused. The declaration is the direction that exists, because the case that
+motivated it is a user asking for a look ("dark weather tokyo"): the request names a mood, the
+agent declares it, the kit renders it.
+
+**A card must not declare a mood nobody asked for.** Choosing one unprompted is deciding
+presentation by the back door. The host tells the agent when a request named a look; absent that,
+the card declares nothing and gets the kit's default.
+
 ---
 
 ## 5. Components and instance identity

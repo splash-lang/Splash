@@ -782,6 +782,14 @@ struct Card {
     copies: Vec<CopyDecl>,
     components: Vec<Component>,
     views: Vec<View>,
+    /// The card's declared theme INTENT, and the line it was declared on.
+    ///
+    /// A name, never a colour. §4 forbids a card stating presentation, and that
+    /// does not change here: `theme dark` says which of a closed set of moods
+    /// this card is in, and the layer above — the component kit — decides what
+    /// dark looks like. A card that wants a look no theme name covers does not
+    /// get to describe it.
+    theme: Option<(String, usize)>,
 }
 
 /// A declared capability dependency: the name it binds, the helper that answers
@@ -1179,6 +1187,34 @@ impl<'a> Parser<'a> {
                         });
                     }
                 }
+                "theme" => {
+                    self.at += 1;
+                    let line = t.line;
+                    if let Some(name) = self.ident() {
+                        if let Some((first, first_line)) = &card.theme {
+                            self.sink.at(
+                                &t,
+                                format!(
+                                    "a card declares ONE theme; {first:?} was already \
+                                     declared on line {first_line}"
+                                ),
+                            );
+                            let _ = first;
+                        } else if catalog::theme(&name).is_none() {
+                            self.sink.at(
+                                &t,
+                                format!(
+                                    "{name:?} is not a theme L0 admits; a card names a \
+                                     catalogued mood and never a colour (profile §4). \
+                                     Known: {}",
+                                    catalog::THEMES.join(", ")
+                                ),
+                            );
+                        } else {
+                            card.theme = Some((name, line));
+                        }
+                    }
+                }
                 "component" => {
                     self.at += 1;
                     if let Some(c) = self.parse_component() {
@@ -1195,7 +1231,7 @@ impl<'a> Parser<'a> {
                     self.sink.at(
                         &t,
                         format!(
-                            "expected a declaration (source, state, event, copy, component, view), found {:?}",
+                            "expected a declaration (source, state, event, copy, theme, component, view), found {:?}",
                             t.text
                         ),
                     );
@@ -2736,6 +2772,23 @@ fn collect_constructors(e: &Element, out: &mut Vec<String>) {
 /// The argument contract. Mirrors `docs/ui-l0-constructors.toml`, which is the
 /// human-readable spec; a test asserts the two agree.
 pub mod catalog {
+    /// The themes a card may declare, as MOODS rather than looks.
+    ///
+    /// Closed, and closed for the same reason the role list is: a theme name is
+    /// a promise that every kit answers it. A card naming a mood no kit has
+    /// would render in whatever the kit's default palette is and look correct,
+    /// which is the §1.1 failure this list exists to make impossible — so an
+    /// unknown name is refused at parse time instead.
+    ///
+    /// `dark` is the default and needs no declaration; it is listed so a card
+    /// may say so explicitly.
+    pub const THEMES: &[&str] = &["dark", "light", "glass", "photo"];
+
+    /// The catalogued theme of that name, or `None` if L0 does not admit it.
+    pub fn theme(name: &str) -> Option<&'static str> {
+        THEMES.iter().copied().find(|t| *t == name)
+    }
+
     /// What an argument admits.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum ArgKind {
@@ -8683,6 +8736,25 @@ pub fn state_initials(source: &str) -> std::collections::BTreeMap<String, serde_
         .iter()
         .filter_map(|st| st.initial.clone().map(|v| (st.path.clone(), v)))
         .collect()
+}
+
+/// The theme this card declares, or `None` for the default.
+///
+/// The card names a MOOD; resolving it into colours is the component kit's job
+/// (§1.1's middle layer), so this hands the host a catalogued name and nothing
+/// else. A name absent from [`catalog::THEMES`] never reaches here — the parser
+/// refuses it — so a host may treat whatever it gets as answerable, and treat
+/// `None` as "the kit's default".
+///
+/// Read before realize, like [`state_initials`]: the palette has to be chosen to
+/// build the source the kit is concatenated into, which is earlier than a tree.
+pub fn card_theme(source: &str) -> Option<String> {
+    let mut sink = Diagnostics::default();
+    let tokens = lex(source, &mut sink)?;
+    Parser::new(&tokens, &mut sink)
+        .parse_card()
+        .theme
+        .map(|(name, _)| name)
 }
 
 pub fn source_plan(source: &str) -> SourcePlan {
