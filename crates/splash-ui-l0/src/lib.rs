@@ -566,6 +566,17 @@ fn lex(source: &str, sink: &mut Diagnostics) -> Option<Vec<Token>> {
         // Comparators.
         if matches!(c, '=' | '!' | '<' | '>') {
             let two = i + 1 < bytes.len() && bytes[i + 1] == '=';
+            // A lone `<` or `>` IS a comparator; a lone `=` or `!` is not.
+            //
+            // These were one rule, and it made `when a > b` — the exact form
+            // §"what is not here" tells an agent to write instead of `if a > b` —
+            // unparseable. `compare` has implemented `<` and `>` all along and
+            // could never be reached with them, so the guards a card was told to
+            // write were refused for a lexer rule about `!x`.
+            //
+            // Nothing else in the grammar uses an angle bracket, so there is no
+            // ambiguity to preserve: no generics, no arrows, no tags.
+            let one_char_cmp = matches!(c, '<' | '>');
             let text: String = if two {
                 let s: String = bytes[i..i + 2].iter().collect();
                 i += 2;
@@ -576,10 +587,9 @@ fn lex(source: &str, sink: &mut Diagnostics) -> Option<Vec<Token>> {
                 col += 1;
                 c.to_string()
             };
-            // A lone `=` or `!` is punctuation; only the two-character forms are
-            // comparators. Without this `!x` lexes as Cmp and the level
-            // classifier's punctuation check never fires.
-            if !two {
+            // A lone `=` or `!` is punctuation. Without this `!x` lexes as Cmp
+            // and the level classifier's punctuation check never fires.
+            if !two && !one_char_cmp {
                 out.push(Token {
                     kind: Kind::Punct,
                     text,
