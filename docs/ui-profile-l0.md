@@ -547,10 +547,26 @@ At most one per card, and the name must be catalogued (`catalog::THEMES`: `dark`
 `glass`, `photo`). An uncatalogued name is refused at parse time, with the known set named.
 
 This does not weaken the no-presentation rule, because a card declaring `theme glass` has said
-nothing about what glass *is*. The kit answers it: a theme is a palette concatenated in front of
-the kit body (`Splash-Makepad/components/l0/_palette_*.splash`), so the page colour, the panel
-fill, the hairline and the ink are all still decided one layer down. A card still cannot write
-`#ffffff`, a font size or a radius — those are refused exactly as before.
+nothing about what glass *is*. The kit answers it, by assembling itself in four parts:
+
+```
+_palette_dark.splash   the BASE — knobs (space_factor, radius_factor, font_base, font_step)
+                       and every colour
+_palette_<mood>.splash the DELTA — only what this mood changes; may move a knob
+_derive.splash         every SIZE, computed from the knobs — AFTER the delta, so a mood
+                       that moves a knob moves everything following from it
+_kit.splash            the roles, which read those tokens and never a literal
+```
+
+So the page colour, the panel fill, the hairline, the ink, the paddings, the radii and the type
+scale are all decided one layer down, and `glass` is expressed as "dark, but these fourteen
+colours and `radius_factor: 1.5`". A card still cannot write `#ffffff`, a font size or a radius —
+those are refused exactly as before.
+
+The order is load-bearing and its failure is silent: `let` evaluates at its own line, so deriving
+sizes in the base would leave a delta's `radius_factor` with nothing left to change, and an
+assembly that omits `_derive.splash` leaves every size an undefined name — which is 0, so the
+tree still builds with no padding and no type scale at all.
 
 **Declaring a theme is not the same as reading one.** The `source env.theme sys.theme()` sketched
 above is the opposite direction — a card ASKING what the ambient theme is — and it is *not
