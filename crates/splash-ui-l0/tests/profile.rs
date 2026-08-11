@@ -8957,3 +8957,78 @@ fn a_typed_query_is_never_executable() {
         "a typed query stays a QUOTED string, whatever it looks like:\n{dsl}"
     );
 }
+
+#[test]
+fn a_card_that_gates_its_rows_on_a_state_can_still_learn_that_state() {
+    // The shape the shipped `activity` exemplar had, and the deadlock it caused:
+    // the ONLY reference to `parks` sits inside `when parks.$state == .ready`, and
+    // `$state` was observed by walking the realized tree for bindings. No data ->
+    // pending -> the rows do not realize -> nothing binds `parks` -> no status is
+    // written -> pending. Forever.
+    //
+    // Measured on the 6T with "what can I do in beijing tomorrow": the card drew
+    // "Finding places nearby…" and nothing else, and `L0 $state:` logged empty on
+    // every realize while the Kyoto card beside it logged all seven ready.
+    //
+    // A host cannot break that loop from the tree, so the card has to say what it
+    // is waiting on — which its own `when` already does.
+    const GATED: &str = concat!(
+        "# level: L0\n",
+        "source place sys.geocode(name: state.city)\n",
+        "source parks sys.places(lat: place.lat, lon: place.lon, category: \"park\",\n",
+        "                        count: 3, fields: [id, name, distance])\n",
+        "state city { shape: text, initial: \"Beijing\" }\n",
+        "copy loading { class: vocabulary, en: \"Finding places nearby…\" }\n",
+        "view root Surface {\n",
+        "  when parks.$state == .pending { TextBody(text: copy.loading) }\n",
+        "  when parks.$state == .ready {\n",
+        "    Panel { for p, i in parks key p.id { TextRow(text: p.name) } }\n",
+        "  }\n",
+        "}\n"
+    );
+    let checked = check_ui_l0_named("activity", GATED);
+    assert!(checked.valid, "{:#?}", checked.diagnostics);
+
+    let store = splash_ui_l0::InstanceStore::default();
+    let probes = splash_ui_l0::guarded_state_bindings(GATED, &serde_json::json!({}), &store);
+    assert_eq!(probes.len(), 1, "one source is gated: {probes:#?}");
+    assert_eq!(probes[0].source, "parks");
+    // EMPTY, deliberately: a lifecycle is a property of the fetch, so which field
+    // answers is the backend's to choose — `probe_call` walks the catalog.
+    assert!(probes[0].field.is_empty(), "a probe names no field");
+    // And the argument chain is already resolved, so the host asks about Beijing
+    // rather than about a source it would have to fetch in order first.
+    // Asked as a ROW — `sys.places` is a list, so `0.name` is the shape that
+    // translates and a bare `name` answers nothing. That is exactly what a host's
+    // probe has to try, and the one that only tried the bare field could not
+    // probe a list source at all.
+    let call = splash_ui_l0::makepad::vm_call(&splash_ui_l0::SourceBinding {
+        field: "0.name".to_owned(),
+        ..probes[0].binding.clone()
+    })
+    .expect("this backend answers it");
+    assert!(
+        call.contains("sys.geocodenum(\"Beijing\", \"lat\")"),
+        "the probe carries the place the card names:\n{call}"
+    );
+
+    // The discriminating half: a card that merely DISPLAYS a source is not gated,
+    // and asks for no probe. Its bindings are in the tree, where the walk finds
+    // them, so this stays as narrow as `resolve_guards`.
+    const PLAIN: &str = concat!(
+        "# level: L0\n",
+        "source place sys.geocode(name: state.city)\n",
+        "source parks sys.places(lat: place.lat, lon: place.lon, category: \"park\",\n",
+        "                        count: 3, fields: [id, name, distance])\n",
+        "state city { shape: text, initial: \"Beijing\" }\n",
+        "view root Surface {\n",
+        "  Panel { for p, i in parks key p.id { TextRow(text: p.name) } }\n",
+        "}\n"
+    );
+    let checked = check_ui_l0_named("activity", PLAIN);
+    assert!(checked.valid, "{:#?}", checked.diagnostics);
+    assert!(
+        splash_ui_l0::guarded_state_bindings(PLAIN, &serde_json::json!({}), &store).is_empty(),
+        "an ungated source needs no probe — the tree walk already answers it"
+    );
+}

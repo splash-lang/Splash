@@ -8997,12 +8997,85 @@ pub fn guard_bindings(
     data: &serde_json::Value,
     store: &InstanceStore,
 ) -> Vec<GuardBinding> {
+    resolved_bindings(source, data, store, guarded_fields_of)
+}
+
+/// A probe binding for each source whose LIFECYCLE a `when` reads.
+///
+/// `$state` was observed by walking the realized tree for bindings, which makes
+/// it a property of what RENDERED rather than of the fetch. A card that gates its
+/// rows on the state it is waiting for is then a closed loop:
+///
+///     when parks.$state == .pending { TextBody(text: copy.loading) }
+///     when parks.$state == .ready   { Panel { for p, i in parks … } }
+///
+/// no data -> pending -> the rows do not realize -> nothing binds `parks` ->
+/// no status is written -> pending. Forever. Measured on the 6T: the activity
+/// card for Beijing drew "Finding places nearby…" and nothing else, with
+/// `L0 $state:` logging empty on every realize. It is the shipped EXEMPLAR's
+/// shape, so every generated activity card inherited it, and the two apps that
+/// escape do so by accident — `weather-activity` puts its `for` beside the
+/// pending guard rather than behind a ready one, and `quake`'s gated feed shares
+/// a helper with an ungated lead.
+///
+/// The field is left EMPTY: which one answers is the backend's business, and a
+/// lifecycle is a property of the fetch, so any field the helper answers reports
+/// the same thing.
+pub fn guarded_state_bindings(
+    source: &str,
+    data: &serde_json::Value,
+    store: &InstanceStore,
+) -> Vec<GuardBinding> {
+    resolved_bindings(source, data, store, guarded_states_of)
+}
+
+/// Sources whose `$state` a `when` reads, as `(name, "")` — the empty field is
+/// what makes each a probe rather than a value.
+fn guarded_states_of(card: &Card) -> Vec<(String, String)> {
+    let sources: std::collections::BTreeSet<String> =
+        card.sources.iter().map(|s| s.name.clone()).collect();
+    let mut out: Vec<(String, String)> = Vec::new();
+    fn walk(
+        el: &Element,
+        sources: &std::collections::BTreeSet<String>,
+        out: &mut Vec<(String, String)>,
+    ) {
+        if el.name == "when" {
+            if let Some(a) = el.args.first() {
+                if let Operand::Path(p) = &a.value {
+                    if let Some(name) = p.strip_suffix(".$state") {
+                        if sources.contains(name) {
+                            let pair = (name.to_owned(), String::new());
+                            if !out.contains(&pair) {
+                                out.push(pair);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for c in &el.children {
+            walk(c, sources, out);
+        }
+    }
+    for v in &card.views {
+        walk(&v.body, &sources, &mut out);
+    }
+    out
+}
+
+fn resolved_bindings(
+    source: &str,
+    data: &serde_json::Value,
+    store: &InstanceStore,
+    select: fn(&Card) -> Vec<(String, String)>,
+) -> Vec<GuardBinding> {
     let mut sink = Diagnostics::default();
     let Some(tokens) = lex(source, &mut sink) else {
         return Vec::new();
     };
     let card = Parser::new(&tokens, &mut sink).parse_card();
-    let wanted = guarded_fields_of(&card);
+    let wanted = select(&card);
     if wanted.is_empty() {
         return Vec::new();
     }
@@ -9045,7 +9118,12 @@ pub fn guard_bindings(
     wanted
         .into_iter()
         .filter_map(|(name, field)| {
-            let binding = ctx.source_binding(&format!("{name}.{field}"), &scope)?;
+            let path = if field.is_empty() {
+                name.clone()
+            } else {
+                format!("{name}.{field}")
+            };
+            let binding = ctx.source_binding(&path, &scope)?;
             Some(GuardBinding {
                 source: name,
                 field,
