@@ -425,6 +425,16 @@ answers = ["id", "name", "distance", "lat", "lon", "category"]
 args = ["count", "offset", "fields"]
 answers = ["id", "title", "author", "points", "comments", "url"]
 
+[sources."sys.quakes"]
+# The USGS M2.5+ feed of the last 24 hours, newest first. Row-shaped like
+# `sys.news`, and for the same reason: a feed is a list, and `offset` is what
+# lets a card show a lead event above the rest without repeating it.
+#
+# `id` is the row's index as a string. USGS ids are opaque and the card only
+# needs identity for a `key`, which is what a `for` requires.
+args = ["count", "offset", "fields"]
+answers = ["id", "mag", "place", "depth", "ago", "lat", "lon"]
+
 [sources."sys.news_item"]
 args = ["id", "fields"]
 answers = ["id", "title", "author", "points", "comments", "url"]

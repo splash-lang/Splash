@@ -3145,6 +3145,7 @@ pub mod catalog {
         ),
         ("sys.places", &["lat", "lon", "category", "count", "fields"]),
         ("sys.news", &["count", "offset", "fields"]),
+        ("sys.quakes", &["count", "offset", "fields"]),
         ("sys.news_item", &["id", "fields"]),
         // `symbols` names the UNIVERSE to rank. Without it the only universe is
         // the market-wide day-gainers screener, so "top 10 AI movers" could only
@@ -3254,6 +3255,10 @@ pub mod catalog {
         (
             "sys.news",
             &["id", "title", "author", "points", "comments", "url"],
+        ),
+        (
+            "sys.quakes",
+            &["id", "mag", "place", "depth", "ago", "lat", "lon"],
         ),
         (
             "sys.news_item",
@@ -6848,6 +6853,25 @@ pub mod makepad {
                     _ => return None,
                 };
                 Some(format!("sys.news({index}, {key:?})"))
+            }
+            // The quake feed. Same row shape as `sys.news`, same `offset` reason:
+            // the card shows the newest event large and the rest beneath it, and
+            // without honouring the offset row 0 of the list is the lead again.
+            "sys.quakes" => {
+                let (index, field) = binding.field.split_once('.')?;
+                let row: u32 = index.parse().ok()?;
+                let offset: u32 = arg("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
+                let index = row + offset;
+                let key = match field {
+                    // The backend spells the humanized age `ago`; `id` has no
+                    // backend field — the row index IS the identity, which is all
+                    // a `for` key needs.
+                    "ago" => "ago",
+                    f @ ("mag" | "place" | "depth" | "lat" | "lon") => f,
+                    "id" => return Some(format!("\"{index}\"")),
+                    _ => return None,
+                };
+                Some(format!("sys.quakes({index}, {key:?})"))
             }
             "sys.photo" => {
                 let query = arg("query")?;
