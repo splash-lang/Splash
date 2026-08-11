@@ -8823,6 +8823,64 @@ pub fn card_root_role(source: &str) -> Option<String> {
         .map(|v| v.body.name.clone())
 }
 
+/// The (source, field) pairs a card GUARDS on — `when now.precip >= 40` gives
+/// `("now", "precip")`.
+///
+/// Guards are evaluated at realize time against injected data, and a host injects
+/// list rows and little else, so a guard on a live scalar compares against
+/// nothing and BOTH complementary branches are false. That renders a card with a
+/// correct header and no answer, which is the §1.1 failure. A host can close it
+/// by resolving exactly these before realize — exactly these, because resolving
+/// every field of every source would fire a request per field per render.
+///
+/// NOT SUFFICIENT ON ITS OWN, and the attempt that produced this says why. A
+/// guarded field is reached by a call built from its source's ARGUMENTS, and
+/// those are frequently paths into another source: weather-activity guards
+/// `now.precip`, `now` takes `lat: place.lat`, and `place` is a `sys.geocode`
+/// scalar that is not in the blob either. Resolving guarded fields therefore
+/// needs the scalar sources resolved in DEPENDENCY ORDER first — geocode, then
+/// weather — which is most of what realize does. This accessor is the part that
+/// is cheap and knowable; the ordering is the work.
+///
+/// `$state` fields are excluded: the lifecycle is already observed separately.
+/// State paths are excluded because only a declared SOURCE needs fetching.
+/// Guards inside a `component` are not walked — no shipped card has one, and a
+/// component reads its props rather than a card-level source.
+pub fn guarded_source_fields(source: &str) -> Vec<(String, String)> {
+    let mut sink = Diagnostics::default();
+    let Some(tokens) = lex(source, &mut sink) else {
+        return Vec::new();
+    };
+    let card = Parser::new(&tokens, &mut sink).parse_card();
+    let sources: std::collections::BTreeSet<String> =
+        card.sources.iter().map(|s| s.name.clone()).collect();
+    let mut out: Vec<(String, String)> = Vec::new();
+    fn walk(el: &Element, sources: &std::collections::BTreeSet<String>, out: &mut Vec<(String, String)>) {
+        if el.name == "when" {
+            if let Some(a) = el.args.first() {
+                if let Operand::Path(p) = &a.value {
+                    if let Some((head, field)) = p.split_once('.') {
+                        if sources.contains(head) && !field.starts_with('$') && !field.contains('.')
+                        {
+                            let pair = (head.to_owned(), field.to_owned());
+                            if !out.contains(&pair) {
+                                out.push(pair);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for c in &el.children {
+            walk(c, sources, out);
+        }
+    }
+    for v in &card.views {
+        walk(&v.body, &sources, &mut out);
+    }
+    out
+}
+
 pub fn source_plan(source: &str) -> SourcePlan {
     let mut sink = Diagnostics::default();
     let Some(tokens) = lex(source, &mut sink) else {
@@ -10190,5 +10248,28 @@ pub mod kit {
                 let _ = write!(out, "{f}({body})");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod guarded_fields_tests {
+    /// A guard on a live scalar is reported; a guard on state or `$state` is not.
+    #[test]
+    fn only_source_fields_a_card_guards_on_are_reported() {
+        let card = "source now sys.weather(lat: 1, lon: 2, fields: [temp, precip])\n\
+                    state mode { shape: enum[a, b], initial: .a }\n\
+                    view root Surface {\n\
+                      when now.$state == .pending { Rule() }\n\
+                      when mode == .a { Rule() }\n\
+                      when now.precip >= 40 { Rule() }\n\
+                      when now.precip < 40 { inner }\n\
+                    }\n\
+                    view inner Col { when now.temp < 12 { Rule() } }\n";
+        let got = super::guarded_source_fields(card);
+        assert!(got.contains(&("now".to_owned(), "precip".to_owned())), "{got:?}");
+        // Nested inside another guard's body, and inside a named view.
+        assert!(got.contains(&("now".to_owned(), "temp".to_owned())), "{got:?}");
+        // Deduped: `precip` is guarded twice.
+        assert_eq!(got.len(), 2, "state, $state and duplicates must not appear: {got:?}");
     }
 }
