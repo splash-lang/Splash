@@ -5997,12 +5997,23 @@ impl Realizer<'_> {
                 op.clone(),
                 Box::new(self.expr_shape(rhs, scope)?),
             )),
-            Operand::Num(n) => Some(ExprPart::Const(makepad::trim_num(*n))),
+            // FULL PRECISION, not `trim_num`. `trim_num` is a DISPLAY rule — one
+            // decimal, because a temperature reads as 21.4 and not 21.437 — and an
+            // operand is not a display. Rounding one silently changes the
+            // arithmetic: measured on device, a converter card declaring
+            // `factor 0.621371` lowered to `(42 * 0.6)` and drew 42 km as 25.2
+            // miles instead of 26.1. The card was right, the checker accepted it,
+            // and the number on screen was wrong — which is the whole failure
+            // class §1.1 exists to prevent.
+            //
+            // `{}` on an f64 is the shortest representation that round-trips, so
+            // 42.0 still emits `42` and nothing gains spurious digits.
+            Operand::Num(n) => Some(ExprPart::Const(format!("{n}"))),
             Operand::Path(p) => match self.source_binding(p, scope) {
                 Some(binding) => Some(ExprPart::Call(binding)),
                 None => {
                     let v = scope.lookup(p)?;
-                    Some(ExprPart::Const(makepad::trim_num(v.as_f64()?)))
+                    Some(ExprPart::Const(format!("{}", v.as_f64()?)))
                 }
             },
             _ => None,
