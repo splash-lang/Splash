@@ -6969,6 +6969,9 @@ fn every_offered_field_has_a_translation() {
                         ("at_lat".into(), "5".into()),
                         ("at_lon".into(), "6".into()),
                     ],
+                    // The probe hands VALUES, not calls — a text slot quotes
+                    // what it is given unless the lowering says it built it.
+                    nested: Vec::new(),
                     field: f.clone(),
                 })
                 .is_some()
@@ -8889,5 +8892,68 @@ fn a_source_argument_is_not_rounded_to_one_decimal() {
     assert!(
         dsl.contains("sys.weather(37.7749, -122.4194,"),
         "the coordinate the card declared, not one rounded for display:\n{dsl}"
+    );
+}
+
+#[test]
+fn a_text_argument_that_names_another_source_stays_a_call() {
+    // A string slot is not safe by construction. `{:?}` quotes whatever it is
+    // handed, and a source argument that names ANOTHER SOURCE resolves to that
+    // source's own live call — so `sys.photo(query: place.name)` lowered to
+    // `sys.photo("sys.geocode(\"kyoto\", \"name\")")` and the wallpaper was
+    // generated from the TEXT of the call.
+    //
+    // Measured on the 6T: the URL fetched was
+    // `image.pollinations.ai/prompt/sys.geocode%28%22kyoto%22%2C%20%22name%22%29`.
+    // It survived because it LOOKED right — the service is a generative image
+    // model and the place name is inside the string it was given, so a card
+    // asking for Kyoto got a picture of Kyoto. [[the L0 defect class]] exactly:
+    // the request is wrong and only the wire shows it.
+    const CARD: &str = concat!(
+        "# level: L0\n",
+        "source place sys.geocode(name: state.city)\n",
+        "source scene sys.photo(query: place.name)\n",
+        "state city { shape: text, initial: \"kyoto\" }\n",
+        "view root Photo(src: scene) { TextTitle(text: place.name) }\n"
+    );
+    let checked = check_ui_l0_named("weather", CARD);
+    assert!(checked.valid, "{:#?}", checked.diagnostics);
+    let dsl = splash_ui_l0::kit::lower(
+        &realize(CARD, &serde_json::json!({}), RealizeLimits::default())
+            .root
+            .expect("realizes"),
+    );
+    assert!(
+        dsl.contains("sys.photo(sys.geocode(\"kyoto\", \"name\"))"),
+        "the photo is asked for the PLACE, not for the text of the call:\n{dsl}"
+    );
+    assert!(
+        !dsl.contains("sys.photo(\"sys."),
+        "a nested call must not be quoted into a string literal:\n{dsl}"
+    );
+}
+
+#[test]
+fn a_typed_query_is_never_executable() {
+    // The other half, and the reason this is decided by `binding.nested` rather
+    // than by whether the string starts with `sys.`. A text argument can carry
+    // what a PERSON TYPED — a youtube card's `q` is a search box — and a typed
+    // query must stay a query however it is spelled.
+    const CARD: &str = concat!(
+        "# level: L0\n",
+        "source hits sys.video(query: state.q, count: 1, fields: [id, title])\n",
+        "state q { shape: text, initial: \"sys.gps(lat)\" }\n",
+        "view root Surface { for v, i in hits key v.id { TextRow(text: v.title) } }\n"
+    );
+    let checked = check_ui_l0_named("youtube", CARD);
+    assert!(checked.valid, "{:#?}", checked.diagnostics);
+    let dsl = splash_ui_l0::kit::lower(
+        &realize(CARD, &serde_json::json!({}), RealizeLimits::default())
+            .root
+            .expect("realizes"),
+    );
+    assert!(
+        dsl.contains("sys.video(\"sys.gps(lat)\""),
+        "a typed query stays a QUOTED string, whatever it looks like:\n{dsl}"
     );
 }

@@ -5170,6 +5170,25 @@ pub struct SourceBinding {
     pub helper: String,
     /// Its arguments, resolved to values.
     pub args: Vec<(String, String)>,
+    /// Which of those arguments hold a CALL this lowering generated rather than
+    /// a value.
+    ///
+    /// A source argument that names another source resolves to the callee's own
+    /// live call, and once both are strings a backend cannot tell the two apart.
+    /// A numeric slot could guess — a coordinate is a number or it is a `sys.`
+    /// call — but a TEXT slot cannot, and it has to quote a value and not quote a
+    /// call. `sys.photo(query: place.name)` lowered to
+    /// `sys.photo("sys.geocode(\"kyoto\", \"name\")")`, so the wallpaper was
+    /// generated from the TEXT of the call. It looked right, which is why it
+    /// lived so long: the service is a generative image model and the place name
+    /// is inside the string it was handed, so a card asking for Kyoto got a
+    /// picture of Kyoto anyway.
+    ///
+    /// Guessing from the string is not good enough here, because a text
+    /// argument can carry what a person TYPED — `sys.video(query: state.q)` is
+    /// the search box — and "starts with `sys.`" would make a typed query
+    /// executable. This is the lowering stating what it built.
+    pub nested: Vec<String>,
     /// The path WITHIN the source's result: `last` for `quote.last`, empty when
     /// the source itself is named.
     pub field: String,
@@ -5955,6 +5974,10 @@ impl Realizer<'_> {
         makepad::vm_call(&SourceBinding {
             helper: declaration.helper.clone(),
             args,
+            // Empty by construction: this is the ONE-LEVEL resolver, and the
+            // comment above says why — a path naming yet another source is not
+            // followed here, so no argument of this call is itself a call.
+            nested: Vec::new(),
             field: field.to_string(),
         })
     }
@@ -6073,6 +6096,7 @@ impl Realizer<'_> {
             .max_by_key(|s| s.name.len())?;
 
         let mut args = Vec::new();
+        let mut nested: Vec<String> = Vec::new();
         for (name, arg) in &declaration.args {
             let resolved = match arg {
                 SourceArg::Path(p) => {
@@ -6099,7 +6123,14 @@ impl Realizer<'_> {
                     // forever. The seeded fix is the one value a navigation card
                     // must never be allowed to keep.
                     match self.nested_source_call(key, scope) {
-                        Some(call) => call,
+                        Some(call) => {
+                            // Remembered, because a backend cannot tell a call
+                            // from a value once both are strings — and a TEXT
+                            // slot has to quote one and not the other. See
+                            // `SourceBinding::nested`.
+                            nested.push(name.clone());
+                            call
+                        }
                         None => json_to_key(&scope.lookup(key)?),
                     }
                 }
@@ -6182,6 +6213,7 @@ impl Realizer<'_> {
         Some(SourceBinding {
             helper: declaration.helper.clone(),
             args,
+            nested,
             field,
         })
     }
@@ -6674,6 +6706,30 @@ pub mod makepad {
             let v = arg(name)?;
             (v.starts_with("sys.") || v.trim().parse::<f64>().is_ok()).then_some(v)
         };
+        // A TEXT slot, and the other half of `num`. A string slot is NOT safe by
+        // construction after all: `{:?}` quotes whatever it is handed, and what
+        // it was handed may be a nested CALL. `sys.photo(query: place.name)`
+        // lowered to `sys.photo("sys.geocode(\"kyoto\", \"name\")")`, so the
+        // wallpaper was generated from the text of the call rather than from the
+        // place. Measured on the 6T — the fetched URL was
+        // `image.pollinations.ai/prompt/sys.geocode%28%22ushuaia%22…`.
+        //
+        // It survived because it LOOKED right: the service is a generative image
+        // model and the place name is inside the string it was given, so a card
+        // asking for Kyoto still got a picture of Kyoto.
+        //
+        // `binding.nested` decides, not the shape of the string. A text argument
+        // can carry what a person typed — `sys.video(query: state.q)` is the
+        // search box — so "starts with `sys.`" would make a typed query
+        // executable, which is the one thing this must not do.
+        let text = |name: &str| -> Option<String> {
+            let v = arg(name)?;
+            Some(if binding.nested.iter().any(|n| n == name) {
+                v
+            } else {
+                format!("{v:?}")
+            })
+        };
         match binding.helper.as_str() {
             // THE FOUR THAT ANSWERED NOTHING. Each is in the catalog, so a card may
             // declare it and the checker accepts it — and each fell through to
@@ -6730,7 +6786,7 @@ pub mod makepad {
                 Some(format!("sys.stockrange({ticker}, {range}, {key:?})"))
             }
             "sys.quote" => {
-                let symbol = arg("ticker")?;
+                let symbol = text("ticker")?;
                 // What this helper can actually answer, verified against a live
                 // response rather than against its documentation.
                 //
@@ -6757,7 +6813,7 @@ pub mod makepad {
                     f @ ("name" | "change" | "changemoney" | "high" | "low" | "open") => f,
                     _ => return None,
                 };
-                Some(format!("sys.stock({symbol:?}, {key:?})"))
+                Some(format!("sys.stock({symbol}, {key:?})"))
             }
             // A mover, by index. `sys.movers` takes the row's position rather
             // than a ticker, so the loop index has to reach here — which it does
@@ -6772,11 +6828,11 @@ pub mod makepad {
             // A place NAME resolved to a fact. `geocodenum` for the numbers the
             // other helpers take as arguments, `geocode` for the words.
             "sys.geocode" => {
-                let name = arg("name")?;
+                let name = text("name")?;
                 match binding.field.as_str() {
-                    "lat" | "lon" => Some(format!("sys.geocodenum({name:?}, {:?})", binding.field)),
+                    "lat" | "lon" => Some(format!("sys.geocodenum({name}, {:?})", binding.field)),
                     "name" | "country" | "admin1" | "timezone" => {
-                        Some(format!("sys.geocode({name:?}, {:?})", binding.field))
+                        Some(format!("sys.geocode({name}, {:?})", binding.field))
                     }
                     _ => None,
                 }
@@ -6892,8 +6948,8 @@ pub mod makepad {
                 Some(format!("sys.quakes({index}, {key:?})"))
             }
             "sys.photo" => {
-                let query = arg("query")?;
-                Some(format!("sys.photo({query:?})"))
+                let query = text("query")?;
+                Some(format!("sys.photo({query})"))
             }
             // The activity app's whole data surface. Missing from this table, a
             // declared `sys.places` source fell to the seeded blob -- which a
@@ -7030,9 +7086,9 @@ pub mod makepad {
                     Some((i, f)) if i.parse::<u32>().is_ok() => (i, f),
                     _ => ("0", binding.field.as_str()),
                 };
-                let query = arg("query")?;
+                let query = text("query")?;
                 match field {
-                    "lat" | "lon" => Some(format!("sys.searchnum({query:?}, {index}, {field:?})")),
+                    "lat" | "lon" => Some(format!("sys.searchnum({query}, {index}, {field:?})")),
                     // `label` is the secondary line the helper has always answered —
                     // city, region, country. Five results named "Stanford" are what
                     // Photon returns for "Stanford", and without this they render as
@@ -7041,7 +7097,7 @@ pub mod makepad {
                     // results row must carry, or picking the third "Stanford" sets
                     // state to "Stanford" and routes to the first.
                     "name" | "label" | "query" => {
-                        Some(format!("sys.search({query:?}, {index}, {field:?})"))
+                        Some(format!("sys.search({query}, {index}, {field:?})"))
                     }
                     // `id` and `distance` have no answer in the helper, so they
                     // fall back rather than emitting a call that returns "".
@@ -7133,8 +7189,8 @@ pub mod makepad {
                         | "embed") => f,
                     _ => return None,
                 };
-                let query = arg("query")?;
-                Some(format!("sys.video({query:?}, {index}, {key:?})"))
+                let query = text("query")?;
+                Some(format!("sys.video({query}, {index}, {key:?})"))
             }
             // One country's reading, by row index. The countries argument is the
             // card's own list, so row 0 is the first country it named.
@@ -7203,13 +7259,13 @@ pub mod makepad {
             "sys.symbol_search" => {
                 let (index, field) = binding.field.split_once('.')?;
                 index.parse::<u32>().ok()?;
-                let query = arg("query")?;
+                let query = text("query")?;
                 let key = match field {
                     "ticker" => "symbol",
                     f @ ("name" | "exchange" | "kind") => f,
                     _ => return None,
                 };
-                Some(format!("sys.symbol_search({query:?}, {index}, {key:?})"))
+                Some(format!("sys.symbol_search({query}, {index}, {key:?})"))
             }
             _ => None,
         }
