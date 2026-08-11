@@ -8766,3 +8766,128 @@ fn a_map_labels_the_route_with_what_it_costs() {
         "the badge and the summary must come from one trip:\n{dsl}"
     );
 }
+
+// ─── a value guard gets a number to compare against ──────────────────────────
+//
+// The defect class in one sentence: guards are decided at REALIZE against
+// injected data, and a fetched scalar is not in that data — the kit resolves it
+// lazily at DRAW time. So `when now.precip >= 40` compared against nothing, and
+// so did its complement, and both were false. Measured on a 6T: the
+// `weather-activity` card drew a correct header and a rain tile reading 100 %,
+// with no verdict under either.
+//
+// `guard_bindings` is what a host resolves BEFORE realize so the branch is taken
+// on the number the tile shows.
+
+/// The decision tree from `weather-activity`, cut to the guards.
+const GUARDED: &str = concat!(
+    "# level: L0\n",
+    "source place sys.geocode(name: state.city)\n",
+    "source now   sys.weather(lat: place.lat, lon: place.lon, fields: [temp, precip])\n",
+    "source air   sys.airquality(lat: place.lat, lon: place.lon)\n",
+    "state city { shape: text, initial: \"Kyoto\" }\n",
+    "copy wet { class: vocabulary, en: \"stay in\" }\n",
+    "copy dry { class: vocabulary, en: \"go out\" }\n",
+    "view root Surface {\n",
+    "  when now.precip >= 40 { TextTitle(text: copy.wet) }\n",
+    "  when now.precip < 40 {\n",
+    "    when air.aqi >= 100 { TextTitle(text: copy.wet) }\n",
+    "    when air.aqi < 100 {\n",
+    "      when now.temp < 12 { TextTitle(text: copy.wet) }\n",
+    "      when now.temp >= 12 { TextTitle(text: copy.dry) }\n",
+    "    }\n",
+    "  }\n",
+    "}\n"
+);
+
+#[test]
+fn a_value_guard_reports_the_call_that_answers_it() {
+    let checked = check_ui_l0_named("weather-activity", GUARDED);
+    assert!(checked.valid, "{:#?}", checked.diagnostics);
+
+    let store = splash_ui_l0::InstanceStore::default();
+    let bindings = splash_ui_l0::guard_bindings(GUARDED, &serde_json::json!({}), &store);
+
+    // Every field under a `when`, once each — and nothing else. `place.lat` is
+    // read by a source ARGUMENT, not by a guard, so it is not asked for
+    // separately: it arrives inside the call below.
+    let mut pairs: Vec<(String, String)> = bindings
+        .iter()
+        .map(|g| (g.source.clone(), g.field.clone()))
+        .collect();
+    pairs.sort();
+    assert_eq!(
+        pairs,
+        vec![
+            ("air".to_string(), "aqi".to_string()),
+            ("now".to_string(), "precip".to_string()),
+            ("now".to_string(), "temp".to_string()),
+        ],
+        "the three values the tree branches on"
+    );
+
+    // THE POINT: the dependency is already resolved. `now` takes `lat: place.lat`
+    // and `place` is a geocode of the card's own state, so the emitted call
+    // carries the place the card names — the host fetches nothing extra and
+    // resolves nothing in an order of its own invention.
+    let precip = bindings
+        .iter()
+        .find(|g| g.field == "precip")
+        .expect("precip is guarded");
+    let call = splash_ui_l0::makepad::vm_call(&precip.binding).expect("this backend answers it");
+    assert_eq!(
+        call,
+        "sys.weather(sys.geocodenum(\"Kyoto\", \"lat\"), sys.geocodenum(\"Kyoto\", \"lon\"), \
+         \"daily.precipitation_probability_max.0\")",
+        "the guard's call is the display binding's call"
+    );
+}
+
+#[test]
+fn a_card_with_no_value_guards_asks_for_nothing() {
+    // The fetch policy, and why this can sit unconditionally in the render path:
+    // a `when` on a value is the CARD saying it needs that value early. A card
+    // that branches only on state and `$state` pays nothing.
+    const PLAIN: &str = concat!(
+        "# level: L0\n",
+        "source now sys.weather(lat: 1, lon: 2, fields: [temp])\n",
+        "state units { shape: enum[c, f], initial: .c }\n",
+        "copy t { class: vocabulary, en: \"t\" }\n",
+        "view root Surface {\n",
+        "  when now.$state == .pending { TextBody(text: copy.t) }\n",
+        "  when units == .c { TextHero(value: now.temp, unit: units) }\n",
+        "}\n"
+    );
+    let checked = check_ui_l0_named("weather", PLAIN);
+    assert!(checked.valid, "{:#?}", checked.diagnostics);
+    let store = splash_ui_l0::InstanceStore::default();
+    assert!(
+        splash_ui_l0::guard_bindings(PLAIN, &serde_json::json!({}), &store).is_empty(),
+        "`$state` is already injected and `units` is card state — neither is a fetch"
+    );
+}
+
+#[test]
+fn a_source_argument_is_not_rounded_to_one_decimal() {
+    // `trim_num` is a one-decimal DISPLAY rule and it was emitting source
+    // ARGUMENTS. A coordinate is the case that shows it: 37.7749 became 37.8,
+    // which is thirty kilometres away and still renders a perfectly plausible
+    // forecast. Same class as the L1 operand it rounded from 0.621371 to 0.6.
+    const PINNED: &str = concat!(
+        "# level: L0\n",
+        "source now sys.weather(lat: 37.7749, lon: -122.4194, fields: [temp])\n",
+        "copy t { class: vocabulary, en: \"t\" }\n",
+        "view root Surface { TextHero(value: now.temp) }\n"
+    );
+    let checked = check_ui_l0_named("weather", PINNED);
+    assert!(checked.valid, "{:#?}", checked.diagnostics);
+    let dsl = splash_ui_l0::kit::lower(
+        &realize(PINNED, &serde_json::json!({}), RealizeLimits::default())
+            .root
+            .expect("realizes"),
+    );
+    assert!(
+        dsl.contains("sys.weather(37.7749, -122.4194,"),
+        "the coordinate the card declared, not one rounded for display:\n{dsl}"
+    );
+}

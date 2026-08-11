@@ -1404,6 +1404,19 @@ impl<'a> Parser<'a> {
                     self.at += 1;
                     SourceArg::Text(t.text)
                 }
+                // A NEGATIVE literal, as `parse_atom` already allows in argument
+                // position. This grammar had no case for it, so `lon: -122.4194`
+                // failed at the `-` with "expected a name" — which meant no card
+                // could name a coordinate in the western hemisphere, or a
+                // temperature below zero, without going through `sys.geocode`.
+                Some(t)
+                    if t.is_punct("-")
+                        && self.peek_at(1).is_some_and(|n| n.kind == Kind::Num) =>
+                {
+                    let n = self.peek_at(1).map(|n| n.text.clone()).unwrap_or_default();
+                    self.at += 2;
+                    SourceArg::Number(-n.parse::<f64>().unwrap_or(0.0))
+                }
                 Some(t) if t.kind == Kind::Num => {
                     self.at += 1;
                     SourceArg::Number(t.text.parse().unwrap_or(0.0))
@@ -5894,8 +5907,9 @@ impl Realizer<'_> {
         let mut args = Vec::new();
         for (name, arg) in &declaration.args {
             let resolved = match arg {
+                // Shortest round-trip, NOT `trim_num` — see `source_binding`.
+                SourceArg::Number(n) => format!("{n}"),
                 SourceArg::Text(t) => t.clone(),
-                SourceArg::Number(n) => makepad::trim_num(*n),
                 SourceArg::List(_) if name == "fields" => continue,
                 // A list of PATHS resolves item by item, each to its own live
                 // call, joined by a separator no call can contain.
@@ -6090,7 +6104,11 @@ impl Realizer<'_> {
                     }
                 }
                 SourceArg::Text(t) => t.clone(),
-                SourceArg::Number(n) => makepad::trim_num(*n),
+                // Shortest round-trip, NOT `trim_num`. That is a one-decimal
+                // DISPLAY rule, and an ARGUMENT is not a display: it rounded
+                // `sys.weather(lat: 37.7749)` to `37.8`, which is a different
+                // city. Same class as the L1 operand it rounded to 0.6.
+                SourceArg::Number(n) => format!("{n}"),
                 // `fields:` is structural — which keys the card wants back — and
                 // is not passed on. Any OTHER list is a value: `symbols: [NVDA,
                 // AMD]` is the universe to rank, and the model writes it as a
@@ -8852,10 +8870,18 @@ pub fn guarded_source_fields(source: &str) -> Vec<(String, String)> {
         return Vec::new();
     };
     let card = Parser::new(&tokens, &mut sink).parse_card();
+    guarded_fields_of(&card)
+}
+
+fn guarded_fields_of(card: &Card) -> Vec<(String, String)> {
     let sources: std::collections::BTreeSet<String> =
         card.sources.iter().map(|s| s.name.clone()).collect();
     let mut out: Vec<(String, String)> = Vec::new();
-    fn walk(el: &Element, sources: &std::collections::BTreeSet<String>, out: &mut Vec<(String, String)>) {
+    fn walk(
+        el: &Element,
+        sources: &std::collections::BTreeSet<String>,
+        out: &mut Vec<(String, String)>,
+    ) {
         if el.name == "when" {
             if let Some(a) = el.args.first() {
                 if let Operand::Path(p) = &a.value {
@@ -8879,6 +8905,98 @@ pub fn guarded_source_fields(source: &str) -> Vec<(String, String)> {
         walk(&v.body, &sources, &mut out);
     }
     out
+}
+
+/// One value a guard reads, and the call that answers it.
+#[derive(Clone, Debug)]
+pub struct GuardBinding {
+    /// The source the guard names — `now`.
+    pub source: String,
+    /// The field within it — `precip`.
+    pub field: String,
+    /// What to ask, resolved exactly as it would be for a DISPLAY binding of the
+    /// same path — so the branch is decided on the number the screen shows.
+    pub binding: SourceBinding,
+}
+
+/// What a host must resolve BEFORE realize, so the card's value guards have
+/// something to compare against.
+///
+/// Guards are decided during realize, against injected data. A fetched scalar is
+/// not in that data — the kit resolves it lazily at draw time — so a
+/// `when now.precip >= 40` compared against nothing, and so did its complement
+/// `when now.precip < 40`. Both false: measured on a 6T, `weather-activity` drew
+/// a correct header, a correct rain tile reading 100 %, and no verdict at all.
+///
+/// The FETCH POLICY this answers is the card's own: a `when` on a value is the
+/// card saying it needs that value early. A card with no value guards asks for
+/// nothing here and pays nothing, which is why this can be unconditional in the
+/// render path where resolving every scalar of every source could not.
+///
+/// Dependencies come out resolved because `source_binding` already emits a
+/// source argument as the callee's own live call — `now` takes `lat: place.lat`,
+/// and `place` is a geocode this never has to fetch separately.
+pub fn guard_bindings(
+    source: &str,
+    data: &serde_json::Value,
+    store: &InstanceStore,
+) -> Vec<GuardBinding> {
+    let mut sink = Diagnostics::default();
+    let Some(tokens) = lex(source, &mut sink) else {
+        return Vec::new();
+    };
+    let card = Parser::new(&tokens, &mut sink).parse_card();
+    let wanted = guarded_fields_of(&card);
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+
+    // The same resolution order realize uses for card state, because a source
+    // argument reaches state — `sys.geocode(name: state.city)` — and resolving
+    // it differently here would ask about a different place than the card draws.
+    let mut frames: Vec<Frame> = Vec::new();
+    for state in &card.states {
+        let value = store
+            .get(CARD_STATE_KEY, &state.path)
+            .cloned()
+            .or_else(|| data.get(&state.path).cloned())
+            .or_else(|| state.initial.clone())
+            .or_else(|| {
+                state
+                    .initial_path
+                    .as_ref()
+                    .and_then(|p| data_path(data, p))
+            })
+            .unwrap_or_else(|| initial_for(&state.shape));
+        frames.push((state.path.clone(), value, None));
+    }
+    let scope = ValueScope {
+        frames,
+        data,
+        copies: &card.copies,
+    };
+    let ctx = Realizer {
+        depth: 0,
+        card: &card,
+        limits: RealizeLimits::default(),
+        nodes: 0,
+        truncated: false,
+        sink: &mut sink,
+        store: Some(store),
+        live: Vec::new(),
+        slots: Vec::new(),
+    };
+    wanted
+        .into_iter()
+        .filter_map(|(name, field)| {
+            let binding = ctx.source_binding(&format!("{name}.{field}"), &scope)?;
+            Some(GuardBinding {
+                source: name,
+                field,
+                binding,
+            })
+        })
+        .collect()
 }
 
 pub fn source_plan(source: &str) -> SourcePlan {
