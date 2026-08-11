@@ -6678,6 +6678,46 @@ pub mod makepad {
     /// Public so a conformance test can ask, per capability and field, whether
     /// this backend answers at all — the check §4 says is owed and that no test
     /// comparing Splash with itself can perform.
+    /// The condition as the ICON's NUMBER, not as the reader's word.
+    ///
+    /// `cond` has two consumers and they need different things. A `TextRow` wants
+    /// "Rain"; `WeatherIcon` wants the WMO code, and the kit says so in as many
+    /// words — "`cond` is a NUMBER — the WMO code the forecast returns". The field
+    /// lowered to `sys.weatherword` for both, so the icon was handed a string,
+    /// coerced it to 0, and drew the SUN. Every icon, in every weather card, over
+    /// a Beijing forecast reading 92 % rain.
+    ///
+    /// `vm_call` cannot tell them apart — a `SourceBinding` carries no consumer —
+    /// but the ROLE does, and the kit lowering knows the role. Same path as
+    /// `weatherword` deliberately: a card may show the word beside the icon, and
+    /// two readings of one sky that disagree is worse than either being wrong.
+    pub(super) fn icon_call(binding: &SourceBinding) -> Option<String> {
+        if binding.helper != "sys.weather" {
+            return None;
+        }
+        let (row, field) = match binding.field.split_once('.') {
+            Some((i, f)) if i.parse::<u32>().is_ok() => (i, f),
+            _ => ("0", binding.field.as_str()),
+        };
+        if field != "cond" {
+            return None;
+        }
+        let num = |name: &str| -> Option<String> {
+            let v = binding
+                .args
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.clone())?;
+            (v.starts_with("sys.") || v.trim().parse::<f64>().is_ok()).then_some(v)
+        };
+        let lat = num("lat")?;
+        let lon = num("lon")?;
+        Some(format!(
+            "sys.weathercond({lat}, {lon}, {:?})",
+            format!("daily.weather_code.{row}")
+        ))
+    }
+
     pub fn vm_call(binding: &SourceBinding) -> Option<String> {
         let arg = |name: &str| {
             binding
@@ -10434,7 +10474,16 @@ pub mod kit {
                     Some(NodeValue::Token(t)) => t.clone(),
                     _ => "row".to_owned(),
                 };
-                let _ = write!(out, "{f}({}, {size:?})", scalar_of(node, "cond"));
+                // The ICON's reading of `cond`, falling back to whatever the
+                // card bound. `scalar_of` alone gave it the WORD, which is not a
+                // number, which is 0, which is the sun — always.
+                let cond = node
+                    .bindings
+                    .iter()
+                    .find(|(n, _)| n == "cond")
+                    .and_then(|(_, b)| makepad::icon_call(b))
+                    .unwrap_or_else(|| scalar_of(node, "cond"));
+                let _ = write!(out, "{f}({cond}, {size:?})");
             }
             "TextStat" => {
                 // `l0_stat` takes the direction as a parameter rather than

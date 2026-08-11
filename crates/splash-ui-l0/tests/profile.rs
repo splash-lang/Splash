@@ -4768,9 +4768,14 @@ view root Surface {
     // icon is the code that is true when the card draws rather than the one the
     // host happened to seed. The size must still travel with it: that half was
     // the original defect and is unrelated to where the value comes from.
+    //
+    // `weathercond`, NOT `weatherword`: this pinned the word for two releases,
+    // and the word is a STRING, which the icon coerces to 0, which is the sun.
+    // The test agreed with the emitter and neither of them was looking at a
+    // screen — see `the_weather_icon_is_given_a_number_and_the_text_a_word`.
     assert!(
-        dsl.contains("l0_weathericon(sys.weatherword(") && dsl.contains(", \"hero\")"),
-        "the hero's cond must go live and keep its size:\n{dsl}"
+        dsl.contains("l0_weathericon(sys.weathercond(") && dsl.contains(", \"hero\")"),
+        "the hero's cond must go live as a CODE and keep its size:\n{dsl}"
     );
     // And the per-item conditions must DIFFER — one shared value for every row
     // is exactly what the bug produced, and a test that only checked "a number
@@ -9030,5 +9035,47 @@ fn a_card_that_gates_its_rows_on_a_state_can_still_learn_that_state() {
     assert!(
         splash_ui_l0::guarded_state_bindings(PLAIN, &serde_json::json!({}), &store).is_empty(),
         "an ungated source needs no probe — the tree walk already answers it"
+    );
+}
+
+#[test]
+fn the_weather_icon_is_given_a_number_and_the_text_a_word() {
+    // `cond` has two consumers that need different readings of the same field.
+    // Both lowered to `sys.weatherword`, so the icon was handed "Rain", coerced
+    // it to 0, and drew the SUN. Measured on the 6T over a Beijing forecast
+    // reading 92 % rain — and a wrong icon looks exactly like a right one, which
+    // is why it survived every card that shipped.
+    const CARD: &str = concat!(
+        "# level: L0\n",
+        "source place sys.geocode(name: state.city)\n",
+        "source now sys.weather(lat: place.lat, lon: place.lon, fields: [temp, cond])\n",
+        "state city { shape: text, initial: \"Beijing\" }\n",
+        "view root Surface {\n",
+        "  WeatherIcon(cond: now.cond, size: .hero)\n",
+        "  TextRow(text: now.cond)\n",
+        "}\n"
+    );
+    let checked = check_ui_l0_named("weather", CARD);
+    assert!(checked.valid, "{:#?}", checked.diagnostics);
+    let dsl = splash_ui_l0::kit::lower(
+        &realize(CARD, &serde_json::json!({}), RealizeLimits::default())
+            .root
+            .expect("realizes"),
+    );
+    // The icon gets the CODE.
+    assert!(
+        dsl.contains("l0_weathericon(sys.weathercond("),
+        "the icon must be given the WMO code, not a word:\n{dsl}"
+    );
+    // And the reader still gets the word — one field, two readings.
+    assert!(
+        dsl.contains("sys.weatherword("),
+        "the text must still read as words:\n{dsl}"
+    );
+    // Both from the same forecast path, or the sky is described twice and
+    // disagrees with itself.
+    assert!(
+        dsl.matches("\"daily.weather_code.0\"").count() == 2,
+        "the icon and the word must read the same day:\n{dsl}"
     );
 }
