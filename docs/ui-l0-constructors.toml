@@ -365,7 +365,17 @@ args = ["lat", "lon"]
 answers = ["phase", "illumination", "name"]
 
 [sources."sys.photo"]
-args = ["query"]
+# `query` is a SCENE, not a place. Asked for "Beijing" a generative image model
+# invents a city, and it invented one that reads as Taipei — a fabricated
+# depiction of a real place, rendering as a plausible photograph, with nothing on
+# screen saying it is synthetic. A card that names a place in its title must not
+# name it here.
+#
+# `cond` is what keeps the backdrop honest about the day: pass the forecast's
+# condition and the host folds it into the prompt, so a card reading 92 % rain
+# does not sit under a sunlit wallpaper. The SCENE is the card's words; the
+# WEATHER is the host's fact, and neither writes the other's half.
+args = ["query", "cond"]
 answers = []
 
 [sources."sys.locale"]

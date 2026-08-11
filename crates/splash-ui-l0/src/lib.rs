@@ -3130,7 +3130,7 @@ pub mod catalog {
         ("sys.daylight", &["lat", "lon"]),
         ("sys.airquality", &["lat", "lon"]),
         ("sys.moonphase", &["lat", "lon"]),
-        ("sys.photo", &["query"]),
+        ("sys.photo", &["query", "cond"]),
         ("sys.locale", &[]),
         ("sys.gps", &[]),
         ("sys.search", &["query", "count", "fields"]),
@@ -5920,7 +5920,31 @@ impl Realizer<'_> {
     /// The live call for `<source>.<field>`, when the backend answers that
     /// source itself. Used for a source argument that depends on another
     /// source, which a live card cannot resolve from data.
+    /// How deep a chain of source arguments may resolve.
+    ///
+    /// One level was not enough. `sys.photo(cond: now.cond)` needs `now`, whose
+    /// own `lat:` names `place` — so the inner resolver hit a path it would not
+    /// follow, fell to a scope lookup that a live card cannot answer, and
+    /// returned None. That None propagates: the OUTER binding fails too, so the
+    /// photo lowered to the realized em dash and the page drew no image at all.
+    /// Nothing said so, because a card with no wallpaper looks like a card whose
+    /// wallpaper has not loaded.
+    ///
+    /// Capped rather than unbounded: a card's sources form a DAG, but the checker
+    /// does not prove acyclicity of ARGUMENTS, and a cycle here would recurse
+    /// until the stack ran out.
+    const MAX_SOURCE_CHAIN: usize = 4;
+
     fn nested_source_call(&self, path: &str, scope: &ValueScope) -> Option<String> {
+        self.nested_source_call_at(path, scope, 0)
+    }
+
+    fn nested_source_call_at(
+        &self,
+        path: &str,
+        scope: &ValueScope,
+        depth: usize,
+    ) -> Option<String> {
         let (owner, field) = path.split_once('.')?;
         let declaration = self.card.sources.iter().find(|s| s.name == owner)?;
         let mut args = Vec::new();
@@ -5966,7 +5990,17 @@ impl Realizer<'_> {
                 // resolved here, which is what keeps this from recursing.
                 SourceArg::Path(p) => {
                     let key = p.strip_prefix("state.").unwrap_or(p);
-                    json_to_key(&scope.lookup(key)?)
+                    // THE SOURCE FIRST, then the scope — the same precedence
+                    // `source_binding` argues for, and for the same reason: a
+                    // live card carries no blob, so a scope-first resolution
+                    // silently produces a different lowering than a previewed one.
+                    match (depth + 1 < Self::MAX_SOURCE_CHAIN)
+                        .then(|| self.nested_source_call_at(key, scope, depth + 1))
+                        .flatten()
+                    {
+                        Some(call) => call,
+                        None => json_to_key(&scope.lookup(key)?),
+                    }
                 }
             };
             args.push((name.clone(), resolved));
@@ -6989,7 +7023,20 @@ pub mod makepad {
             }
             "sys.photo" => {
                 let query = text("query")?;
-                Some(format!("sys.photo({query})"))
+                // The CONDITION, when the card passes one. `cond: now.cond`
+                // resolves to the forecast's own word call, so the host folds a
+                // live reading into the prompt and a rainy city stops sitting
+                // under a sunlit backdrop.
+                //
+                // Only when it is a generated call. A literal here would be the
+                // card stating the weather, which is the one thing §4 forbids —
+                // and a mood is only honest while the card is not asserting it.
+                match binding.args.iter().find(|(n, _)| n == "cond") {
+                    Some((_, c)) if binding.nested.iter().any(|n| n == "cond") => {
+                        Some(format!("sys.photo({query}, {c})"))
+                    }
+                    _ => Some(format!("sys.photo({query})")),
+                }
             }
             // The activity app's whole data surface. Missing from this table, a
             // declared `sys.places` source fell to the seeded blob -- which a

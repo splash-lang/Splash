@@ -9079,3 +9079,45 @@ fn the_weather_icon_is_given_a_number_and_the_text_a_word() {
         "the icon and the word must read the same day:\n{dsl}"
     );
 }
+
+#[test]
+fn a_source_argument_follows_a_chain_of_sources() {
+    // `sys.photo(cond: now.cond)` needs `now`, whose own `lat:` names `place`.
+    // The inner resolver stopped at one level, fell to a scope lookup a LIVE card
+    // cannot answer, and returned None — and that None propagated outward, so the
+    // whole photo binding failed and the surface lowered to the realized em dash.
+    //
+    // Measured on the 6T: the page drew no wallpaper at all, black behind the
+    // card, and nothing said so — a card with no image looks exactly like a card
+    // whose image has not loaded yet.
+    const CARD: &str = concat!(
+        "# level: L0\n",
+        "source place sys.geocode(name: state.city)\n",
+        "source now sys.weather(lat: place.lat, lon: place.lon, fields: [temp, cond])\n",
+        "state city { shape: text, initial: \"Beijing\" }\n",
+        "state mood { shape: text, initial: \"hutong rooftops, cinematic\" }\n",
+        "source scene sys.photo(query: state.mood, cond: now.cond)\n",
+        "view root Photo(src: scene, pad: .page) { TextHero(value: now.temp) }\n"
+    );
+    let checked = check_ui_l0_named("weather-activity", CARD);
+    assert!(checked.valid, "{:#?}", checked.diagnostics);
+    let dsl = splash_ui_l0::kit::lower(
+        &realize(CARD, &serde_json::json!({}), RealizeLimits::default())
+            .root
+            .expect("realizes"),
+    );
+    // Three levels deep: photo <- weather <- geocode <- state.
+    assert!(
+        dsl.contains(
+            "l0_surface_photo(sys.photo(\"hutong rooftops, cinematic\", \
+             sys.weatherword(sys.geocodenum(\"Beijing\", \"lat\"), \
+             sys.geocodenum(\"Beijing\", \"lon\"), \"daily.weather_code.0\"))"
+        ),
+        "the whole chain must resolve, or the outer binding fails silently:\n{dsl}"
+    );
+    // And the failure this replaced: never the realized placeholder.
+    assert!(
+        !dsl.contains("l0_surface_photo(\"\u{2014}\""),
+        "an unresolved chain used to lower as an em dash:\n{dsl}"
+    );
+}
