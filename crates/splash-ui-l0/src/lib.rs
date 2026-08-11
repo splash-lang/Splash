@@ -9093,8 +9093,10 @@ pub fn guard_bindings(
 /// it a property of what RENDERED rather than of the fetch. A card that gates its
 /// rows on the state it is waiting for is then a closed loop:
 ///
-///     when parks.$state == .pending { TextBody(text: copy.loading) }
-///     when parks.$state == .ready   { Panel { for p, i in parks … } }
+/// ```text
+/// when parks.$state == .pending { TextBody(text: copy.loading) }
+/// when parks.$state == .ready   { Panel { for p, i in parks … } }
+/// ```
 ///
 /// no data -> pending -> the rows do not realize -> nothing binds `parks` ->
 /// no status is written -> pending. Forever. Measured on the 6T: the activity
