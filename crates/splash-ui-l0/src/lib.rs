@@ -8767,6 +8767,27 @@ pub fn card_theme(source: &str) -> Option<String> {
         .map(|(name, _)| name)
 }
 
+/// The ROLE the card's root view names — `Surface`, `Photo`, `Map`.
+///
+/// Read before realize, like [`card_theme`], and for the same reason: a host
+/// choosing a palette has to know whether the page is a PHOTOGRAPH, and that is a
+/// fact about the source rather than about a realized tree. The pairing matters
+/// because a mood with dark ink is unreadable over an arbitrary image, so a kit
+/// may legitimately answer `light` + `Photo` with its photo palette.
+///
+/// `None` when the card declares no `root` view — which the checker refuses, so a
+/// caller seeing `None` has a card that was not going to render anyway.
+pub fn card_root_role(source: &str) -> Option<String> {
+    let mut sink = Diagnostics::default();
+    let tokens = lex(source, &mut sink)?;
+    Parser::new(&tokens, &mut sink)
+        .parse_card()
+        .views
+        .iter()
+        .find(|v| v.name == "root")
+        .map(|v| v.body.name.clone())
+}
+
 pub fn source_plan(source: &str) -> SourcePlan {
     let mut sink = Diagnostics::default();
     let Some(tokens) = lex(source, &mut sink) else {
