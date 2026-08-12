@@ -9142,6 +9142,31 @@ pub fn guarded_state_bindings(
     resolved_bindings(source, data, store, guarded_states_of)
 }
 
+/// One probe binding per DECLARED source — so a host can observe each source's
+/// lifecycle independently.
+///
+/// The alternative was observing per HELPER and stamping the worst state onto
+/// every source that names it, and the nav card is why that cannot stand: it
+/// declares five `sys.route` trips, and the one that is UNANSWERABLE by design
+/// (`trip`, whose origin is the empty string on a from-here journey) held its
+/// four siblings at `.pending` forever. `trip_here` had a real origin, a real
+/// destination and a 200 route on the wire — and Go never appeared, because the
+/// helper's merged state was decided by a sibling that asks a question nobody
+/// posed. Measured: "Finding a route…", indefinitely, with zero failed fetches.
+pub fn source_state_bindings(
+    source: &str,
+    data: &serde_json::Value,
+    store: &InstanceStore,
+) -> Vec<GuardBinding> {
+    fn all_sources_of(card: &Card) -> Vec<(String, String)> {
+        card.sources
+            .iter()
+            .map(|s| (s.name.clone(), String::new()))
+            .collect()
+    }
+    resolved_bindings(source, data, store, all_sources_of)
+}
+
 /// Sources whose `$state` a `when` reads, as `(name, "")` — the empty field is
 /// what makes each a probe rather than a value.
 fn guarded_states_of(card: &Card) -> Vec<(String, String)> {

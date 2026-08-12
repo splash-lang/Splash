@@ -9204,3 +9204,54 @@ fn a_forecast_loop_rides_on_top_of_the_day() {
         "rows 0..2 under day:1 must read daily 1..3:\n{dsl}"
     );
 }
+
+#[test]
+fn every_source_answers_for_its_own_lifecycle() {
+    // The nav card declares five `sys.route` trips, and exactly one of them —
+    // `trip`, whose origin is the empty string on a from-here journey — is
+    // unanswerable BY DESIGN. Observed per HELPER, its eternal `.pending` was
+    // stamped onto `trip_here`, which had a real origin, a real destination and
+    // a 200 on the wire: "Finding a route…" forever, Go never shown, zero
+    // failed fetches to point at. Measured on a 6T with a simulated drive.
+    //
+    // `source_state_bindings` is the cure: one probe binding per DECLARED
+    // source, each carrying its own resolved arguments.
+    const CARD: &str = include_str!("fixtures/nav.card");
+    let store = splash_ui_l0::InstanceStore::default();
+    let data = serde_json::json!({
+        "here": {"lat": 37.4487, "lon": -122.1593, "ok": 1},
+        "dest": "stanford university, stanford, ca",
+        "env": {"locale": {}},
+    });
+    let probes = splash_ui_l0::source_state_bindings(CARD, &data, &store);
+
+    let call_of = |name: &str| -> String {
+        let b = probes
+            .iter()
+            .find(|p| p.source == name)
+            .unwrap_or_else(|| panic!("{name} has a probe"));
+        // Any answered field stands in for the source's lifecycle; `duration`
+        // is what the host's probe walks to first for a route.
+        splash_ui_l0::makepad::vm_call(&splash_ui_l0::SourceBinding {
+            field: "duration".into(),
+            ..b.binding.clone()
+        })
+        .unwrap_or_else(|| panic!("{name} lowers"))
+    };
+
+    // trip_here: the from-here trip — REAL captured origin, real destination.
+    let trip_here = call_of("trip_here");
+    assert!(
+        trip_here.contains("37.4487") && trip_here.contains("stanford university"),
+        "trip_here probes its own trip:\n{trip_here}"
+    );
+    // trip: the named-origin trip, whose origin is "" here — its probe embeds
+    // the empty search and can only ever be pending. That is ITS answer, and
+    // after this test it is nobody else's.
+    let trip = call_of("trip");
+    assert!(
+        trip.contains("searchnum(\"\""),
+        "trip's own probe carries the empty origin:\n{trip}"
+    );
+    assert_ne!(trip, trip_here, "two trips, two probes — never one merged state");
+}
