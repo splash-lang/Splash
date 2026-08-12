@@ -9121,3 +9121,86 @@ fn a_source_argument_follows_a_chain_of_sources() {
         "an unresolved chain used to lower as an em dash:\n{dsl}"
     );
 }
+
+#[test]
+fn a_future_day_shifts_the_daily_fields_and_refuses_the_current_ones() {
+    // Seen in the wild: a weather-activity card whose eyebrow said TOMORROW over
+    // `current.temperature_2m` — nothing in the lowering could read daily.1, so
+    // only the LABEL could claim tomorrow, and it did. The screen asserted the
+    // wrong day and no stage could see it.
+    //
+    // `day: 1` is the capability that makes the label honest. Daily fields shift
+    // by the day; current-conditions fields have no future form and get NO
+    // translation — a visible absence, never today's reading under tomorrow's
+    // heading.
+    const CARD: &str = concat!(
+        "# level: L0\n",
+        "source place sys.geocode(name: state.city)\n",
+        "source next sys.weather(lat: place.lat, lon: place.lon, day: 1,\n",
+        "                        fields: [hi, lo, precip, cond, temp])\n",
+        "state city { shape: text, initial: \"Kyoto\" }\n",
+        "copy eyebrow { class: vocabulary, en: \"TOMORROW\" }\n",
+        "view root Surface {\n",
+        "  TextCaption(text: copy.eyebrow)\n",
+        "  WeatherIcon(cond: next.cond, size: .hero)\n",
+        "  TextHero(value: next.hi)\n",
+        "  TextValue(value: next.lo)\n",
+        "  TextValue(value: next.precip)\n",
+        "  TextValue(value: next.temp)\n",
+        "}\n"
+    );
+    let checked = check_ui_l0_named("weather-activity", CARD);
+    assert!(checked.valid, "{:#?}", checked.diagnostics);
+    let dsl = splash_ui_l0::kit::lower(
+        &realize(CARD, &serde_json::json!({}), RealizeLimits::default())
+            .root
+            .expect("realizes"),
+    );
+    // The daily fields read tomorrow's row…
+    for path in [
+        "daily.temperature_2m_max.1",
+        "daily.temperature_2m_min.1",
+        "daily.precipitation_probability_max.1",
+    ] {
+        assert!(dsl.contains(path), "{path} must be read for day 1:\n{dsl}");
+    }
+    // …the icon describes the same sky…
+    assert!(
+        dsl.contains("sys.weathercond(") && dsl.contains("\"daily.weather_code.1\""),
+        "the icon must shift with the day:\n{dsl}"
+    );
+    // …and `temp` — a current-conditions field — is NOT served under a future
+    // day. No current.* call anywhere on this card.
+    assert!(
+        !dsl.contains("current.temperature_2m"),
+        "there is no 'current' tomorrow:\n{dsl}"
+    );
+}
+
+#[test]
+fn a_forecast_loop_rides_on_top_of_the_day() {
+    // `day` shifts the whole week: row 0 of a `for` over the forecast is the
+    // named day, row 1 the day after it.
+    const CARD: &str = concat!(
+        "# level: L0\n",
+        "source week sys.weather(lat: 35, lon: 135, days: 3, day: 1,\n",
+        "                        fields: [days, hi, dayname])\n",
+        "view root Surface {\n",
+        "  for d, i in week.days key d.dayname {\n",
+        "    TextRow(text: d.dayname)\n",
+        "    TextValue(value: d.hi)\n",
+        "  }\n",
+        "}\n"
+    );
+    let checked = check_ui_l0_named("weather", CARD);
+    assert!(checked.valid, "{:#?}", checked.diagnostics);
+    let dsl = splash_ui_l0::kit::lower(
+        &realize(CARD, &serde_json::json!({}), RealizeLimits::default())
+            .root
+            .expect("realizes"),
+    );
+    assert!(
+        dsl.contains("daily.temperature_2m_max.1") && dsl.contains("daily.temperature_2m_max.3"),
+        "rows 0..2 under day:1 must read daily 1..3:\n{dsl}"
+    );
+}

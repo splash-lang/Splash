@@ -3125,7 +3125,7 @@ pub mod catalog {
         ("sys.geocode", &["name"]),
         (
             "sys.weather",
-            &["lat", "lon", "days", "fields", "aggregate"],
+            &["lat", "lon", "days", "fields", "aggregate", "day"],
         ),
         ("sys.daylight", &["lat", "lon"]),
         ("sys.airquality", &["lat", "lon"]),
@@ -6736,6 +6736,14 @@ pub mod makepad {
         if field != "cond" {
             return None;
         }
+        // The same day shift the weather arm applies — one sky, described once.
+        let day: u32 = binding
+            .args
+            .iter()
+            .find(|(n, _)| n == "day")
+            .and_then(|(_, v)| v.parse().ok())
+            .unwrap_or(0);
+        let row = &format!("{}", row.parse::<u32>().unwrap_or(0) + day);
         let num = |name: &str| -> Option<String> {
             let v = binding
                 .args
@@ -6916,10 +6924,26 @@ pub mod makepad {
             "sys.weather" => {
                 let lat = num("lat")?;
                 let lon = num("lon")?;
+                // Which day the DAILY fields describe. 0 is today; a forecast
+                // row's own index rides on top, so `day: 1` shifts the whole
+                // week loop too.
+                let day: u32 = arg("day").and_then(|v| v.parse().ok()).unwrap_or(0);
                 let (row, field) = match binding.field.split_once('.') {
                     Some((i, f)) if i.parse::<u32>().is_ok() => (i, f),
                     _ => ("0", binding.field.as_str()),
                 };
+                let row = &format!("{}", row.parse::<u32>().unwrap_or(0) + day);
+                // There is no "current" tomorrow. A current-conditions field
+                // under a future day gets NO translation — the seeded value or
+                // an em dash, a visible absence — never today's reading served
+                // beneath a label that says otherwise. Measured motive: a card
+                // whose eyebrow said TOMORROW over `current.temperature_2m`,
+                // which no screen could tell from the real thing.
+                if day > 0
+                    && matches!(field, "temp" | "feels" | "humidity" | "wind" | "pressure")
+                {
+                    return None;
+                }
                 let path = match field {
                     "temp" => "current.temperature_2m".to_string(),
                     "feels" => "current.apparent_temperature".to_string(),

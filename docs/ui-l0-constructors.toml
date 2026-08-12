@@ -348,7 +348,13 @@ args = ["name"]
 answers = ["lat", "lon", "name", "country", "admin1", "timezone", "population"]
 
 [sources."sys.weather"]
-args = ["lat", "lon", "days", "fields", "aggregate"]
+# `day` selects which day the DAILY fields describe: 0 (default) is today,
+# 1 is tomorrow. The current-conditions fields (temp, feels, humidity, wind,
+# pressure) have no future form — there is no "current" tomorrow — so a card
+# that names day: 1 must read `hi`/`lo` instead of `temp`, and the lowering
+# refuses to translate a current field under a future day rather than serve
+# today's reading beneath a label that says otherwise.
+args = ["lat", "lon", "days", "fields", "aggregate", "day"]
 answers = ["temp", "feels", "hi", "lo", "cond", "humidity", "wind", "pressure", "uv", "visibility", "precip", "dayname", "days"]
 aggregates = ["min_lo", "max_hi"]
 
