@@ -296,6 +296,7 @@ copy save_work_lbl { class: vocabulary, en: "☆ WORK" }
 copy from     { class: vocabulary, en: "FROM" }
 copy to       { class: vocabulary, en: "TO" }
 copy here_now { class: vocabulary, en: "Starting from…" }
+copy cur_loc  { class: vocabulary, en: "Current location", zh: "当前位置" }
 copy away     { class: vocabulary, en: "away" }
 copy seeking  { class: vocabulary, en: "Finding a route…" }
 copy start    { class: vocabulary, en: "Go" }
@@ -365,7 +366,11 @@ view root Surface {
       when editing != .origin {
         Row(align: .center, gap: 10, on_tap: edit_origin, value: "1") {
           TextCaption(text: copy.from, width: .label)
-          TextRow(text: origin, width: .fill)
+          # An empty origin is not "unset" — it IS the trip's meaning: from
+          # here. The row says so, the way every wayfinding surface does,
+          # instead of a blank that reads as a question nobody answered.
+          when origin == "" { TextRow(text: copy.cur_loc, width: .fill) }
+          when origin != "" { TextRow(text: origin, width: .fill) }
         }
       }
       Rule()
