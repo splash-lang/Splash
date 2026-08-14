@@ -767,6 +767,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "splash-media-host"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "splash-capabilities",
+ "splash-core",
+ "splash-workflow",
+]
+
+[[package]]
 name = "splash-protocol"
 version = "0.1.0"
 dependencies = [

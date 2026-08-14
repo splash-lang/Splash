@@ -1,0 +1,20 @@
+[package]
+name = "splash-media-host"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Example host: agent-authored Splash workflow orchestrating policy-bound media capabilities (image.generate, media.transcode)"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "splash-media-host"
+path = "src/main.rs"
+
+[dependencies]
+splash-capabilities = { path = "../splash-capabilities" }
+splash-core = { path = "../splash-core" }
+splash-workflow = { version = "0.1.0", path = "../splash-workflow" }
+serde_json = "1.0.150"

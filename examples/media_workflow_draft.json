@@ -1,0 +1,13 @@
+{
+  "format_version": 1,
+  "steps": [
+    {
+      "id": "generate",
+      "source": "use mod.tool\nlet response = tool.call_json(\"image.generate\", {prompt: workflow.input.prompt, size: \"1024x1024\", quality: \"low\"})\nresponse.parse_json()"
+    },
+    {
+      "id": "edit",
+      "source": "use mod.tool\nlet handle = workflow.outputs.generate.handle\nlet response = tool.call_json(\"media.transcode\", {src: handle, vf: \"eq=saturation=0.62:brightness=-0.06,vignette\"})\nresponse.parse_json()"
+    }
+  ]
+}

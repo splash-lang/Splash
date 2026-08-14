@@ -13,6 +13,7 @@ members = [
     "crates/splash-workflow",
     "crates/splash-cli",
     "crates/splash-lsp",
+    "crates/splash-media-host",
 ]
 default-members = [
     "crates/splash-core",
