@@ -29,6 +29,7 @@ use std::time::Instant;
 
 use serde_json::{json, Value};
 use splash_capabilities::{
+    http_endpoint_catalog::{HttpEndpointMethod, HttpOrigin, HttpOriginCatalog},
     CapabilityLeaseGrant, JsonToolContract, JsonToolRequest, ToolDescriptor, ToolError,
     ToolMetadata, ToolPolicy,
 };
@@ -139,6 +140,12 @@ fn run() -> Result<bool, String> {
         }
         Err(error) => {
             println!("--- execution stopped: {error} ---");
+            println!("--- debug: {error:?} ---");
+            let mut source = std::error::Error::source(&error);
+            while let Some(cause) = source {
+                println!("--- caused by: {cause} ---");
+                source = cause.source();
+            }
             println!("(a step called a capability it held no lease for, or an adapter failed)");
             Ok(false)
         }
@@ -180,7 +187,18 @@ fn preflight(draft_json: &str) -> Result<bool, String> {
 fn build_runtime(dir: PathBuf) -> Result<MobileWorkflowRuntime, String> {
     let registry: Registry = Arc::new(Mutex::new(HashMap::new()));
     let seq: Seq = Arc::new(Mutex::new(0));
-    let mut builder = MobileWorkflowBuilder::new().map_err(|error| error.to_string())?;
+    // A data-script that enriches a whole chart parses one JSON payload per
+    // row; the default 200k instruction budget is spent after ~6 rows, so raise
+    // it for chart-sized loops.
+    let mut limits = ExecutionLimits::default();
+    limits.instruction_limit = 8_000_000;
+    // The default script deadline assumes no I/O; a chart of sequential network
+    // calls needs a wall-clock budget that covers real request latency.
+    limits.soft_timeout = std::time::Duration::from_secs(90);
+    limits.hard_timeout = std::time::Duration::from_secs(120);
+    let mut builder =
+        MobileWorkflowBuilder::with_limits(limits, splash_capabilities::DEFAULT_MAX_PENDING_TOOLS)
+            .map_err(|error| error.to_string())?;
 
     {
         let registry = registry.clone();
@@ -208,6 +226,33 @@ fn build_runtime(dir: PathBuf) -> Result<MobileWorkflowRuntime, String> {
                 ),
                 media_contract()?,
                 move |request: &JsonToolRequest| media_transcode(request, &registry, &seq, &dir),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    {
+        // (1c) A reviewed HTTP *origin* — not a bespoke `sys.movies` fetcher.
+        // The host fixes ONE origin (IMDb's keyless suggestion API, HTTPS,
+        // GET-only, byte-bounded); the Splash step decides which title to query
+        // by building a bounded URL under that origin. This is the whole point:
+        // the movie logic lives in the card's data-script, not in Rust.
+        let mut imdb = HttpOriginCatalog::default();
+        imdb.insert(
+            HttpOrigin::https("imdb", HttpEndpointMethod::Get, "https://v3.sg.media-imdb.com")
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let mut imdb_policy = ToolPolicy::json("net.imdb");
+        // One data-script enriches a whole chart, so the lease needs a call
+        // budget above the default 1; each suggestion payload is a few KB.
+        imdb_policy.max_calls = 16;
+        imdb_policy.max_output_bytes = 256 * 1024;
+        builder
+            .register_http_origin_catalog_tool(
+                imdb_policy,
+                ToolMetadata::new(
+                    "IMDb suggestion API — one reviewed HTTPS origin, keyless GET. The script supplies a bounded URL.",
+                ),
+                imdb,
             )
             .map_err(|error| error.to_string())?;
     }

@@ -3123,6 +3123,11 @@ pub mod catalog {
     /// able to NAME a capability it was not granted.
     pub const SOURCES: &[(&str, &[&str])] = &[
         ("sys.geocode", &["name"]),
+        // LIVE topic/movie detail from Wikipedia. Declared `source d sys.wiki(
+        // query: state.title)`; a field access `d.extract` becomes the second
+        // arg — `sys.wiki(query, "extract")` — exactly like `now.temp` on
+        // `sys.weather`. So only the INPUT arg is listed here.
+        ("sys.wiki", &["query"]),
         (
             "sys.weather",
             &["lat", "lon", "days", "fields", "aggregate", "day"],
@@ -3250,6 +3255,10 @@ pub mod catalog {
         ("sys.daylight", &["rise", "set", "now"]),
         ("sys.airquality", &["aqi", "pm25", "pm10", "ozone"]),
         ("sys.moonphase", &["phase", "illumination", "name"]),
+        // Live Wikipedia detail: the plot paragraph, the canonical title, the
+        // one-line description, a poster/still URL. Read off `source d
+        // sys.wiki(query: …)` as `d.extract`, `d.title`, … .
+        ("sys.wiki", &["title", "extract", "description", "thumbnail"]),
         // A photo is a URL, not a record. No field is readable off it.
         ("sys.photo", &[]),
         ("sys.locale", &["lang", "temp_unit"]),
@@ -6909,6 +6918,25 @@ pub mod makepad {
             // drew `$—` where the seeded blob held a real price.
             // A place NAME resolved to a fact. `geocodenum` for the numbers the
             // other helpers take as arguments, `geocode` for the words.
+            // Live Wikipedia detail. The card names a FIELD (`d.extract`); this
+            // lowers it to a self-contained SPLASH EXPRESSION evaluated inside
+            // the widget: concat the URL, fetch via the brokered `sys.fetch`
+            // primitive, `parse_json` (a Splash string method), then a static
+            // field access. The retrieval LOGIC runs as Splash; only the raw
+            // socket (`sys.fetch`) is Rust. (A shared `wiki_fetch` helper in a
+            // .splash file would be cleaner, but the VM isolates a widget's
+            // expression from a top-level `let`, so the expression must stand
+            // alone; and `vm.eval` from a capability is not re-entrant.)
+            "sys.wiki" => {
+                let query = text("query")?;
+                match binding.field.as_str() {
+                    "title" | "extract" | "description" => Some(format!(
+                        "sys.fetch(\"https://en.wikipedia.org/api/rest_v1/page/summary/\" + {query}).parse_json().{}",
+                        binding.field
+                    )),
+                    _ => None,
+                }
+            }
             "sys.geocode" => {
                 let name = text("name")?;
                 match binding.field.as_str() {

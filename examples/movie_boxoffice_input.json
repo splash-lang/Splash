@@ -1,0 +1,44 @@
+{
+  "films": [
+    {
+      "q": "avatar%202009",
+      "gross": "$2.923B"
+    },
+    {
+      "q": "avengers%20endgame",
+      "gross": "$2.799B"
+    },
+    {
+      "q": "avatar%20the%20way%20of%20water",
+      "gross": "$2.320B"
+    },
+    {
+      "q": "titanic%201997",
+      "gross": "$2.257B"
+    },
+    {
+      "q": "star%20wars%20the%20force%20awakens",
+      "gross": "$2.068B"
+    },
+    {
+      "q": "avengers%20infinity%20war",
+      "gross": "$2.052B"
+    },
+    {
+      "q": "spider-man%20no%20way%20home",
+      "gross": "$1.922B"
+    },
+    {
+      "q": "inside%20out%202",
+      "gross": "$1.699B"
+    },
+    {
+      "q": "jurassic%20world%202015",
+      "gross": "$1.671B"
+    },
+    {
+      "q": "the%20lion%20king%202019",
+      "gross": "$1.663B"
+    }
+  ]
+}

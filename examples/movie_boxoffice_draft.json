@@ -1,0 +1,9 @@
+{
+  "format_version": 1,
+  "steps": [
+    {
+      "id": "enrich",
+      "source": "use mod.tool\nuse mod.std.array\nuse mod.std.object\n\nfn pick_movie(items) {\n    for k in array.range(0, array.len(items)) {\n        let it = items[k]\n        if object.get(it, \"qid\", \"\") == \"movie\" {\n            return it\n        }\n    }\n    return items[0]\n}\n\nlet films = workflow.input.films\nlet rows = []\nfor i in array.range(0, array.len(films)) {\n    let f = films[i]\n    let url = \"https://v3.sg.media-imdb.com/suggestion/x/\" + f.q + \".json\"\n    let raw = tool.call_json(\"net.imdb\", {origin: \"imdb\", url: url})\n    let data = raw.parse_json()\n    let hit = pick_movie(data.d)\n    let img = object.get(hit, \"i\", {})\n    let row = {rank: i + 1, title: object.get(hit, \"l\", \"\"), year: object.get(hit, \"y\", 0), gross: f.gross, stars: object.get(hit, \"s\", \"\"), poster: object.get(img, \"imageUrl\", \"\"), imdb: object.get(hit, \"id\", \"\")}\n    array.push(rows, row)\n}\nlet out = {films: rows}\nout\n"
+    }
+  ]
+}
