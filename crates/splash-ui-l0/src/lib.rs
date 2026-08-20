@@ -7598,6 +7598,19 @@ pub mod makepad {
                 }
             }
         }
+        seeded_body(node, value, &glyph, unit, &suffix, format_kind)
+    }
+
+    /// The seeded tail shared by emission and measurement: the realized
+    /// literal with every decoration applied, never a live call.
+    fn seeded_body(
+        node: &UiNode,
+        value: Option<&NodeValue>,
+        glyph: &str,
+        unit: &str,
+        suffix: &str,
+        format_kind: Option<String>,
+    ) -> String {
         match value {
             Some(NodeValue::Missing) => "\"—\"".into(),
             Some(v) => {
@@ -7614,7 +7627,7 @@ pub mod makepad {
             // "300 m away · quiet green space". Nothing caught it because every
             // `suffix` in the original three cards pairs with `value:`, and only
             // that path applied the decoration.
-            None => decorate(expr_of(node, "text"), &glyph, unit, &suffix),
+            None => decorate(expr_of(node, "text"), glyph, unit, suffix),
         }
     }
 
@@ -7709,12 +7722,22 @@ pub mod makepad {
     /// The realized value with every decoration applied — exactly what would
     /// have been drawn had nothing gone live.
     ///
-    /// This is `valued`'s literal path, reached directly. Reconstructing the
-    /// decoration here instead would give two formatters to keep in step, and
-    /// the one used for measuring would drift from the one used for drawing
-    /// without anything failing.
+    /// This is `valued_seeded`'s literal tail reached DIRECTLY, skipping its
+    /// live-binding branch. That branch exists for EMISSION — a bound value
+    /// must go live on the wire — but measuring the emitted call is how a
+    /// three-character "23°" was sized as the ~120 characters of
+    /// `sys.weather(sys.geocodenum(…))` and every live hero fell to the ramp's
+    /// bottom step: 17pt, on the canonical weather fixture too. Measurement
+    /// wants what will be DRAWN; the seeded literal — or its "—" placeholder —
+    /// is the sound proxy for that even when the wire form is a call.
     fn valued_literal(node: &UiNode) -> String {
-        valued_seeded(node)
+        let Decoration {
+            glyph,
+            unit,
+            suffix,
+            format: format_kind,
+        } = decoration_of(node);
+        seeded_body(node, arg(node, "value"), &glyph, unit, &suffix, format_kind)
     }
 
     /// A `value` argument as a live call plus its decoration, or `None` to use
