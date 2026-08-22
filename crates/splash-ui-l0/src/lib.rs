@@ -3032,6 +3032,10 @@ pub mod catalog {
             &[("value", Data), ("format", Token(FORMAT)), ("tint", Path)],
         ),
         ("TextRow", &[("text", Text), ("width", TokenOrPath(WIDTH))]),
+        // An EYEBROW: the small tracked-caps line above a hero. The mockup
+        // study priced its absence; the kit answers with tracking and caps,
+        // which is presentation and therefore never the card's to spell.
+        ("TextEyebrow", &[("text", Text)]),
         (
             "TextCaption",
             &[
@@ -9964,6 +9968,7 @@ pub mod kit {
             "TextBody" => "l0_body",
             "TextRow" => "l0_row_text",
             "TextCaption" => "l0_caption",
+            "TextEyebrow" => "l0_eyebrow",
             "TextValue" => "l0_value",
             "TextStat" => "l0_stat",
             _ => return None,

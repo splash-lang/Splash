@@ -177,6 +177,11 @@ tint   = { kind = "path" }
 text  = { kind = "text" }
 width = { kind = "width" }
 
+# The small tracked-caps line above a hero — "T O K Y O". The card supplies
+# the words; the caps and the tracking are the theme's.
+[TextEyebrow]
+text = { kind = "text" }
+
 [TextCaption]
 text   = { kind = "text" }
 value  = { kind = "data" }
