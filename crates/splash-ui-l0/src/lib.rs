@@ -800,6 +800,8 @@ struct Card {
     /// dark looks like. A card that wants a look no theme name covers does not
     /// get to describe it.
     theme: Option<(String, usize)>,
+    /// Axis intents declared on the same line as the mood, in source order.
+    theme_axes: Vec<(String, String)>,
 }
 
 /// A declared capability dependency: the name it binds, the helper that answers
@@ -1222,6 +1224,55 @@ impl<'a> Parser<'a> {
                             );
                         } else {
                             card.theme = Some((name, line));
+                        }
+                        // Axes follow the mood ON THE SAME LINE:
+                        //     theme light shape: .square accent: .amber
+                        // The lexer discards newlines, so "same line" is
+                        // enforced against `Token.line` rather than by grammar
+                        // shape — without that check the next declaration's
+                        // first identifier would be eaten as an axis name.
+                        while self
+                            .peek()
+                            .is_some_and(|t| t.line == line && t.kind == Kind::Ident)
+                            && self.peek_at(1).is_some_and(|t| t.is(Kind::Punct, ":"))
+                        {
+                            let axis = self.ident().unwrap_or_default();
+                            self.at += 1; // the colon
+                            let Some(v) = self.peek().cloned() else { break };
+                            self.at += 1;
+                            let value = v.text.trim_start_matches('.').to_owned();
+                            match catalog::axis(&axis) {
+                                None => self.sink.at(
+                                    &v,
+                                    format!(
+                                        "{axis:?} is not a theme axis L0 admits. Known: {}",
+                                        catalog::AXES
+                                            .iter()
+                                            .map(|(n, _)| *n)
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
+                                    ),
+                                ),
+                                Some(legal) if !legal.contains(&value.as_str()) => self.sink.at(
+                                    &v,
+                                    format!(
+                                        "{value:?} is not a value {axis:?} admits; a card names \
+                                         a catalogued intent and never a colour or a length \
+                                         (profile §4). Known: {}",
+                                        legal.join(", ")
+                                    ),
+                                ),
+                                Some(_) => {
+                                    if card.theme_axes.iter().any(|(a, _)| *a == axis) {
+                                        self.sink.at(
+                                            &v,
+                                            format!("{axis:?} is declared twice on this theme"),
+                                        );
+                                    } else {
+                                        card.theme_axes.push((axis, value));
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -2806,6 +2857,32 @@ pub mod catalog {
     /// `dark` is the default and needs no declaration; it is listed so a card
     /// may say so explicitly.
     pub const THEMES: &[&str] = &["dark", "light", "glass", "photo"];
+
+    /// The theme AXES a card may name beside its mood, and the closed set each
+    /// admits. A mood is one coordinate; these are the others.
+    ///
+    /// Every value is a token, never a colour, a length or a font name — the
+    /// card states an INTENT and the theme decides what it looks like, which is
+    /// the same contract `theme <mood>` has always had. Four moods could only
+    /// ever be four looks; a corpus of 100 generated designs asked for square
+    /// AND soft geometry, restrained AND vivid palettes, grotesk AND serif
+    /// display, and one global setting cannot serve both sides of any of those.
+    ///
+    /// `shape`, `density`, `emphasis` and `icons` are knobs the palette already
+    /// carries and renders — they were simply not selectable per card.
+    pub const AXES: &[(&str, &[&str])] = &[
+        ("accent", &["neutral", "indigo", "blue", "red", "green",
+                     "amber", "cyan", "magenta", "violet"]),
+        ("shape", &["square", "subtle", "soft", "pill"]),
+        ("density", &["compact", "regular", "airy"]),
+        ("emphasis", &["quiet", "clear", "poster"]),
+        ("icons", &["filled", "mono"]),
+    ];
+
+    /// The legal values for an axis, or `None` if L0 has no such axis.
+    pub fn axis(name: &str) -> Option<&'static [&'static str]> {
+        AXES.iter().find(|(n, _)| *n == name).map(|(_, v)| *v)
+    }
 
     /// The catalogued theme of that name, or `None` if L0 does not admit it.
     pub fn theme(name: &str) -> Option<&'static str> {
@@ -9033,6 +9110,19 @@ pub fn state_initials(source: &str) -> std::collections::BTreeMap<String, serde_
 ///
 /// Read before realize, like [`state_initials`]: the palette has to be chosen to
 /// build the source the kit is concatenated into, which is earlier than a tree.
+/// The theme axes a card declares beside its mood, in source order.
+///
+/// Read before realize for the same reason [`card_theme`] is: a host choosing
+/// a palette needs the card's stated intent, and that is a fact about the
+/// source rather than about a realized tree.
+pub fn card_theme_axes(source: &str) -> Vec<(String, String)> {
+    let mut sink = Diagnostics::default();
+    let Some(tokens) = lex(source, &mut sink) else {
+        return Vec::new();
+    };
+    Parser::new(&tokens, &mut sink).parse_card().theme_axes
+}
+
 pub fn card_theme(source: &str) -> Option<String> {
     let mut sink = Diagnostics::default();
     let tokens = lex(source, &mut sink)?;
