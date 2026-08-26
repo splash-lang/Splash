@@ -2873,7 +2873,7 @@ pub mod catalog {
     pub const AXES: &[(&str, &[&str])] = &[
         ("accent", &["neutral", "indigo", "blue", "red", "green",
                      "amber", "cyan", "magenta", "violet"]),
-        ("shape", &["square", "subtle", "soft", "pill"]),
+        ("radius", &["none", "small", "large", "full"]),
         ("density", &["compact", "regular", "airy"]),
         ("emphasis", &["quiet", "clear", "poster"]),
         ("icons", &["filled", "mono"]),
