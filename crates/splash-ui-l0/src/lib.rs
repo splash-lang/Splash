@@ -3341,10 +3341,13 @@ pub mod catalog {
         // Live Wikipedia detail: the plot paragraph, the canonical title, the
         // one-line description, a poster/still URL. Read off `source d
         // sys.wiki(query: …)` as `d.extract`, `d.title`, … .
-        (
-            "sys.wiki",
-            &["title", "extract", "description", "thumbnail"],
-        ),
+        // `thumbnail` is NOT offered. The page-summary endpoint returns it as a
+        // nested object (`thumbnail.source`), and every lowering here reads a
+        // single flat field — so a card asking for `d.thumbnail` would have got
+        // an em dash with nothing able to warn it. Offering a field no backend
+        // answers is the one failure this vocabulary exists to prevent; adding
+        // it back needs a nested-path lowering first.
+        ("sys.wiki", &["title", "extract", "description"]),
         // A photo is a URL, not a record. No field is readable off it.
         ("sys.photo", &[]),
         ("sys.locale", &["lang", "temp_unit"]),
@@ -10270,9 +10273,7 @@ pub mod kit {
     /// is the theme's answer, and deciding here would put styling in the
     /// lowering.
     fn width_wrap(node: &UiNode) -> Option<(&'static str, String)> {
-        let Some(t) = token_arg(node, "width") else {
-            return None;
-        };
+        let t = token_arg(node, "width")?;
         match t {
             "fill" => Some(("l0_wide(", ")".into())),
             // NOT a no-op, though it is the default for a text role: `l0_row`
@@ -10558,7 +10559,7 @@ pub mod kit {
                 // zoom pill has, so a chip the card put on the map reads over pale
                 // tiles instead of vanishing into them — and a card that docks
                 // nothing there must not get an empty box for it.
-                let has_side = node.children.iter().any(|c| docked(&c, "right"));
+                let has_side = node.children.iter().any(|c| docked(c, "right"));
                 let _ = write!(out, ", {}", u8::from(has_side));
                 out.push(')');
             }
