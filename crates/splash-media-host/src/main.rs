@@ -187,12 +187,14 @@ fn build_runtime(dir: PathBuf) -> Result<MobileWorkflowRuntime, String> {
     // A data-script that enriches a whole chart parses one JSON payload per
     // row; the default 200k instruction budget is spent after ~6 rows, so raise
     // it for chart-sized loops.
-    let mut limits = ExecutionLimits::default();
-    limits.instruction_limit = 8_000_000;
-    // The default script deadline assumes no I/O; a chart of sequential network
-    // calls needs a wall-clock budget that covers real request latency.
-    limits.soft_timeout = std::time::Duration::from_secs(90);
-    limits.hard_timeout = std::time::Duration::from_secs(120);
+    let limits = ExecutionLimits {
+        instruction_limit: 8_000_000,
+        // The default script deadline assumes no I/O; a chart of sequential
+        // network calls needs a wall-clock budget that covers real latency.
+        soft_timeout: std::time::Duration::from_secs(90),
+        hard_timeout: std::time::Duration::from_secs(120),
+        ..ExecutionLimits::default()
+    };
     let mut builder =
         MobileWorkflowBuilder::with_limits(limits, splash_capabilities::DEFAULT_MAX_PENDING_TOOLS)
             .map_err(|error| error.to_string())?;
