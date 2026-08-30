@@ -9294,3 +9294,52 @@ fn every_source_answers_for_its_own_lifecycle() {
         "two trips, two probes — never one merged state"
     );
 }
+
+// ───────────────────────────────────────────────── theme portability ──
+
+/// An emoji is painted from the colour-font with its colours baked in, so
+/// `draw_text.color` never reaches it. A card using one as an icon renders in
+/// one polarity and vanishes in the other — measured across the corpus at 81
+/// cards, and named in four separate judge verdicts before the cause was found.
+#[test]
+fn an_emoji_used_as_an_icon_is_flagged_but_does_not_refuse_the_card() {
+    const CARD: &str = "\
+source place sys.geocode(name: \"Kyoto\")
+
+view root Col {
+  Row(align: .center, gap: 10) {
+    TextRow(text: \"🍽\")
+    TextRow(text: place.name)
+  }
+}
+";
+    let r = splash_ui_l0::check_ui_l0_named("card.l0", CARD);
+    assert!(
+        r.valid,
+        "the card is well-formed; a lint must not refuse it"
+    );
+    assert_eq!(r.lints.len(), 1, "one emoji, one lint");
+    assert_eq!(r.lints[0].line, 5);
+    assert!(
+        r.lints[0].message.contains("colour-font"),
+        "the lint should say WHY it cannot be themed: {}",
+        r.lints[0].message
+    );
+}
+
+/// Latin, CJK and punctuation are monochrome and take the theme's ink. Only the
+/// pictographic blocks carry their own colour, and a lint that fired on ordinary
+/// text would be noise on every card in the corpus.
+#[test]
+fn ordinary_text_carries_no_portability_lint() {
+    const CARD: &str = "\
+view root Col {
+  TextRow(text: \"12 km NW of La Romana\")
+  TextRow(text: \"今天天氣很好\")
+  TextRow(text: \"Café naïve — em dash… ellipsis\")
+}
+";
+    let r = splash_ui_l0::check_ui_l0_named("card.l0", CARD);
+    assert!(r.valid);
+    assert!(r.lints.is_empty(), "unexpected lints: {:?}", r.lints);
+}

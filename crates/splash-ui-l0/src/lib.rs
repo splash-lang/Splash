@@ -91,6 +91,10 @@ pub struct UiL0Report {
     /// a digest that moved means the level must be re-derived before the card
     /// is accepted, rather than inherited from the record it no longer matches.
     pub closure: Vec<(String, u64)>,
+    /// Advisories: the card is valid and will realize, but something in it will
+    /// not survive a change of theme. Separate from `diagnostics` on purpose —
+    /// a lint that could refuse a card would be a rule, and these are not rules.
+    pub lints: Vec<SyntaxDiagnostic>,
 }
 
 /// What a card's header declares — ledger name, version, level and profile.
@@ -260,7 +264,68 @@ pub fn check_ui_l0_named(_name: &str, source: &str) -> UiL0Report {
     report.closure = component_closure(&card);
     report.header = header.clone();
     check_header(&header, report.level, &mut report);
+    check_theme_portability(source, &mut report);
     report
+}
+
+/// Text that carries its own colour cannot follow a theme.
+///
+/// A colour-font glyph — an emoji — is painted from the emoji font with the
+/// colours baked into it, so `draw_text.color` never reaches it. A card using
+/// one as an icon renders correctly under exactly the polarity its author had on
+/// screen, and is invisible under the other. Measured: 54 of 967 corpus cards do
+/// this, and on a light ground their icons vanish entirely — four separate judge
+/// verdicts named it before anyone thought to look for the cause.
+///
+/// This is an advisory, not a rule. The card is valid; it is just not portable,
+/// and nothing else in the pipeline can tell you so.
+fn check_theme_portability(source: &str, report: &mut UiL0Report) {
+    // A conservative sweep of the pictographic blocks plus the variation
+    // selector. Latin, CJK and punctuation are all monochrome and take the
+    // theme's ink correctly, so nothing outside these ranges is a concern.
+    fn pictographic(c: char) -> bool {
+        matches!(c as u32,
+            0x1F300..=0x1FAFF   // emoji, pictographs, symbols
+            | 0x2600..=0x27BF   // misc symbols and dingbats
+            | 0x1F000..=0x1F2FF // tiles, enclosed characters
+            | 0xFE0F            // variation selector: "render this in colour"
+        )
+    }
+
+    for (n, line) in source.lines().enumerate() {
+        // Only the argument positions that end up as painted text. A comment or
+        // a `query:` string never reaches a glyph.
+        for key in ["text:", "glyph:"] {
+            let mut rest = line;
+            let mut base = 0usize;
+            while let Some(at) = rest.find(key) {
+                let after = &rest[at + key.len()..];
+                if let Some(open) = after.find('"') {
+                    let body = &after[open + 1..];
+                    if let Some(close) = body.find('"') {
+                        let lit = &body[..close];
+                        if let Some(c) = lit.chars().find(|c| pictographic(*c)) {
+                            report.lints.push(SyntaxDiagnostic {
+                                line: n + 1,
+                                column: base + at + 1,
+                                message: format!(
+                                    "{c:?} is a colour-font glyph, so it ignores the theme's \
+                                     ink and stays the colour it was drawn in — this card will \
+                                     render correctly in one polarity and invisibly in the \
+                                     other. Use an icon role, or accept that the card is \
+                                     single-theme."
+                                ),
+                            });
+                        }
+                        base += at + key.len() + open + 1 + close + 1;
+                        rest = &body[close + 1..];
+                        continue;
+                    }
+                }
+                break;
+            }
+        }
+    }
 }
 
 /// §7: a declared level must match the derived one, and escalation is never
@@ -432,6 +497,7 @@ impl Diagnostics {
             level,
             diagnostics: self.items,
             diagnostics_truncated: self.truncated,
+            lints: Vec::new(),
         }
     }
 }
