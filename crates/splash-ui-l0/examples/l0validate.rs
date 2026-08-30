@@ -7,7 +7,11 @@ fn main() {
     let path = std::env::args().nth(1).expect("usage: l0validate <path>");
     let src = std::fs::read_to_string(&path).unwrap_or_default();
     let report = realize(&src, &serde_json::json!({}), RealizeLimits::default());
-    let msgs: Vec<String> = report.diagnostics.iter().map(|d| d.message.clone()).collect();
+    let msgs: Vec<String> = report
+        .diagnostics
+        .iter()
+        .map(|d| d.message.clone())
+        .collect();
     let ok = report.diagnostics.is_empty() && report.root.is_some();
     println!(
         "{}",

@@ -3497,11 +3497,10 @@ fn syntax_the_model_gets_wrong_is_refused_with_a_teaching_diagnostic() {
         let report = check_ui_l0_named("malformed", source);
         assert!(!report.valid, "{what} must be rejected");
         assert!(
-            report
-                .diagnostics
-                .iter()
-                .any(|d| d.message.contains("cannot appear inside an argument list")
-                    && d.message.contains("wrap elements")),
+            report.diagnostics.iter().any(|d| d
+                .message
+                .contains("cannot appear inside an argument list")
+                && d.message.contains("wrap elements")),
             "{what} should produce the teaching diagnostic: {:#?}",
             report.diagnostics
         );
@@ -3522,11 +3521,10 @@ fn syntax_the_model_gets_wrong_is_refused_with_a_teaching_diagnostic() {
     let report = check_ui_l0_named("malformed", "view root TextRow(text, value)");
     assert!(!report.valid, "a bare-value argument must be rejected");
     assert!(
-        report
-            .diagnostics
-            .iter()
-            .any(|d| d.message.contains("expected \":\" after argument name `text`")
-                && d.message.contains("`name: value`")),
+        report.diagnostics.iter().any(|d| d
+            .message
+            .contains("expected \":\" after argument name `text`")
+            && d.message.contains("`name: value`")),
         "comma-for-colon should produce the teaching diagnostic: {:#?}",
         report.diagnostics
     );
@@ -5177,7 +5175,11 @@ fn previewing_stores_nothing_and_adding_stores_once() {
     // Type: the query moves, and the search source parameterised by it goes
     // stale — that is what makes results-as-you-type refetch.
     let out = dispatch(&mut store, "typing", "berk");
-    assert_eq!(out.changed, vec!["query"], "typing writes the query: {out:?}");
+    assert_eq!(
+        out.changed,
+        vec!["query"],
+        "typing writes the query: {out:?}"
+    );
     assert!(
         out.stale.contains(&"found".to_string()),
         "the search must refetch: {:?}",
@@ -5218,7 +5220,12 @@ fn previewing_stores_nothing_and_adding_stores_once() {
     assert_eq!(out.writes.len(), 1, "exactly one durable write: {out:?}");
     let w = &out.writes[0];
     assert_eq!(
-        (w.source.as_str(), w.helper.as_str(), w.op.as_str(), w.value.as_str()),
+        (
+            w.source.as_str(),
+            w.helper.as_str(),
+            w.op.as_str(),
+            w.value.as_str()
+        ),
         ("cities", "sys.cities", "append", city),
         "the host is told the bound name, the capability, the op and the value"
     );
@@ -7074,7 +7081,10 @@ fn the_nav_card_routes_between_two_editable_places() {
     }
     // And opening one turns THAT row into a field, so a keyboard-capable renderer
     // still gets one — and picking a result works without one either way.
-    for (event, target) in [("edit_origin", "choose_origin"), ("edit_dest", "choose_dest")] {
+    for (event, target) in [
+        ("edit_origin", "choose_origin"),
+        ("edit_dest", "choose_dest"),
+    ] {
         let mut store = splash_ui_l0::InstanceStore::default();
         splash_ui_l0::dispatch_reporting(NAV, &mut store, "root", event, None, &data);
         let open = splash_ui_l0::kit::lower(
@@ -7822,11 +7832,17 @@ fn a_docked_panel_does_not_draw_a_second_panel_inside_the_dock() {
         .expect("the sheet is the rounded box at the bottom");
     // The line after the sheet opens is its content, not another box.
     assert!(
-        !mp.lines().nth(sheet + 1).unwrap_or("").contains("RoundedView{"),
+        !mp.lines()
+            .nth(sheet + 1)
+            .unwrap_or("")
+            .contains("RoundedView{"),
         "a second box inside the sheet:\n{mp}"
     );
     assert!(
-        mp.lines().nth(sheet).unwrap_or("").contains("align: Align{x: 0.5}"),
+        mp.lines()
+            .nth(sheet)
+            .unwrap_or("")
+            .contains("align: Align{x: 0.5}"),
         "the sheet centres what is in it:\n{mp}"
     );
 }
@@ -7871,7 +7887,11 @@ fn a_cycle_advances_from_the_state_the_card_is_showing() {
                 .expect("realizes"),
         );
         // The drive branch is the one with the tap on it.
-        let now = if dsl.contains("l0_chip") { "drive" } else { "plan" };
+        let now = if dsl.contains("l0_chip") {
+            "drive"
+        } else {
+            "plan"
+        };
         assert_eq!(
             now, after_one_tap,
             "seeded on {seed:?}, one tap must reach {after_one_tap:?}, not {now:?}:\n{dsl}"
@@ -8128,7 +8148,10 @@ fn a_card_names_a_map_control_and_never_calls_the_widget() {
     );
     // Asked for: the theme is told, and told which.
     let zoom = lower(&card(", controls: .zoom"));
-    assert!(zoom.contains("\"zoom\""), "a zoom pill was asked for:\n{zoom}");
+    assert!(
+        zoom.contains("\"zoom\""),
+        "a zoom pill was asked for:\n{zoom}"
+    );
     let all = lower(&card(", controls: .all"));
     assert!(all.contains("\"all\""), "recenter too:\n{all}");
 
@@ -8332,11 +8355,17 @@ fn a_chase_map_carries_no_pins() {
     };
     // The overview pins both ends — that is the requirement.
     let plan = lower("plan");
-    assert!(plan.contains("\",0\"") && plan.contains("\",2\""), "plan pins:\n{plan}");
+    assert!(
+        plan.contains("\",0\"") && plan.contains("\",2\""),
+        "plan pins:\n{plan}"
+    );
     // The chase map passes an EMPTY marker string, which the widget reads as
     // "no pins" — not a missing argument, which would be an arity error.
     let drive = lower("drive");
-    assert!(drive.contains("follow3d"), "drive is the chase camera:\n{drive}");
+    assert!(
+        drive.contains("follow3d"),
+        "drive is the chase camera:\n{drive}"
+    );
     assert!(
         !drive.contains("\",0\"") && !drive.contains("\",2\""),
         "a chase map must carry no pins:\n{drive}"
@@ -8556,7 +8585,8 @@ fn a_field_can_answer_a_keystroke_and_a_commit_differently() {
     let joined = fields.join("\n");
     // The first field carries BOTH, and they are different events.
     assert!(
-        joined.contains("\\\"e\\\":\\\"typing\\\"") && joined.contains("\\\"e\\\":\\\"set_dest\\\""),
+        joined.contains("\\\"e\\\":\\\"typing\\\"")
+            && joined.contains("\\\"e\\\":\\\"set_dest\\\""),
         "a field may answer both moments:\n{joined}"
     );
     // The second asked for no keystroke event and must not have acquired one: a
@@ -8619,7 +8649,9 @@ fn a_map_routes_through_both_of_its_stops() {
     // The route call ALONE. A fixed-width window swept in the pin string, which
     // legitimately carries three separators — origin, two stops, destination — and
     // made a correct lowering look like four waypoints.
-    let start = dsl.find("sys.navroute(").expect("a map with a trip lowers a route");
+    let start = dsl
+        .find("sys.navroute(")
+        .expect("a map with a trip lowers a route");
     let mut depth = 0usize;
     let mut end = start;
     for (i, c) in dsl[start..].char_indices() {
@@ -8709,7 +8741,11 @@ fn an_initial_taken_from_a_source_is_reported_as_captured() {
     // And once the store HOLDS it, the capture does not repeat — that is what makes
     // it a capture rather than a re-read.
     let mut store = splash_ui_l0::InstanceStore::default();
-    store.set_cell(splash_ui_l0::CARD_STATE_KEY, "from_lat", serde_json::json!(1.5));
+    store.set_cell(
+        splash_ui_l0::CARD_STATE_KEY,
+        "from_lat",
+        serde_json::json!(1.5),
+    );
     let held = splash_ui_l0::realize_with_state(CARD, &data, &store, RealizeLimits::default());
     assert!(
         held.captured.is_empty(),
@@ -9253,5 +9289,8 @@ fn every_source_answers_for_its_own_lifecycle() {
         trip.contains("searchnum(\"\""),
         "trip's own probe carries the empty origin:\n{trip}"
     );
-    assert_ne!(trip, trip_here, "two trips, two probes — never one merged state");
+    assert_ne!(
+        trip, trip_here,
+        "two trips, two probes — never one merged state"
+    );
 }
