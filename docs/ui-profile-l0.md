@@ -544,7 +544,8 @@ theme dark
 ```
 
 At most one per card, and the name must be catalogued (`catalog::THEMES`: `dark`, `light`,
-`glass`, `photo`). An uncatalogued name is refused at parse time, with the known set named.
+`glass`, `photo`, `vibrant`, `minimal`). An uncatalogued name is refused at parse time, with
+the known set named.
 
 This does not weaken the no-presentation rule, because a card declaring `theme glass` has said
 nothing about what glass *is*. The kit answers it, by assembling itself in four parts:

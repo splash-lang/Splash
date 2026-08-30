@@ -2917,7 +2917,10 @@ pub mod catalog {
     ///
     /// `dark` is the default and needs no declaration; it is listed so a card
     /// may say so explicitly.
-    pub const THEMES: &[&str] = &["dark", "light", "glass", "photo"];
+    /// `vibrant` and `minimal` were declared by 43 corpus cards that could not
+    /// realize — the checker refused them before they reached a colour, because
+    /// the vocabulary named four moods and the generator had been writing six.
+    pub const THEMES: &[&str] = &["dark", "light", "glass", "photo", "vibrant", "minimal"];
 
     /// The theme AXES a card may name beside its mood, and the closed set each
     /// admits. A mood is one coordinate; these are the others.
