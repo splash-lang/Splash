@@ -352,6 +352,13 @@ tokens  = ["fill", "fit", "day", "rank", "temp", "label"]
 args = ["name"]
 answers = ["lat", "lon", "name", "country", "admin1", "timezone", "population"]
 
+# Live topic detail from Wikipedia's page-summary endpoint. Declared with the
+# subject only — `source d sys.wiki(query: "Dune")` — and read as `d.extract`,
+# `d.title`, the same shape as any other record source.
+[sources."sys.wiki"]
+args = ["query"]
+answers = ["title", "extract", "description"]
+
 [sources."sys.weather"]
 # `day` selects which day the DAILY fields describe: 0 (default) is today,
 # 1 is tomorrow. The current-conditions fields (temp, feels, humidity, wind,

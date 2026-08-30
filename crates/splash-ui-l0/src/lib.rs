@@ -1461,8 +1461,7 @@ impl<'a> Parser<'a> {
                 // could name a coordinate in the western hemisphere, or a
                 // temperature below zero, without going through `sys.geocode`.
                 Some(t)
-                    if t.is_punct("-")
-                        && self.peek_at(1).is_some_and(|n| n.kind == Kind::Num) =>
+                    if t.is_punct("-") && self.peek_at(1).is_some_and(|n| n.kind == Kind::Num) =>
                 {
                     let n = self.peek_at(1).map(|n| n.text.clone()).unwrap_or_default();
                     self.at += 2;
@@ -1626,15 +1625,13 @@ impl<'a> Parser<'a> {
                                     // Refusing is what keeps the two apart; dropping
                                     // the operator quietly is the one outcome neither
                                     // reading supports.
-                                    if self
-                                        .tokens
-                                        .get(at)
-                                        .is_some_and(|t| t.kind == Kind::Punct
+                                    if self.tokens.get(at).is_some_and(|t| {
+                                        t.kind == Kind::Punct
                                             && matches!(
                                                 t.text.as_str(),
                                                 "+" | "-" | "*" | "/" | "%"
-                                            ))
-                                    {
+                                            )
+                                    }) {
                                         let t = self.tokens[at].clone();
                                         self.sink.at(
                                             &t,
@@ -2336,9 +2333,7 @@ impl<'a> Parser<'a> {
                     None => self.sink.push(
                         0,
                         0,
-                        format!(
-                            "expected \":\" after argument name `{name}`, found end of source"
-                        ),
+                        format!("expected \":\" after argument name `{name}`, found end of source"),
                     ),
                 }
                 // Recover to the closing paren so one mistake yields one
@@ -2871,8 +2866,12 @@ pub mod catalog {
     /// `shape`, `density`, `emphasis` and `icons` are knobs the palette already
     /// carries and renders — they were simply not selectable per card.
     pub const AXES: &[(&str, &[&str])] = &[
-        ("accent", &["neutral", "indigo", "blue", "red", "green",
-                     "amber", "cyan", "magenta", "violet"]),
+        (
+            "accent",
+            &[
+                "neutral", "indigo", "blue", "red", "green", "amber", "cyan", "magenta", "violet",
+            ],
+        ),
         ("radius", &["none", "small", "large", "full"]),
         ("density", &["compact", "regular", "airy"]),
         ("emphasis", &["quiet", "clear", "poster"]),
@@ -3260,7 +3259,10 @@ pub mod catalog {
         // quotes, so a card asks for the fields it wants to show and never
         // learns that a store exists.
         ("sys.watchlist", &["ticker", "fields"]),
-        ("sys.indicator", &["countries", "indicator", "years", "fields"]),
+        (
+            "sys.indicator",
+            &["countries", "indicator", "years", "fields"],
+        ),
         ("sys.video", &["query", "count", "fields"]),
         ("sys.prefs", &["fields"]),
         ("sys.reading", &["fields"]),
@@ -3339,7 +3341,13 @@ pub mod catalog {
         // Live Wikipedia detail: the plot paragraph, the canonical title, the
         // one-line description, a poster/still URL. Read off `source d
         // sys.wiki(query: …)` as `d.extract`, `d.title`, … .
-        ("sys.wiki", &["title", "extract", "description", "thumbnail"]),
+        // `thumbnail` is NOT offered. The page-summary endpoint returns it as a
+        // nested object (`thumbnail.source`), and every lowering here reads a
+        // single flat field — so a card asking for `d.thumbnail` would have got
+        // an em dash with nothing able to warn it. Offering a field no backend
+        // answers is the one failure this vocabulary exists to prevent; adding
+        // it back needs a nested-path lowering first.
+        ("sys.wiki", &["title", "extract", "description"]),
         // A photo is a URL, not a record. No field is readable off it.
         ("sys.photo", &[]),
         ("sys.locale", &["lang", "temp_unit"]),
@@ -3348,7 +3356,10 @@ pub mod catalog {
         // for "Stanford" renders five rows all reading "Stanford", which is what
         // Photon actually returns and is useless to choose between. The backend has
         // answered this field all along; the catalog simply never admitted it.
-        ("sys.search", &["id", "name", "label", "query", "lat", "lon", "distance"]),
+        (
+            "sys.search",
+            &["id", "name", "label", "query", "lat", "lon", "distance"],
+        ),
         ("sys.route", &["duration", "distance", "steps"]),
         ("sys.step", &["instruction", "remaining", "progress", "eta"]),
         (
@@ -3401,20 +3412,27 @@ pub mod catalog {
         // chart's to fetch; these are the numbers a card puts beside it.
         (
             "sys.indicator",
-            &["name", "latest", "first", "change", "min", "max", "year", "title"],
+            &[
+                "name", "latest", "first", "change", "min", "max", "year", "title",
+            ],
         ),
         // A YouTube search result. `embed` is a player url ready to hand to
         // sys.link — a card cannot build one, because L0 has no string
         // concatenation, and that is the point.
         (
             "sys.video",
-            &["id", "title", "channel", "length", "views", "age", "thumb", "embed"],
+            &[
+                "id", "title", "channel", "length", "views", "age", "thumb", "embed",
+            ],
         ),
         ("sys.prefs", &["units", "range", "home", "work", "mode"]),
         // The reading list: SAVED story ids, joined to the story each id names.
         // The id is the identity Algolia serves forever, so a bookmarked story
         // outlives the front page it was found on.
-        ("sys.reading", &["id", "title", "author", "points", "comments", "url"]),
+        (
+            "sys.reading",
+            &["id", "title", "author", "points", "comments", "url"],
+        ),
         // Followed TOPICS: the store holds a topic word ("ai", "nba"); the
         // top story beside it is searched fresh on every read, so a followed
         // topic never pins the story that was hot when it was followed.
@@ -6645,7 +6663,8 @@ pub mod makepad {
     pub(super) fn map_vias(node: &UiNode) -> Option<String> {
         let mut pairs: Vec<String> = Vec::new();
         for slot in ["via", "via2"] {
-            let (Some(lat), Some(lon)) = (map_coord(node, slot, "lat"), map_coord(node, slot, "lon"))
+            let (Some(lat), Some(lon)) =
+                (map_coord(node, slot, "lat"), map_coord(node, slot, "lon"))
             else {
                 continue;
             };
@@ -7048,9 +7067,7 @@ pub mod makepad {
                 // beneath a label that says otherwise. Measured motive: a card
                 // whose eyebrow said TOMORROW over `current.temperature_2m`,
                 // which no screen could tell from the real thing.
-                if day > 0
-                    && matches!(field, "temp" | "feels" | "humidity" | "wind" | "pressure")
-                {
+                if day > 0 && matches!(field, "temp" | "feels" | "humidity" | "wind" | "pressure") {
                     return None;
                 }
                 let path = match field {
@@ -7406,7 +7423,7 @@ pub mod makepad {
                 index.parse::<u32>().ok()?;
                 let key = match field {
                     f @ ("id" | "title" | "channel" | "length" | "views" | "age" | "thumb"
-                        | "embed") => f,
+                    | "embed") => f,
                     _ => return None,
                 };
                 let query = text("query")?;
@@ -7426,7 +7443,7 @@ pub mod makepad {
                 index.parse::<u32>().ok()?;
                 let key = match field {
                     f @ ("name" | "latest" | "first" | "change" | "min" | "max" | "year"
-                        | "title") => f,
+                    | "title") => f,
                     _ => return None,
                 };
                 let countries = arg("countries")?;
@@ -8978,7 +8995,9 @@ fn dispatch_writes(
                     // carried it falls through instead of consuming the swipe.
                     return (Vec::new(), Vec::new());
                 }
-                let here = current.as_str().and_then(|c| rows.iter().position(|r| r == c));
+                let here = current
+                    .as_str()
+                    .and_then(|c| rows.iter().position(|r| r == c));
                 let at = match (here, forward) {
                     (Some(i), true) => (i + 1) % rows.len(),
                     (Some(i), false) => (i + rows.len() - 1) % rows.len(),
@@ -9373,12 +9392,7 @@ fn resolved_bindings(
             .cloned()
             .or_else(|| data.get(&state.path).cloned())
             .or_else(|| state.initial.clone())
-            .or_else(|| {
-                state
-                    .initial_path
-                    .as_ref()
-                    .and_then(|p| data_path(data, p))
-            })
+            .or_else(|| state.initial_path.as_ref().and_then(|p| data_path(data, p)))
             .unwrap_or_else(|| initial_for(&state.shape));
         frames.push((state.path.clone(), value, None));
     }
@@ -10259,9 +10273,7 @@ pub mod kit {
     /// is the theme's answer, and deciding here would put styling in the
     /// lowering.
     fn width_wrap(node: &UiNode) -> Option<(&'static str, String)> {
-        let Some(t) = token_arg(node, "width") else {
-            return None;
-        };
+        let t = token_arg(node, "width")?;
         match t {
             "fill" => Some(("l0_wide(", ")".into())),
             // NOT a no-op, though it is the default for a text role: `l0_row`
@@ -10352,8 +10364,7 @@ pub mod kit {
             //
             // A text role that ASKED to fill is not intrinsic, so it keeps the
             // filling wrapper.
-            let asked_to_fill =
-                token_arg(node, "width") == Some("fill");
+            let asked_to_fill = token_arg(node, "width") == Some("fill");
             let intrinsic =
                 // A `.danger` chip is the exception: it SPANS the sheet, so a
                 // fit-width hit target is the one thing that can hide it. It emitted
@@ -10548,7 +10559,7 @@ pub mod kit {
                 // zoom pill has, so a chip the card put on the map reads over pale
                 // tiles instead of vanishing into them — and a card that docks
                 // nothing there must not get an empty box for it.
-                let has_side = node.children.iter().any(|c| docked(&c, "right"));
+                let has_side = node.children.iter().any(|c| docked(c, "right"));
                 let _ = write!(out, ", {}", u8::from(has_side));
                 out.push(')');
             }
@@ -10638,13 +10649,15 @@ pub mod kit {
                     // Both are red — what destructive looks like stays the
                     // theme's call.
                     if matches!(arg(node, "width"), Some(NodeValue::Token(t)) if t == "fit") {
-                        let _ =
-                            write!(out, "l0_chip_danger_row({})", makepad::expr_of(node, "text"));
+                        let _ = write!(
+                            out,
+                            "l0_chip_danger_row({})",
+                            makepad::expr_of(node, "text")
+                        );
                     } else {
                         let _ = write!(out, "l0_chip_danger({})", makepad::expr_of(node, "text"));
                     }
-                } else if matches!(arg(node, "tone"), Some(NodeValue::Token(t)) if t == "primary")
-                {
+                } else if matches!(arg(node, "tone"), Some(NodeValue::Token(t)) if t == "primary") {
                     // The same reasoning as `.danger`: a primary action is bigger
                     // type AND a rounder target AND a lit fill, and threading three
                     // presentation decisions through a flag reads worse than naming
@@ -10811,10 +10824,20 @@ mod guarded_fields_tests {
                     }\n\
                     view inner Col { when now.temp < 12 { Rule() } }\n";
         let got = super::guarded_source_fields(card);
-        assert!(got.contains(&("now".to_owned(), "precip".to_owned())), "{got:?}");
+        assert!(
+            got.contains(&("now".to_owned(), "precip".to_owned())),
+            "{got:?}"
+        );
         // Nested inside another guard's body, and inside a named view.
-        assert!(got.contains(&("now".to_owned(), "temp".to_owned())), "{got:?}");
+        assert!(
+            got.contains(&("now".to_owned(), "temp".to_owned())),
+            "{got:?}"
+        );
         // Deduped: `precip` is guarded twice.
-        assert_eq!(got.len(), 2, "state, $state and duplicates must not appear: {got:?}");
+        assert_eq!(
+            got.len(),
+            2,
+            "state, $state and duplicates must not appear: {got:?}"
+        );
     }
 }

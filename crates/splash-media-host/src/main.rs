@@ -79,17 +79,14 @@ fn run() -> Result<bool, String> {
     // turned into line-numbered feedback — the "check" half of generate→check→fix.
     // See docs/authoring-for-llms.md for the rules this enforces.
     if !preflight(&draft_src)? {
-        println!(
-            "\nGenerated source failed the syntax gate; nothing was planned or executed."
-        );
+        println!("\nGenerated source failed the syntax gate; nothing was planned or executed.");
         println!("Feed the diagnostics above back to the model, regenerate, and re-run.");
         return Ok(false);
     }
 
     // (2b) The untrusted plan is data until the host decides to run it.
-    let draft = WorkflowDraft::from_json(&draft_src).map_err(|error| {
-        format!("draft rejected as data (never executed): {error}")
-    })?;
+    let draft = WorkflowDraft::from_json(&draft_src)
+        .map_err(|error| format!("draft rejected as data (never executed): {error}"))?;
     let input = WorkflowData::from_input_json(&input_src).map_err(|error| error.to_string())?;
 
     // (1) The host's own reviewed capability catalog.
@@ -190,12 +187,14 @@ fn build_runtime(dir: PathBuf) -> Result<MobileWorkflowRuntime, String> {
     // A data-script that enriches a whole chart parses one JSON payload per
     // row; the default 200k instruction budget is spent after ~6 rows, so raise
     // it for chart-sized loops.
-    let mut limits = ExecutionLimits::default();
-    limits.instruction_limit = 8_000_000;
-    // The default script deadline assumes no I/O; a chart of sequential network
-    // calls needs a wall-clock budget that covers real request latency.
-    limits.soft_timeout = std::time::Duration::from_secs(90);
-    limits.hard_timeout = std::time::Duration::from_secs(120);
+    let limits = ExecutionLimits {
+        instruction_limit: 8_000_000,
+        // The default script deadline assumes no I/O; a chart of sequential
+        // network calls needs a wall-clock budget that covers real latency.
+        soft_timeout: std::time::Duration::from_secs(90),
+        hard_timeout: std::time::Duration::from_secs(120),
+        ..ExecutionLimits::default()
+    };
     let mut builder =
         MobileWorkflowBuilder::with_limits(limits, splash_capabilities::DEFAULT_MAX_PENDING_TOOLS)
             .map_err(|error| error.to_string())?;
@@ -237,8 +236,12 @@ fn build_runtime(dir: PathBuf) -> Result<MobileWorkflowRuntime, String> {
         // the movie logic lives in the card's data-script, not in Rust.
         let mut imdb = HttpOriginCatalog::default();
         imdb.insert(
-            HttpOrigin::https("imdb", HttpEndpointMethod::Get, "https://v3.sg.media-imdb.com")
-                .map_err(|error| error.to_string())?,
+            HttpOrigin::https(
+                "imdb",
+                HttpEndpointMethod::Get,
+                "https://v3.sg.media-imdb.com",
+            )
+            .map_err(|error| error.to_string())?,
         )
         .map_err(|error| error.to_string())?;
         let mut imdb_policy = ToolPolicy::json("net.imdb");
@@ -326,7 +329,8 @@ fn image_generate(
         .map_err(|_| ToolError::Denied("OPENAI_API_KEY not set for image.generate".to_owned()))?;
 
     std::fs::create_dir_all(dir).map_err(|error| ToolError::Failed(format!("mkdir: {error}")))?;
-    let body = json!({"model": "gpt-image-2", "prompt": prompt, "size": size, "quality": quality, "n": 1});
+    let body =
+        json!({"model": "gpt-image-2", "prompt": prompt, "size": size, "quality": quality, "n": 1});
     let req_path = dir.join("request.json");
     let resp_path = dir.join("response.json");
     std::fs::write(&req_path, body.to_string())
@@ -359,7 +363,9 @@ fn image_generate(
     let parsed: Value = serde_json::from_str(&text)
         .map_err(|error| ToolError::Failed(format!("parse response: {error}")))?;
     let b64 = parsed["data"][0]["b64_json"].as_str().ok_or_else(|| {
-        let api = parsed["error"]["message"].as_str().unwrap_or("no b64_json in response");
+        let api = parsed["error"]["message"]
+            .as_str()
+            .unwrap_or("no b64_json in response");
         ToolError::Failed(format!("image API: {api}"))
     })?;
     let png = b64_decode(b64).ok_or_else(|| ToolError::Failed("bad base64".to_owned()))?;
@@ -381,9 +387,9 @@ fn media_transcode(
     seq: &Seq,
     dir: &Path,
 ) -> Result<Value, ToolError> {
-    let src = request.input["src"]
-        .as_str()
-        .ok_or_else(|| ToolError::Denied("media.transcode requires a string src handle".to_owned()))?;
+    let src = request.input["src"].as_str().ok_or_else(|| {
+        ToolError::Denied("media.transcode requires a string src handle".to_owned())
+    })?;
     let vf = request.input["vf"]
         .as_str()
         .ok_or_else(|| ToolError::Denied("media.transcode requires a string vf".to_owned()))?;
@@ -442,10 +448,14 @@ fn build_policies(
 ) -> Result<Vec<WorkflowStepCapabilityPolicy>, String> {
     for (step, tool, _) in grants {
         if !plan.steps().iter().any(|candidate| &candidate.id == step) {
-            return Err(format!("grant references a step absent from the draft: {step}"));
+            return Err(format!(
+                "grant references a step absent from the draft: {step}"
+            ));
         }
         if !catalog.iter().any(|descriptor| &descriptor.name == tool) {
-            return Err(format!("grant names a capability absent from the catalog: {tool}"));
+            return Err(format!(
+                "grant names a capability absent from the catalog: {tool}"
+            ));
         }
     }
     Ok(plan
@@ -464,7 +474,10 @@ fn build_policies(
 }
 
 fn capability_names(catalog: &[ToolDescriptor]) -> Vec<String> {
-    catalog.iter().map(|descriptor| descriptor.name.clone()).collect()
+    catalog
+        .iter()
+        .map(|descriptor| descriptor.name.clone())
+        .collect()
 }
 
 fn parse_grant(value: &str) -> Result<(String, String, usize), String> {

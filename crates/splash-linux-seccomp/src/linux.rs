@@ -57,7 +57,7 @@ pub fn validate_filter(bytes: &[u8]) -> Result<ValidatedFilter, SeccompInstallEr
     }
 
     let mut instructions = Vec::with_capacity(instruction_count);
-    for instruction in bytes.chunks_exact(FILTER_INSTRUCTION_BYTES) {
+    for instruction in bytes.as_chunks::<FILTER_INSTRUCTION_BYTES>().0 {
         instructions.push(ptrace::sock_filter {
             code: u16::from_ne_bytes([instruction[0], instruction[1]]),
             jt: instruction[2],
