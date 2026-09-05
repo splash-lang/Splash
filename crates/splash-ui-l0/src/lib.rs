@@ -1516,15 +1516,13 @@ impl<'a> Parser<'a> {
                                     // Refusing is what keeps the two apart; dropping
                                     // the operator quietly is the one outcome neither
                                     // reading supports.
-                                    if self
-                                        .tokens
-                                        .get(at)
-                                        .is_some_and(|t| t.kind == Kind::Punct
+                                    if self.tokens.get(at).is_some_and(|t| {
+                                        t.kind == Kind::Punct
                                             && matches!(
                                                 t.text.as_str(),
                                                 "+" | "-" | "*" | "/" | "%"
-                                            ))
-                                    {
+                                            )
+                                    }) {
                                         let t = self.tokens[at].clone();
                                         self.sink.at(
                                             &t,
@@ -2226,9 +2224,7 @@ impl<'a> Parser<'a> {
                     None => self.sink.push(
                         0,
                         0,
-                        format!(
-                            "expected \":\" after argument name `{name}`, found end of source"
-                        ),
+                        format!("expected \":\" after argument name `{name}`, found end of source"),
                     ),
                 }
                 // Recover to the closing paren so one mistake yields one
@@ -2500,14 +2496,14 @@ fn expr_paths(operand: &Operand, out: &mut Vec<String>) {
 }
 
 fn data_path(data: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
-    let mut current = data.clone();
+    let mut current = data;
     for segment in path.split('.') {
         current = match segment.parse::<usize>() {
-            Ok(i) => current.get(i)?.clone(),
-            Err(_) => current.get(segment)?.clone(),
+            Ok(i) => current.get(i)?,
+            Err(_) => current.get(segment)?,
         };
     }
-    Some(current)
+    Some(current.clone())
 }
 
 fn scope_value(scope: &ValueScope, operand: &Operand) -> Option<serde_json::Value> {
@@ -3097,7 +3093,10 @@ pub mod catalog {
         // quotes, so a card asks for the fields it wants to show and never
         // learns that a store exists.
         ("sys.watchlist", &["ticker", "fields"]),
-        ("sys.indicator", &["countries", "indicator", "years", "fields"]),
+        (
+            "sys.indicator",
+            &["countries", "indicator", "years", "fields"],
+        ),
         ("sys.video", &["query", "count", "fields"]),
         ("sys.prefs", &["fields"]),
         ("sys.reading", &["fields"]),
@@ -3181,7 +3180,10 @@ pub mod catalog {
         // for "Stanford" renders five rows all reading "Stanford", which is what
         // Photon actually returns and is useless to choose between. The backend has
         // answered this field all along; the catalog simply never admitted it.
-        ("sys.search", &["id", "name", "label", "query", "lat", "lon", "distance"]),
+        (
+            "sys.search",
+            &["id", "name", "label", "query", "lat", "lon", "distance"],
+        ),
         ("sys.route", &["duration", "distance", "steps"]),
         ("sys.step", &["instruction", "remaining", "progress", "eta"]),
         (
@@ -3230,20 +3232,27 @@ pub mod catalog {
         // chart's to fetch; these are the numbers a card puts beside it.
         (
             "sys.indicator",
-            &["name", "latest", "first", "change", "min", "max", "year", "title"],
+            &[
+                "name", "latest", "first", "change", "min", "max", "year", "title",
+            ],
         ),
         // A YouTube search result. `embed` is a player url ready to hand to
         // sys.link — a card cannot build one, because L0 has no string
         // concatenation, and that is the point.
         (
             "sys.video",
-            &["id", "title", "channel", "length", "views", "age", "thumb", "embed"],
+            &[
+                "id", "title", "channel", "length", "views", "age", "thumb", "embed",
+            ],
         ),
         ("sys.prefs", &["units", "range", "home", "work", "mode"]),
         // The reading list: SAVED story ids, joined to the story each id names.
         // The id is the identity Algolia serves forever, so a bookmarked story
         // outlives the front page it was found on.
-        ("sys.reading", &["id", "title", "author", "points", "comments", "url"]),
+        (
+            "sys.reading",
+            &["id", "title", "author", "points", "comments", "url"],
+        ),
         // Followed TOPICS: the store holds a topic word ("ai", "nba"); the
         // top story beside it is searched fresh on every read, so a followed
         // topic never pins the story that was hot when it was followed.
@@ -5146,6 +5155,8 @@ pub struct RealizeLimits {
     pub max_nodes: usize,
     pub max_depth: usize,
     pub max_collection: usize,
+    /// Aggregate element visits and loop iterations, including false guards.
+    pub max_work: usize,
 }
 
 impl Default for RealizeLimits {
@@ -5154,6 +5165,7 @@ impl Default for RealizeLimits {
             max_nodes: 8_192,
             max_depth: 64,
             max_collection: 512,
+            max_work: 65_536,
         }
     }
 }
@@ -5251,6 +5263,7 @@ fn realize_inner(
 
     let mut ctx = Realizer {
         depth: 0,
+        work: 0,
         card: &card,
         limits,
         nodes: 0,
@@ -5396,29 +5409,30 @@ impl ValueScope<'_> {
         }
 
         let mut current = match self.frames.iter().rev().find(|(n, _, _)| n == root) {
-            Some((_, v, _)) => v.clone(),
-            None => self.data.get(root)?.clone(),
+            Some((_, v, _)) => v,
+            None => self.data.get(root)?,
         };
         for segment in segments {
             // `[inner]` — resolve the inner path, then index by its value.
             if let Some(inner) = segment.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
                 let key = self.lookup(inner)?;
                 current = match &key {
-                    serde_json::Value::String(k) => current.get(k.as_str())?.clone(),
-                    v => current.get(v.as_u64()? as usize)?.clone(),
+                    serde_json::Value::String(k) => current.get(k.as_str())?,
+                    v => current.get(v.as_u64()? as usize)?,
                 };
                 continue;
             }
             current = match segment.parse::<usize>() {
-                Ok(index) => current.get(index)?.clone(),
-                Err(_) => current.get(segment)?.clone(),
+                Ok(index) => current.get(index)?,
+                Err(_) => current.get(segment)?,
             };
         }
-        Some(current)
+        Some(current.clone())
     }
 }
 
 struct Realizer<'a> {
+    work: usize,
     card: &'a Card,
     limits: RealizeLimits,
     nodes: usize,
@@ -5439,6 +5453,15 @@ struct Realizer<'a> {
 }
 
 impl Realizer<'_> {
+    fn charge_work(&mut self) -> bool {
+        if self.work >= self.limits.max_work || self.nodes >= self.limits.max_nodes {
+            self.truncated = true;
+            return false;
+        }
+        self.work += 1;
+        true
+    }
+
     fn element(
         &mut self,
         element: &Element,
@@ -5446,7 +5469,7 @@ impl Realizer<'_> {
         key: &str,
         out: &mut Vec<UiNode>,
     ) {
-        if self.nodes >= self.limits.max_nodes || self.depth >= self.limits.max_depth {
+        if !self.charge_work() || self.depth >= self.limits.max_depth {
             self.truncated = true;
             return;
         }
@@ -5712,6 +5735,9 @@ impl Realizer<'_> {
         let mut seen_keys: Vec<String> = Vec::new();
 
         for (index, item) in items.iter().enumerate() {
+            if !self.charge_work() {
+                break;
+            }
             if index >= self.limits.max_collection {
                 self.truncated = true;
                 break;
@@ -5724,11 +5750,11 @@ impl Realizer<'_> {
                 .and_then(|k| {
                     let mut segments = k.split('.');
                     segments.next()?;
-                    let mut current = item.clone();
+                    let mut current = item;
                     for segment in segments {
-                        current = current.get(segment)?.clone();
+                        current = current.get(segment)?;
                     }
-                    Some(json_to_key(&current))
+                    Some(json_to_key(current))
                 })
                 .unwrap_or_else(|| index.to_string());
 
@@ -6392,7 +6418,8 @@ pub mod makepad {
     pub(super) fn map_vias(node: &UiNode) -> Option<String> {
         let mut pairs: Vec<String> = Vec::new();
         for slot in ["via", "via2"] {
-            let (Some(lat), Some(lon)) = (map_coord(node, slot, "lat"), map_coord(node, slot, "lon"))
+            let (Some(lat), Some(lon)) =
+                (map_coord(node, slot, "lat"), map_coord(node, slot, "lon"))
             else {
                 continue;
             };
@@ -7014,7 +7041,7 @@ pub mod makepad {
                 index.parse::<u32>().ok()?;
                 let key = match field {
                     f @ ("id" | "title" | "channel" | "length" | "views" | "age" | "thumb"
-                        | "embed") => f,
+                    | "embed") => f,
                     _ => return None,
                 };
                 let query = arg("query")?;
@@ -7034,7 +7061,7 @@ pub mod makepad {
                 index.parse::<u32>().ok()?;
                 let key = match field {
                     f @ ("name" | "latest" | "first" | "change" | "min" | "max" | "year"
-                        | "title") => f,
+                    | "title") => f,
                     _ => return None,
                 };
                 let countries = arg("countries")?;
@@ -8563,7 +8590,9 @@ fn dispatch_writes(
                     // carried it falls through instead of consuming the swipe.
                     return (Vec::new(), Vec::new());
                 }
-                let here = current.as_str().and_then(|c| rows.iter().position(|r| r == c));
+                let here = current
+                    .as_str()
+                    .and_then(|c| rows.iter().position(|r| r == c));
                 let at = match (here, forward) {
                     (Some(i), true) => (i + 1) % rows.len(),
                     (Some(i), false) => (i + rows.len() - 1) % rows.len(),
@@ -9527,9 +9556,7 @@ pub mod kit {
     /// is the theme's answer, and deciding here would put styling in the
     /// lowering.
     fn width_wrap(node: &UiNode) -> Option<(&'static str, String)> {
-        let Some(t) = token_arg(node, "width") else {
-            return None;
-        };
+        let t = token_arg(node, "width")?;
         match t {
             "fill" => Some(("l0_wide(", ")".into())),
             // NOT a no-op, though it is the default for a text role: `l0_row`
@@ -9620,8 +9647,7 @@ pub mod kit {
             //
             // A text role that ASKED to fill is not intrinsic, so it keeps the
             // filling wrapper.
-            let asked_to_fill =
-                token_arg(node, "width") == Some("fill");
+            let asked_to_fill = token_arg(node, "width") == Some("fill");
             let intrinsic =
                 // A `.danger` chip is the exception: it SPANS the sheet, so a
                 // fit-width hit target is the one thing that can hide it. It emitted
@@ -9816,7 +9842,7 @@ pub mod kit {
                 // zoom pill has, so a chip the card put on the map reads over pale
                 // tiles instead of vanishing into them — and a card that docks
                 // nothing there must not get an empty box for it.
-                let has_side = node.children.iter().any(|c| docked(&c, "right"));
+                let has_side = node.children.iter().any(|c| docked(c, "right"));
                 let _ = write!(out, ", {}", u8::from(has_side));
                 out.push(')');
             }
@@ -9906,13 +9932,15 @@ pub mod kit {
                     // Both are red — what destructive looks like stays the
                     // theme's call.
                     if matches!(arg(node, "width"), Some(NodeValue::Token(t)) if t == "fit") {
-                        let _ =
-                            write!(out, "l0_chip_danger_row({})", makepad::expr_of(node, "text"));
+                        let _ = write!(
+                            out,
+                            "l0_chip_danger_row({})",
+                            makepad::expr_of(node, "text")
+                        );
                     } else {
                         let _ = write!(out, "l0_chip_danger({})", makepad::expr_of(node, "text"));
                     }
-                } else if matches!(arg(node, "tone"), Some(NodeValue::Token(t)) if t == "primary")
-                {
+                } else if matches!(arg(node, "tone"), Some(NodeValue::Token(t)) if t == "primary") {
                     // The same reasoning as `.danger`: a primary action is bigger
                     // type AND a rounder target AND a lit fill, and threading three
                     // presentation decisions through a flag reads worse than naming
