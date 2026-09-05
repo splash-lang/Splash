@@ -145,7 +145,7 @@ mod linux {
         }
 
         let mut bytes = Vec::with_capacity(value.len() / 2);
-        for pair in value.as_bytes().chunks_exact(2) {
+        for pair in value.as_bytes().as_chunks::<2>().0 {
             let Some(high) = decode_lower_hex(pair[0]) else {
                 return Err(RunnerError::InvalidStagedSeccompFilterEncoding);
             };

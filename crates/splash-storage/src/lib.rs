@@ -1390,7 +1390,7 @@ fn decode_tag(value: &str) -> Option<[u8; AUTHENTICATED_RECORD_TAG_BYTES]> {
         return None;
     }
     let mut decoded = [0; AUTHENTICATED_RECORD_TAG_BYTES];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         decoded[index] = (hex_value(pair[0])? << 4) | hex_value(pair[1])?;
     }
     Some(decoded)
